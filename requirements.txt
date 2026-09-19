@@ -1,0 +1,18 @@
+# ledgerline — runtime dependencies
+# Install:  python -m pip install -r requirements.txt
+# (Windows: use `python`, not `python3` — see docs/incidents.md prevention rules)
+
+# --- Source generators (Session 1) ---
+pandas>=2.2
+confluent-kafka[avro,schemaregistry]>=2.5   # Kafka producer + Confluent Schema Registry
+boto3>=1.34                                  # S3 writes for nightly dimension dumps
+python-dotenv>=1.0                           # local config, never commit .env
+
+# --- Databricks (Sessions 2-12) ---
+databricks-sdk>=0.30                         # workspace/jobs API, Unity Catalog
+databricks-connect>=15.4                     # optional: run Spark locally against the cluster
+
+# --- dbt (Sessions 13-21) — two targets, both installed ---
+dbt-core>=1.8
+dbt-snowflake>=1.8                           # primary target
+dbt-databricks>=1.8                          # secondary target, survives trial expiry

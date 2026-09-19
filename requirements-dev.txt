@@ -1,0 +1,16 @@
+# ledgerline — dev/test dependencies
+# Install:  python -m pip install -r requirements-dev.txt
+#
+# Why this file exists: jobpulse incident [2026-04-19] — tests failed with
+# ModuleNotFoundError because deps were never pinned anywhere installable.
+# Prevention rule carried over: keep a dev requirements file so anyone can
+# install and run the suite before touching code.
+
+-r requirements.txt
+
+pytest>=8.0
+ruff>=0.6                # lint, matches .github/workflows/ci.yml
+pyspark>=3.5             # local Spark for unit-testing transforms without a cluster
+delta-spark>=3.2         # OSS Delta — same MERGE semantics as Databricks
+moto[s3]>=5.0            # mock S3 in tests, no real bucket calls
+freezegun>=1.5           # controlled clock for dim-dump / SCD2 tests

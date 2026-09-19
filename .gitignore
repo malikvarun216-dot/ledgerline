@@ -1,0 +1,59 @@
+# --- Claude Code project instructions (local only, never pushed) ---
+CLAUDE.md
+.claude/
+
+# --- Secrets / credentials ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.yml
+dbt_project/profiles.yml
+.databrickscfg
+.snowsql/
+
+# --- Data (Olist CSVs ~120MB, generated dumps, CDC output) ---
+# NB: "data/*" not "data/" — git will not descend into an excluded *directory*,
+# so a "!data/.gitkeep" negation is silently ignored under "data/".
+data/*
+!data/.gitkeep
+*.csv
+*.parquet
+*.avro
+
+# Small fixtures for unit tests are the exception — they must be committed
+# so the suite runs on a clean checkout.
+!tests/fixtures/
+!tests/fixtures/**
+
+# --- Spark / Delta local artifacts ---
+spark-warehouse/
+checkpoint/
+checkpoints/
+_delta_log/
+metastore_db/
+derby.log
+
+# --- dbt ---
+dbt_project/target/
+dbt_project/dbt_packages/
+dbt_project/logs/
+.user.yml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,42 @@
+[project]
+name = "ledgerline"
+version = "0.1.0"
+description = "Multi-source e-commerce data platform — idempotency and write patterns on Databricks + Snowflake"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["data", "dbt_project/target", "dbt_project/dbt_packages"]
+
+[tool.ruff.lint]
+# Explicit rather than inherited: CI lints with the same set, so a ruff upgrade
+# changing its defaults cannot silently turn the build red.
+select = [
+    "E",    # pycodestyle errors  (includes E402, which the sys.path shims noqa)
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "RUF",  # ruff-specific
+]
+# DTZ (naive-datetime checks) is deliberately NOT selected.
+#
+# Olist is timezone-naive end to end, and the project handles that in one place
+# on purpose:
+#   * stream generators serialize through _common.ASSUMED_TZ to UTC epoch micros,
+#     because Avro timestamp-micros is UTC-based;
+#   * dimension dumps stay naive, because dump_date and dim_updated_at are
+#     business dates written to CSV, and an offset there would be noise.
+# Turning DTZ on would flag the second case as a bug when it is the design.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on literal fixture values; magic numbers are the point.
+"tests/*" = ["B011"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::FutureWarning"]
