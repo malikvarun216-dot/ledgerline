@@ -1,0 +1,31 @@
+# Line endings are pinned, not left to core.autocrlf.
+#
+# Why this file exists: the [2026-09-19] blob-sink incident. `LocalBlobSink`
+# and `S3BlobSink` stored different bytes for identical input, on Windows
+# only, because text-mode writes translate newlines and byte-mode writes do
+# not. The generator side is fixed. This closes the same class on the git
+# side, where it would otherwise reappear on a fresh clone.
+#
+# This machine has core.autocrlf=true and, before this file, no .gitattributes
+# — so the working tree was genuinely mixed: generators/_common.py checked out
+# CRLF while docs/decisions.md was LF. Git normalized on commit, so the repo
+# stayed consistent and `git status` stayed clean, which is exactly why the
+# inconsistency was invisible.
+
+# Normalize every text file to LF in the repository AND in the working tree.
+# `eol=lf` is the half that core.autocrlf would otherwise override.
+* text=auto eol=lf
+
+# Data files are an interface, not source. A CSV or JSONL that Auto Loader,
+# Spark or a Delta reader consumes must have the same bytes on every machine,
+# so these are never eol-translated even if a future .gitattributes relaxes
+# the rule above.
+*.csv   text eol=lf
+*.jsonl text eol=lf
+*.json  text eol=lf
+*.avsc  text eol=lf
+
+# Genuinely binary — never touch.
+*.parquet binary
+*.zip     binary
+*.png     binary

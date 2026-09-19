@@ -411,7 +411,13 @@ def write_night(
     )
     stamped[DUMP_DATE] = dump_date.isoformat()
     ordered = stamped[[*spec.columns, UPDATED_AT, DUMP_DATE]]
-    sink.put_text(dump_key(spec.name, dump_date), ordered.to_csv(index=False))
+    # lineterminator is pinned, not left to pandas. `to_csv()` defaults to
+    # os.linesep even when returning a string, so the *bytes* of a dump would
+    # otherwise depend on which machine generated it — CRLF from Windows, LF
+    # from Linux CI, for identical input. Auto Loader reads these files in
+    # Session 6, and the project's byte-identical-replay claim has to hold
+    # across machines to mean anything.
+    sink.put_text(dump_key(spec.name, dump_date), ordered.to_csv(index=False, lineterminator="\n"))
 
     if previous is not None:
         stats["deleted_vs_previous"] = len(set(previous[spec.key]) - set(frame[spec.key]))

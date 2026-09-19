@@ -206,7 +206,10 @@ class JsonlSink:
     def send(self, topic: str, key: str, value: dict[str, Any]) -> None:
         if topic not in self._handles:
             path = self.out_dir / f"{topic}.jsonl"
-            self._handles[topic] = path.open("w", encoding="utf-8")
+            # newline="" disables the text-mode translation that would make a
+            # Windows-written JSONL file CRLF-terminated and a Linux-written
+            # one LF-terminated, from identical generator output.
+            self._handles[topic] = path.open("w", encoding="utf-8", newline="")
             self.counts[topic] = 0
         self._handles[topic].write(json.dumps({"key": key, "value": value}, default=str) + "\n")
         self.counts[topic] += 1
@@ -365,7 +368,15 @@ class BlobSink(Protocol):
 
 
 class LocalBlobSink:
-    """Writes dumps to a local directory, mirroring the S3 key layout exactly."""
+    """Writes dumps to a local directory, mirroring the S3 key layout exactly.
+
+    Reads and writes **bytes**, not text, and that is not a stylistic choice.
+    ``Path.write_text`` opens in text mode, which on Windows rewrites every
+    ``\\n`` to ``\\r\\n`` on the way out and every ``\\r\\n`` to ``\\n`` on the way
+    back. ``S3BlobSink`` encodes and decodes UTF-8 directly and performs no such
+    translation, so the two sinks stored *different bytes for the same input* —
+    on Windows only. See the [2026-09-19] incident.
+    """
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
@@ -374,10 +385,10 @@ class LocalBlobSink:
     def put_text(self, key: str, text: str) -> None:
         target = self.root / key
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        target.write_bytes(text.encode("utf-8"))
 
     def get_text(self, key: str) -> str:
-        return (self.root / key).read_text(encoding="utf-8")
+        return (self.root / key).read_bytes().decode("utf-8")
 
     def list_keys(self, prefix: str) -> list[str]:
         base = self.root

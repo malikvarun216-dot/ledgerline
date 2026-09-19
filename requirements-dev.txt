@@ -13,4 +13,7 @@ ruff>=0.6                # lint, matches .github/workflows/ci.yml
 pyspark>=3.5             # local Spark for unit-testing transforms without a cluster
 delta-spark>=3.2         # OSS Delta — same MERGE semantics as Databricks
 moto[s3]>=5.0            # mock S3 in tests, no real bucket calls
+fastavro>=1.9            # Avro round-trip against the real schemas, no broker needed
+                         # (also arrives via confluent-kafka[avro]; pinned here because
+                         #  tests/test_avro_contract.py imports it directly)
 freezegun>=1.5           # controlled clock for dim-dump / SCD2 tests
