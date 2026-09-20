@@ -378,3 +378,162 @@ category-driven selection. Recorded here rather than silently dropped.
   Bronze ingest - what `txnAppId`/`txnVersion` actually deduplicate, and why that
   is not dedup on `event_id`. Then the Avro declared-type question, which is the
   most self-contained of the four.
+
+---
+
+## Session 3 — AWS cost guards, a scoped credential, and the first CI run
+Date: 2026-09-20
+
+**In plain words:** this session started as a cost emergency in the *other*
+project and turned into the AWS half of Session 3. A `t3.micro` called
+`jobpulse-dashboard-dev` had been running continuously since 26 April — 146
+days, roughly **$70** — serving a dashboard nobody was looking at. It was
+created by hand, so it was not in jobpulse's terraform, so `terraform destroy`
+would never have touched it and nothing in that repo recorded its existence.
+It was 75% of the AWS bill.
+
+Two guards had already fired and neither worked. A `$1` zero-spend budget had
+been emailing since April; the alerts were read and consciously set aside during
+a busy stretch. A CloudWatch alarm watched the nightly pipeline fail five nights
+running and reached nobody who acted. The lesson is not "use a better address" —
+it is that **a guard requiring human attention is not a guard.** What was
+missing on that instance was structural: no auto-terminate, because it was
+launched outside the tooling that would have enforced one.
+
+Once the AWS account was open anyway, the Session 3 plan stopped being blocked:
+the account already existed, in `ap-south-1`. Budgets, a least-privilege
+credential and the landing bucket all landed. And the `reviews` "dataset drift"
+that had been carried as an open question since Session 1 turned out never to
+have existed.
+
+### Scope, as it actually ran
+Planned as cloud accounts + cost guards + first live Kafka produce. What
+happened: the jobpulse cost work came first at the human's request, which
+surfaced that **AWS already existed** — so the AWS half ran in full. Databricks
+and Confluent still require signups that are not Claude's to do, so the live
+produce moves to Session 4 again.
+
+The learning check ran **after** the build rather than before it, at the human's
+explicit request. Recorded in `learning.md` as an ordering deviation, not a skip
+— every carried item was asked and graded.
+
+### Built
+- **Two budgets.** `ledgerline-monthly` ($20; 50/80/100% actual plus 100%
+  forecasted) and `ledgerline-daily-spike` ($2/day actual). Both set
+  `IncludeCredit: false`.
+- **`ledgerline-dev` IAM user** plus customer-managed policy `ledgerline-dev-s3`
+  — two statements, because `s3:ListBucket` is bucket-level (bare ARN) and
+  `GetObject`/`PutObject`/`DeleteObject` are object-level (`/*`).
+- **`ledgerline-landing-dev-fffc8b65`** in `ap-south-1`: all four public-access
+  blocks on, SSE-S3 with bucket keys, and a lifecycle rule aborting incomplete
+  multipart uploads after 7 days (they bill as storage but never appear in
+  `ListObjects`).
+- **`.env`** (gitignored) holding the scoped key; the secret was written
+  straight to disk and never printed to the session transcript.
+- **`.env.example`** — region corrected `us-east-1` → `ap-south-1`, and
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` added with a warning that leaving
+  them blank silently falls back to this machine's **admin** key.
+- **`.github/workflows/deploy.yml`** was 0 bytes. GitHub rejects an empty
+  workflow with "No event triggers defined in `on`" and renders it as a failed
+  run, which would have made the first-ever CI result unreadable. Replaced with
+  a `workflow_dispatch`-only stub.
+- **`ci.yml` pinned** to `ubuntu-24.04`, `actions/checkout@v5`,
+  `actions/setup-python@v6`.
+
+### Verified
+- **First-ever CI run: SUCCESS, 34s**, `lint-and-test` green. This closes a
+  carry-forward open since Session 1 — `ci.yml` had never executed once.
+- **114 tests pass, `ruff check .` clean** locally, unchanged from Session 2.
+- **The scoped credential was proven, not asserted.** As `ledgerline-dev`:
+  PUT/LIST/DELETE succeed in its own bucket; `s3://jobpulse-bronze-dev/`,
+  `ec2:DescribeInstances`, `s3:ListAllMyBuckets` and `iam:ListUsers` are all
+  **denied**. There is no `Deny` statement in the policy — all four are blocked
+  by implicit deny.
+- **The two budgets disagree by design, and that is the proof.** Read at the
+  same instant, `My Zero-Spend Budget` reports **$0.00** and `ledgerline-monthly`
+  reports **$11.65**. The only difference is `IncludeCredit`.
+- **jobpulse spend fell from $0.51/day to $0.06/day**, visible in Cost Explorer
+  daily granularity: Sep 14–17 steady at $0.509, Sep 19 $0.060 after the
+  teardown. ~$186/yr → ~$22/yr.
+- **Nothing sensitive reached GitHub.** Audited *before* pushing and confirmed
+  after: 54 files on the remote, `.env` / `CLAUDE.md` / `profiles.yml` all
+  absent, zero raw Olist CSVs (~120MB stayed local), and **zero `AKIA` matches
+  across the entire commit history** — not just the working tree, because a
+  `.gitignore` added after a commit removes nothing.
+- **The `reviews` drift was disproved arithmetically**, not argued:
+  99,224 parsed records + 5,495 newlines embedded in quoted fields = 104,719
+  physical lines, to the row. 3,852 review comments contain a newline.
+
+### Built but NOT verified — carry to Session 4
+- **The CI pin itself is unverified.** `ubuntu-24.04`, `checkout@v5` and
+  `setup-python@v6` were written after the green run and have not been through
+  CI. If a major version does not resolve, the next push fails — deliberately
+  visible rather than silent.
+- **`KafkaAvroSink.send` has still never executed.** Third session running. No
+  Confluent account exists; `confluent_kafka` 2.6.1 ships no mock Schema
+  Registry, so this genuinely needs a live cluster.
+- **`S3BlobSink` has still not touched the real bucket.** The bucket and the
+  credential now exist and the credential is proven, but the generator has not
+  been pointed at it.
+- **`requirements-dev.txt` full-set resolution remains unknown.** CI installs an
+  explicit list, not that file, so a green CI says nothing about whether pyspark
+  + delta-spark + three dbt adapters coexist.
+
+### Not done
+- No Databricks workspace, no Confluent cluster, no topics. Signups are not
+  Claude's to perform.
+- **AWS Budget Actions** (auto-apply a deny policy at a threshold) considered
+  and deliberately deferred — it is the only guard here needing no human, but
+  blunt enough to kill a session mid-run. Recorded in `decisions.md`.
+- The `>=` floors vs `==` pins question in CI's install list was **raised and
+  deliberately left open**, not silently decided.
+
+### Incidents
+One, and it had been sitting in these docs for three sessions:
+**the `reviews` "dataset drift" was a line count, not a row count.** Session 1
+recorded 104,719 actual vs 99,224 expected and attributed it to Kaggle
+re-uploading the dataset. The contract was right all along. What made it durable
+is that the explanation was *plausible* — Kaggle really does re-upload datasets
+— so it was filed as an external fact rather than as a claim about our own
+measurement, and external facts do not get re-examined. Full entry with
+prevention rule in `incidents.md`, including the live consequence for Session 4:
+Spark and Auto Loader default to `multiLine=false` and will shred exactly these
+3,852 records **without raising an error**.
+
+### Decisions
+Five appended to `decisions.md` (now 34 entries): the `ap-south-1` region and
+why cross-region beats marginal storage price; the credit-excluding tiered
+budget and its correction about *why* the old alarm failed; the scoped IAM user
+including the honest note that a long-lived key is a knowing downgrade from
+Identity Center; the `reviews` contract standing at 99,224; and the CI runner
+pin.
+
+### Learning check
+Nine questions — five carried from Session 2, one from this session's bug, three
+SAA-relevant ones appended at the human's request and all tied to work actually
+done today. **1 correct, 4 partial, 3 missed, 1 deferred.**
+
+Session 2 was 1 partial and 3 missed, so four concepts moved up a grade.
+**Q4 (`seq` across restarts) was unattempted in Session 2 and fully correct
+here** — 1 of the 2 correct answers needed to retire it.
+
+One question was **deferred as the asker's error**: Q6 tested Auto Loader, which
+has not been built. Logged as D4 in the deferred bank, bound to the Bronze
+dimension-ingest session. Full results and corrections in `learning.md`.
+
+### Next
+**Session 4 — Confluent, Databricks, and the first live produce**
+- Confluent Cloud Basic cluster + Schema Registry; topics `orders` and
+  `inventory.cdc`. **First execution of `KafkaAvroSink.send`** — unrun since
+  Session 1 and now three sessions overdue.
+- Point `S3BlobSink` at `ledgerline-landing-dev-fffc8b65` using the scoped
+  credential rather than the ambient admin key. Should be uneventful; that is
+  the return on Session 2's offline work.
+- Databricks Premium workspace in **`ap-south-1`** — must match the bucket, or
+  every Bronze read pays cross-region egress. **10-minute auto-terminate on
+  every cluster**, which is the structural guard the $70 instance did not have.
+- Confirm the CI pin survives a push before building on it.
+- **Open the check with the carried weak spots**, highest first: exactly-once
+  Bronze and the batch-vs-row *unit* (missed twice now), then `IncludeCredit`,
+  then the S3 bucket-vs-object ARN. Re-ask only the FORWARD third of the Avro
+  question. `seq` across restarts needs one more correct answer to retire.

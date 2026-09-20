@@ -113,14 +113,15 @@ python -m pytest tests/ && python -m ruff check .
 
 ## Documentation
 
-`docs/` is meant to tell the whole story without the chat history:
+`docs/` is meant to tell the project's whole story without the chat
+history. A per-session recall log is kept alongside these but is personal
+working notes rather than project record, so it is not in the repo:
 
 | File | What it holds |
 |---|---|
 | [`decisions.md`](docs/decisions.md) | Every architectural choice **with its rejected alternative** |
 | [`incidents.md`](docs/incidents.md) | Every bug and deliberate breakage, each ending in a prevention rule |
 | [`progress.md`](docs/progress.md) | Session log — what was *verified*, not what was built |
-| [`learning.md`](docs/learning.md) | End-of-session recall checks and carried-forward weak spots |
 | [`runbook.md`](docs/runbook.md) | Procedures for known failure modes, including the cost emergency |
 
 Six of the incidents will be **deliberate** — patterns broken on purpose to
