@@ -84,4 +84,23 @@ append a correction below it instead.
 - Lesson: "the round trip works" is a weaker claim than it sounds. `write_text` then `read_text` is self-consistent even while the file on disk is malformed, because the same translation runs in both directions. The bug only surfaces when a *second* implementation reads the same bytes without that translation. A local twin that is never byte-compared against the real thing is a twin by assertion only.
 - Postscript: writing this entry reproduced the same bug one layer up — `Path.write_text` silently converted all of `incidents.md` from LF to CRLF, turning a 27-line append into a 165-line whole-file diff. Repaired by writing bytes. The prevention rule earns its keep on the first day it exists.
 
+## [2026-09-20] - the `reviews` "dataset drift" was a line count, not a row count
+
+**In plain words:** Session 1 recorded that the reviews table had 104,719 rows
+when the contract expected 99,224, and wrote it down as Kaggle having
+re-uploaded the dataset. It hadn't. The file has exactly 99,224 records. The
+extra 5,495 are **line breaks inside customer review comments** - someone typed
+a comment, pressed Enter a few times, and the CSV stores that newline inside
+the quoted field. Counting lines in the file counts those too. Counting records
+does not.
+
+- What happened: `docs/progress.md` (Session 1 addendum) records "`reviews` differs (104,719 actual vs 99,224 expected, +5,495) - Kaggle has re-uploaded this dataset before; recorded as drift, not a bug." It was carried forward as an open decision through Sessions 1, 2 and into 3.
+- What I thought was wrong: nothing - that was the problem. It was recorded as an *external* fact about the upstream dataset, so there was nothing in the repo to suspect.
+- Root cause: a physical **line** count was compared against a parsed **record** count. `review_comment_message` is free text, 3,852 rows contain at least one newline, and those newlines total exactly 5,495. `99,224 + 5,495 = 104,719`, to the row. A CSV record and a CSV line are only the same thing when no field contains a line break.
+- Fix: none needed in code - the contract's `expected_rows=99_224` was correct from the start and `generators/olist.py` validates through `pd.read_csv`, which parses quoting properly. The fix is to the *record*: drift is withdrawn, contract stands.
+- Why nothing caught it: the wrong number was plausible. Kaggle really does re-upload datasets, so "+5,495 rows" read as an upstream change rather than a measurement error - and an upstream fact gets recorded, not investigated. It also never contradicted anything: no test asserts on reviews, and `GENERATOR_TABLES` excludes it, so no code path ever disagreed with the claim.
+- Prevention rule: **never compare a count produced by one parser against a count produced by another.** `wc -l`, `Get-Content | Measure-Object -Line`, and a text-editor line number all count physical lines; `pd.read_csv`, Spark and every real CSV reader count records. Where a row count is the assertion, produce both numbers with the *same* reader. And before attributing a discrepancy to an upstream source, reproduce it locally - an external explanation is unfalsifiable from inside the repo, which is exactly why it survives.
+- Lesson: a plausible explanation is the most durable kind of wrong. "Kaggle re-uploaded it" cost nothing to believe and explained the number perfectly, so it sat in the docs for three sessions. The arithmetic that disproved it took one command.
+- Consequence for Session 4: Spark's CSV reader defaults to **`multiLine=false`**, and Auto Loader inherits that default. Pointed at a file like this it splits those 3,852 comments across row boundaries and produces corrupted records with **no error raised**. The dimension dumps have no free-text columns so they are safe today, but any reader that later touches a text-bearing CSV needs `multiLine=true` - and paying for it, because `multiLine=true` forces the file to be read by a single task and kills parallelism.
+
 <!-- Append further entries below this line. -->

@@ -1,0 +1,15 @@
+# Placeholder. Deployment (Databricks Asset Bundles -> workspace) lands in a
+# later session. It is declared with `workflow_dispatch` only, so it never
+# fires on push -- an EMPTY workflow file is rejected by GitHub Actions with
+# "No event triggers defined in `on`" and shows up as a failed run, which
+# would have made the first-ever CI result unreadable.
+name: deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deployment not implemented yet."
