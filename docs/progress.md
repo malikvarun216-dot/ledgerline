@@ -3,6 +3,15 @@
 Chronological session log. Updated at the end of every session with what was
 **actually verified** — not merely what was built.
 
+> **On references to `docs/learning.md` below.** That file is the
+> end-of-session recall check — answers, wrong answers and carried-forward weak
+> spots. It is **deliberately local-only and not in this repository**: it is one
+> person's working notes, not part of the project's record. Entries below cite
+> it because it exists on the author's machine and is written every session
+> exactly as the discipline requires. The citations are left as written rather
+> than scrubbed, per the append-only rule — a reader should be able to see that
+> the check happened, even though its contents are not published.
+
 ---
 
 ## Session 0 — Repo scaffold + docs discipline
@@ -537,3 +546,178 @@ dimension-ingest session. Full results and corrections in `learning.md`.
   Bronze and the batch-vs-row *unit* (missed twice now), then `IncludeCredit`,
   then the S3 bucket-vs-object ARN. Re-ask only the FORWARD third of the Avro
   question. `seq` across restarts needs one more correct answer to retire.
+
+## Session 4 — Confluent live, the first produce, and a credential that was never used
+Date: 2026-09-20
+
+**In plain words:** the Kafka code written in Session 1 ran for the first time
+today, and both topics now hold real events that were read back and counted.
+Getting there turned up two things that had been quietly wrong for sessions.
+The scoped AWS user created in Session 3 — tested, proved, documented — **was
+not being used by anything**, because no code ever read `.env`; the generator
+was authenticating as the machine's admin key. And the first produce hung in
+total silence for three minutes because the bootstrap address carried the REST
+port instead of the Kafka one, and nothing in the send path had a timeout.
+
+### Scope, as it actually ran
+Planned as Confluent + Databricks + the first live produce. Confluent and the
+produce landed in full. **Databricks was deliberately not created** — checking
+its setup first revealed a standing cost the project's guards do not cover
+(below). Snowflake stays untouched by design; its 30-day calendar should not
+start before Gold.
+
+The learning check moved to the end of the session as a **standing convention**
+from this session onward, at the human's instruction — recorded in `CLAUDE.md`
+and `learning.md` as an order change, not a reduction.
+
+### Built
+- **Confluent Cloud, live**: environment `default`, **Basic** cluster `cluster_0`
+  (`lkc-2255zy2`), AWS `ap-south-1`, topics `orders` and `inventory.cdc` at 3
+  partitions each. Stream Governance Essentials for Schema Registry.
+- **Service account `serviceacc_ledgerline`** (`sa-5w01oxq`) with two separately
+  scoped API keys — one for the cluster, one for Schema Registry — and role
+  grants `CloudClusterAdmin` on `cluster_0` plus `DeveloperWrite` on all schema
+  subjects.
+- **`load_local_env()`** in `generators/_common.py`, called from all three
+  generators' `main()` and deliberately not from library functions.
+- **`_s3_client_from_env()`** — `S3BlobSink` now builds its client from the
+  scoped `.env` credential and **raises** when it is absent, instead of letting
+  boto3 walk its default chain to an admin key. Region passed explicitly.
+- **`KafkaAvroSink.flush(timeout=60.0)`** — checks the undelivered count that
+  `Producer.flush(timeout)` returns and raises naming it, instead of blocking
+  forever.
+- Two new tests: the S3 admin-fallback refusal, and that an already-set
+  environment variable beats the `.env` file.
+
+### Verified
+- **`KafkaAvroSink.send` executed for the first time** — unrun since Session 1
+  and three sessions overdue. 50 orders produced **187 events** to `orders`.
+- **Read back independently, not trusted from the generator's own summary.** A
+  separate consumer deserialized through Schema Registry: **187 messages, 187
+  distinct `event_id`** — no duplicates. Breakdown `created 50 · approved 50 ·
+  shipped 41 · delivered 39 · canceled 7`, summing to 187 against 50 orders.
+  Partitions 50/62/75.
+- **The key is the entity, as decided in Session 1** — sample message key
+  `2e7a8482f6fb09756ca50c10d7bfc047` equals its own `order_id`. For
+  `inventory.cdc` the key is `product_id|seller_id`.
+- **Business time and processing time are visibly separate in real data**:
+  `event_ts` 2016-09-04T21:15:19Z against `produced_at` 2026-09-20T07:34:59Z.
+- **`inventory.cdc`: 93 events, 93 distinct `event_id`**, from 43 SKUs — 43
+  seeds (`I`), 49 sales and 1 restock (`U`). The cross-source invariant already
+  ties out at the generator: **units sold per `order_items` = 52, rebuilt from
+  CDC deltas = 52.**
+- **`S3BlobSink` touched the real bucket for the first time** — 3 nights of
+  dimension dumps to `s3://ledgerline-landing-dev-fffc8b65/ledgerline/dims/`,
+  **9 objects**, Hive-style `dump_date=YYYY-MM-DD` partitions, in 12 seconds.
+- **The identity was proved, not assumed.** `sts:GetCallerIdentity` through the
+  same constructor the generator uses returns
+  `arn:aws:iam::240939827246:user/ledgerline-dev`. This is the check Session 3
+  did not make — it verified the *policy* by acting as that user, which said
+  nothing about which credential the code picks up.
+- **The Session 1 dtype bug stays fixed against real S3 read-back**: `changed`
+  counts of 25 and 50, not 32,940.
+- **The Session 2 line-ending pin holds against real S3**: a dump read back from
+  the bucket contains **0 CRLF** bytes.
+- **116 tests pass, `ruff check .` clean**, after all changes.
+
+### Built but NOT verified — carry to Session 5
+- **The CI pin is still unverified.** `ubuntu-24.04`, `checkout@v5`,
+  `setup-python@v6` have still not been through a run; nothing has been pushed
+  since Session 3. Now four doc files and four source files are uncommitted too.
+- **`KafkaAvroSink.flush`'s new timeout path has never fired.** The success path
+  ran today; the raise did not. It is `# pragma: no cover` for the same reason
+  as before — it needs a broker that fails.
+- **Only 50 orders were produced, not 99,441.** The full fan-out (394,090 order
+  events, 158,396 CDC events) has not been run, so nothing is known about
+  throughput, partition skew at scale, or Basic's eCKU behaviour under load.
+- **`requirements-dev.txt` full-set resolution remains unknown** — unchanged
+  from Session 3.
+
+### Not done
+- **No Databricks workspace**, deliberately. See the decision entry: workspace
+  creation provisions a **NAT gateway** into the AWS account at ~$33–41/month
+  running 24/7, which is 1.5–2× the entire project budget for an idle resource
+  that **no auto-terminate covers**. Same structural shape as the $70 instance
+  from Session 3. Deferred until Bronze work actually needs it.
+- **No Snowflake account** — the 30-day calendar binds, and Gold is Session 13.
+- Per-topic ACLs. `CloudClusterAdmin` is a knowing downgrade, recorded as such.
+
+### Incidents
+Two, both found before they could do damage, and both about code that had never
+executed:
+1. **`.env` was never loaded, so the S3 sink ran as the admin key it was built
+   to avoid.** `python-dotenv` has been in `requirements.txt` since Session 0 and
+   `load_dotenv()` was never called. Invisible because Session 3 verified the
+   credential rather than the code path, and because all S3 tests inject a
+   `moto` client through `client=` — so the one line that chooses an identity is
+   the one line no test reached.
+2. **The first produce hung 180s in silence on port 443.** That is Confluent's
+   REST endpoint, so the client read `HTTP/1.1...` as a Kafka frame and reported
+   "Invalid response size 1213486160" — a number which *is* the ASCII bytes
+   `HTTP` — and advised raising `receive.message.max.bytes`. Confidently wrong
+   advice. Compounded by `flush()` having no timeout, which turned a
+   misconfiguration into a hang rather than an error.
+
+### Decisions
+Five appended to `decisions.md` (now 39 entries): `.env` loaded at entry points
+only and the S3 admin fallback deleted; Confluent tier fixed at creation, with
+the non-obvious consequence that Basic excludes topic-level RBAC;
+`CloudClusterAdmin` over per-topic ACLs as a knowing downgrade; and Databricks
+deferred on idle cost with AWS Marketplace billing decided in advance so the
+Session 3 budgets can actually see DBU spend.
+
+Five rows added to `CLAUDE.md`'s *Verified platform constraints* table.
+
+### Addendum — the topic now holds deliberate duplicates
+Written after the entry above. Verifying the `client.id` change meant producing
+5 more orders, which were **already among the first 50**. Because `event_id` is
+a hash of the natural key rather than a `uuid4`, those events are byte-identical
+replays, not new data.
+
+The topic now reads **203 messages, 187 distinct `event_id`** - exactly 16
+duplicates. That is the Session 1 deterministic-ID decision demonstrating itself
+on a live topic: a replay produces the *same* events, so a dedup at Silver has
+something real to remove and `exp_01` has something real to assert. With
+`uuid4` the count would read 203 distinct ids and the duplication would be
+undetectable from the data alone.
+
+Recorded rather than cleaned up. The duplicates are useful, and Session 5's
+full produce will replace this topic's contents anyway.
+
+### Learning check
+Six questions, one over the standing 3-5 at the human's explicit request to
+widen into the session's own tooling - Kafka commits, sync vs async. **1 correct,
+5 partial, none unattempted throughout.** Session 3 was 1 correct / 4 partial /
+3 missed, and Session 2 was 1 partial / 3 missed, so this is the first check
+where every question had a half that landed.
+
+The headline: **the exactly-once batch-vs-row unit was answered correctly.** It
+had been the top carried item for two sessions - partial in Session 2, an honest
+blank in Session 3. **`seq` monotonicity across restarts retires**, correct twice
+running.
+
+The two weakest answers were both about mechanism inside a client library rather
+than a data pattern: why a buffered `produce()` reports success while the real
+failure surfaces later in `flush()`, and what `enable.idempotence` actually
+scopes to. Both are new to the list because this is the first session that ran a
+real Kafka client.
+
+One thing recorded rather than glossed: **Q1 had to be reframed before asking**,
+because answering an earlier question about consumer groups and offsets had
+already supplied part of its ground. Full results, corrections and the
+carry-forward list in `learning.md`.
+
+### Next
+**Session 5 — Databricks workspace, and the full-scale produce**
+- Push first, and **confirm the CI pin survives** before building on it. Eight
+  files are uncommitted.
+- Create the Databricks workspace, **ap-south-1**, paying via **AWS
+  Marketplace** so DBUs land inside the existing budgets. Note the NAT gateway
+  starts billing the moment it exists — so create it in a session that uses it.
+- **Run the full produce**: 394,090 order events and 158,396 CDC events. Watch
+  partition skew and eCKU behaviour; Basic's first eCKU is free.
+- Tighten Confluent authorization from `CloudClusterAdmin` to per-topic
+  `WRITE`/`DESCRIBE` ACLs, and revoke keys deliberately — removing a role
+  binding does not delete keys created under it.
+- **D4 becomes answerable** once Auto Loader reads the S3 dumps — the 3,852
+  embedded-newline reviews and `multiLine=false`.

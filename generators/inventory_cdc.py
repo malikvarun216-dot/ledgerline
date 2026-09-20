@@ -74,6 +74,7 @@ from generators._common import (
     ReplayClock,
     deterministic_id,
     envelope,
+    load_local_env,
 )
 
 SOURCE = "inventory_cdc"
@@ -410,6 +411,7 @@ def emit(
 
 
 def main() -> int:
+    load_local_env()  # .env is not read automatically -- see _common.load_local_env
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--raw-dir", type=Path, default=olist.DEFAULT_RAW_DIR)
     parser.add_argument("--out-dir", type=Path, default=Path("data/streams"))
@@ -452,7 +454,9 @@ def main() -> int:
     if args.sink == "kafka":
         from generators._common import KafkaAvroSink
 
-        sink: MessageSink = KafkaAvroSink({args.topic: json.dumps(AVRO_SCHEMA)})
+        sink: MessageSink = KafkaAvroSink(
+            {args.topic: json.dumps(AVRO_SCHEMA)}, client_id=f"ledgerline-{SOURCE}"
+        )
     else:
         sink = JsonlSink(args.out_dir)
 

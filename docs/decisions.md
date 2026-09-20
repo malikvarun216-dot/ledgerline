@@ -224,3 +224,186 @@ below it instead.
 - Trade-off: the pin must now be bumped by hand, and a stale runner eventually loses support. That is the intended cost - a deliberate bump that fails loudly beats an automatic one that fails mysteriously.
 - Consistency note: this is the same principle already recorded in "CI installs an explicit dependency list, not requirements-dev.txt". The runner was the largest unpinned surface left in the pipeline, and it was unpinned only because nobody had looked - CI had never executed until this session.
 - **Open, deliberately not decided here:** the install list uses floors (`pandas>=2.2`, `ruff>=0.6`, ...), not pins (`==`). Floors take upstream fixes automatically at the cost of reproducibility; an upstream release can redden CI with no local change. `pyproject.toml`'s explicit ruff rule set covers changed *defaults* but not changed behaviour within a rule. Raised in Session 3, left to a session that has a reason to settle it.
+
+## The recall log and background sheet stay local, and history was rewritten to match (Session 3)
+- Chosen: `docs/learning.md` and `docs/background.md` are **gitignored**, and the repository's history was rewritten with `git filter-repo` so they appear in **no commit**, not merely in the latest one.
+- Rejected: **`git rm --cached` alone.** It stops future tracking but leaves both files fully readable inside every commit that already contained them — and both had already been pushed. This is the same property that makes a leaked secret unrecoverable by deletion: once pushed, it lives in the history until the history is rewritten.
+- Rejected: **leaving them published.** `learning.md` records recall-check answers, including wrong ones; `background.md` is prior work experience. Both are one person's working notes. The project's story is told by `decisions.md`, `incidents.md`, `progress.md` and `runbook.md`, and none of it depends on them.
+- Rejected: **deferring the rewrite until the repo goes public.** History rewriting gets monotonically more expensive with every commit. Six commits is the cheapest it will ever be, and a portfolio project is very likely to be made public eventually.
+- Trade-off: every commit SHA changed and a force push was required. Safe only because the repo is private with a single author and no other clones — this would be unacceptable on a shared branch. It also stripped the remote and the branch's upstream tracking, both re-established by hand.
+- Consequence, handled: `progress.md` cites `learning.md` eight times and is itself published, so those references now point at a file a reader cannot open. Rather than editing eight past entries — which rule 4 forbids — a preamble note in `progress.md` states that the recall log is deliberately local-only. The citations stand as written, so the record still shows the check happened.
+- Verified, not assumed: every commit on `origin/dev` was walked individually and neither file appears in any tree. Checking only the tip commit would have proven nothing, since a file can survive a rewrite by persisting in an intermediate commit.
+
+## `.env` is loaded at entry points only, and the S3 sink refuses the ambient fallback (Session 4)
+
+**In plain words:** the scoped AWS key from Session 3 was sitting in a file that
+no code opened, so the generator was quietly using the machine's admin key
+instead. Two changes: something now actually reads `.env`, and the S3 sink
+refuses to run at all if the scoped key is missing - rather than falling back to
+whatever credentials the machine happens to have.
+
+- Chosen: `load_local_env()` in `_common.py`, called from the `main()` of each
+  generator and nowhere else; `S3BlobSink` builds its client via
+  `_s3_client_from_env()`, which **raises** when `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` are absent and passes `AWS_REGION` explicitly.
+- Rejected: **calling `load_dotenv()` inside `_kafka_config_from_env()` and
+  `_s3_client_from_env()`**, which is where it first went. It is more convenient
+  - any caller gets config without thinking - and it is wrong. It was caught
+  immediately by `test_kafka_config_names_every_missing_variable`: the test
+  clears the four variables to assert the error names them all, and the function
+  loaded them straight back off disk, so the error path became unreachable.
+  A library function that reads an untracked file inherits the developer's
+  machine into every test result.
+- Rejected: **keeping boto3's default credential chain and relying on the
+  `.env.example` warning.** That warning has been accurate and prominent since
+  Session 3 and prevented nothing, because the failure is a success: the call
+  works, as the wrong identity. This is the same conclusion Session 3 reached
+  about budget alerts - a guard needing a human to read it is not a guard - and
+  the structural version is to delete the fallback.
+- Rejected: **`boto3.Session(profile_name="ledgerline-dev")`.** It would work,
+  but it moves the credential into `~/.aws/credentials`, which is the file we
+  are trying to stop reading, and it is invisible to CI and to Databricks later.
+- Trade-off: constructing `S3BlobSink` now requires credentials in the
+  environment, so an interactive experiment cannot lean on an ambient profile.
+  That is the intended cost. Tests are unaffected - they inject a `moto` client
+  through `client=`, which is also precisely why they never caught this.
+- Consequence recorded honestly: the S3 tests all bypass the credential branch
+  by design. Test coverage of `S3BlobSink` says nothing about which identity it
+  authenticates as, and the new
+  `test_s3_sink_refuses_to_fall_back_to_ambient_admin_credentials` covers only
+  the refusal, not the success path. Proving the *scoped* key is the one in use
+  needs a real call against the real bucket.
+
+## Confluent tier and cluster authorization are fixed at creation (Session 4)
+
+**In plain words:** Confluent's Basic cluster is free at rest; Standard is about
+$385/month. A cluster was first created as Standard by accident. You cannot
+change a cluster from Standard down to Basic - only up - so it had to be deleted
+and remade. And choosing Basic has a second, non-obvious effect: it changes how
+you grant permissions.
+
+- Chosen: **Basic**, AWS, `ap-south-1`, recreated after the first cluster came up
+  Standard. Topics `orders` and `inventory.cdc`, 3 partitions each, on
+  `cluster_0` (`lkc-2255zy2`).
+- Rejected: **keeping the Standard cluster.** ~$385/month against a ~$22 total
+  project budget - 17x the entire budget, monthly - buying a 99.99% SLA,
+  infinite storage and audit logs, none of which this project uses. Trial
+  credits would have hidden it for about a month and then stopped hiding it.
+- Verified constraint, not re-discoverable cheaply: Confluent documents only
+  *"you can upgrade from Basic to a Standard cluster at any time"*. There is no
+  downgrade. The tier is a creation-time commitment, so correcting it costs a
+  delete and a rebuild - trivial at 0 topics, not trivial later.
+- Second-order consequence, **not chosen deliberately and worth naming**:
+  Confluent's docs state that RBAC on *granular Kafka resources* - topics,
+  consumer groups, transactional IDs - is supported only on Standard,
+  Enterprise, Dedicated and Freight. **Basic is excluded.** So picking Basic for
+  cost moved topic-level authorization off RBAC and onto ACLs, a different
+  console surface entirely. A cost decision silently became a security-model
+  decision.
+
+## `CloudClusterAdmin` on one cluster, instead of per-topic ACLs (Session 4)
+
+**In plain words:** the generator's identity needs permission to write to two
+topics. The precise way to grant that on a Basic cluster is an ACL per topic.
+We instead granted a broader role covering the whole cluster, because it is one
+click in the console and ACLs are not. The credential can therefore delete the
+topics it writes to.
+
+- Chosen: service account `serviceacc_ledgerline` (`sa-5w01oxq`) holds
+  **`CloudClusterAdmin` on `cluster_0`** plus **`DeveloperWrite` on all schema
+  subjects** in environment `default`, with two separately scoped API keys - one
+  for the cluster, one for Schema Registry.
+- Rejected: **`WRITE` + `DESCRIBE` ACLs on `orders` and `inventory.cdc`.** This
+  is the correct least-privilege answer and remains the target. Deferred because
+  Basic pushes topic authorization onto ACLs, which are not reachable from the
+  role-assignment screens, and the session was already several console detours
+  deep. `DESCRIBE` matters as much as `WRITE`: a producer that can write but not
+  fetch topic metadata fails at startup and reads like a connection fault.
+- Rejected: **an API key on the human user account**, which is what the first
+  cluster key actually was before it was deleted. It inherits everything that
+  user can do across the whole organisation - the exact shape of the
+  ambient-admin-key problem Session 3 rejected on AWS.
+- Trade-off: `CloudClusterAdmin` can delete topics and create API keys on that
+  cluster. It is bounded to one cluster in one environment, not the org, but it
+  is broader than the generator needs, and it is a **knowing downgrade** recorded
+  as such - the same framing as Session 3's note that a long-lived IAM key is a
+  knowing downgrade from Identity Center.
+- Revisit: when the first produce is green. Note for that day, from Confluent's
+  docs - removing a role binding does **not** delete API keys created under it,
+  so the keys must be revoked deliberately rather than assumed gone.
+
+## Databricks is deferred out of Session 4 on idle cost, not on effort (Session 4)
+
+**In plain words:** creating a Databricks workspace on AWS also creates a NAT
+gateway in your own AWS account. That bills about $33-41 a month, around the
+clock, whether or not a cluster ever runs - one and a half to two times this
+project's entire budget, for something sitting idle. None of the cost guards
+this project has built would catch it.
+
+- Chosen: **do not create the Databricks workspace in Session 4.** Session 4's
+  actual deliverable is the first live Kafka produce and the first real S3 write;
+  Bronze ingest is Session 5/6.
+- Rejected: **creating it now because the signup was on the session plan.**
+  Databricks' automated workspace configuration provisions a cross-account IAM
+  role, an S3 bucket and a customer-managed VPC into your AWS account, and its
+  stated requirements include an available **NAT gateway**. AWS prices a NAT
+  gateway at $0.045/hour (their own worked example; `ap-south-1` is ~$0.056), so
+  ~$33-41/month at 730 hours - before a single DBU.
+- The reason this matters more than the number: **every cost guard in this
+  project targets cluster time.** 10-minute auto-terminate, single-node dev,
+  serverless preference, Jobs over All-Purpose, `Trigger.AvailableNow` - all of
+  them control compute that starts and stops. A NAT gateway is none of those. It
+  is the same structural shape as the `jobpulse-dashboard-dev` instance from
+  Session 3: a resource created outside the thing that enforces shutdown, which
+  is why it ran 146 days and cost ~$70.
+- Trade-off: Bronze work cannot start until the workspace exists, so a later
+  session carries the setup instead. Against that, a week of idle NAT for a
+  workspace nobody opens is ~$8-10 of a ~$22 budget spent on nothing.
+- Decided in advance for when it is created: **pay via the linked AWS Marketplace
+  account rather than a credit card.** Databricks supports either. Marketplace
+  routes DBU charges through the AWS bill, which means Session 3's
+  `ledgerline-monthly` ($20) and `ledgerline-daily-spike` ($2/day) budgets see
+  them. With a credit card those budgets only ever see EC2, and every DBU is
+  invisible to every guard already built.
+- Verified while checking this: Databricks **discontinued the Standard tier** for
+  new AWS customers and auto-upgraded remaining Standard workspaces to Premium on
+  2025-10-01. The AWS tier table now lists only Premium and Enterprise, so
+  "Premium" is the floor rather than an upgrade to choose. Also noted: the
+  published list price for Data Engineering DBUs currently reads $0.15/DBU and
+  Interactive $0.40/DBU, against the ~$0.22 and ~$0.55-0.65 recorded in
+  `CLAUDE.md`. Left as a flagged discrepancy rather than silently adopting the
+  friendlier number - rates vary by region and by serverless vs classic, and EC2
+  is billed separately by AWS either way.
+
+## Every Kafka client names itself; the default `client.id` is refused (Session 4)
+
+**In plain words:** Confluent's monitoring screens show which clients are
+connected to the cluster. All of ours showed up as the same word - `rdkafka` -
+because none of them said who they were. With two generators and a couple of
+debug scripts running, the Clients page read `rdkafka`, `rdkafka`, `rdkafka`,
+and there was no way to tell which was which.
+
+- Chosen: `KafkaAvroSink` sets `client.id`, passed by each generator as
+  `ledgerline-{SOURCE}` - so `ledgerline-order_events` and
+  `ledgerline-inventory_cdc`. When no id is passed it falls back to one derived
+  from the topic names, so the default can never be reached.
+- Rejected: **librdkafka's default**, which is the literal string `rdkafka`. It
+  costs nothing and works fine with exactly one client. Observed failing in
+  Session 4 with three: Confluent's Stream Lineage reported
+  `producer rdkafka (2)` and the cluster reported `Clients 3`, none of which
+  could be attributed to a source. At the full 394,090 + 158,396 events across
+  two topics, "which client is lagging" has to be answerable, and it was not.
+- Rejected: **setting it per-run with a timestamp or PID**, which would make
+  every execution unique. That is better for tracing one run and worse for
+  everything else - the Clients view becomes a list of dead one-offs, and you
+  cannot ask "how is the order generator behaving over time" because it is
+  never the same client twice.
+- Trade-off: two generators sharing a cluster now collide in the metrics if
+  they are ever run concurrently from two machines, since the id is per-source
+  rather than per-process. Accepted deliberately: aggregating by source is the
+  question actually worth asking here, and a per-process id can be added later
+  by suffixing without changing the scheme.
+- Guarded: `test_kafka_sink_never_uses_the_default_client_id` asserts the
+  producer config sets `client.id` and that the fallback contains no `rdkafka`.
+  It tests the *fallback*, because the generators pass an explicit id today and
+  the branch that could regress is the one where a caller forgets.

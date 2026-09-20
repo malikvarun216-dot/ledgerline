@@ -62,7 +62,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from generators import olist
-from generators._common import BlobSink, LocalBlobSink, deterministic_id
+from generators._common import BlobSink, LocalBlobSink, deterministic_id, load_local_env
 
 SOURCE = "dim_dumps"
 ROOT_PREFIX = "dims"
@@ -488,6 +488,7 @@ def run(
 
 
 def main() -> int:
+    load_local_env()  # .env is not read automatically -- see _common.load_local_env
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--raw-dir", type=Path, default=olist.DEFAULT_RAW_DIR)
     parser.add_argument("--out-dir", type=Path, default=Path("data/dumps"))

@@ -103,4 +103,129 @@ does not.
 - Lesson: a plausible explanation is the most durable kind of wrong. "Kaggle re-uploaded it" cost nothing to believe and explained the number perfectly, so it sat in the docs for three sessions. The arithmetic that disproved it took one command.
 - Consequence for Session 4: Spark's CSV reader defaults to **`multiLine=false`**, and Auto Loader inherits that default. Pointed at a file like this it splits those 3,852 comments across row boundaries and produces corrupted records with **no error raised**. The dimension dumps have no free-text columns so they are safe today, but any reader that later touches a text-bearing CSV needs `multiLine=true` - and paying for it, because `multiLine=true` forces the file to be read by a single task and kills parallelism.
 
+## [2026-09-20] - `.env` was never loaded, so the S3 sink ran as the admin key it was built to avoid
+
+**In plain words:** Session 3 created a locked-down AWS user, `ledgerline-dev`,
+that can touch exactly one bucket and nothing else. It was tested and proved:
+denied on EC2, denied on other buckets, denied on IAM. Its keys went into
+`.env`. `docs/decisions.md` then recorded that the generator "authenticates as a
+scoped IAM user, not the machine's admin key."
+
+**No code ever read `.env`.** `python-dotenv` has been in `requirements.txt`
+since Session 0 and every docstring says config "comes from `.env`", but
+`load_dotenv()` was never called anywhere. So the scoped key sat in a file
+nothing opened, and `boto3.client("s3")` - called with no arguments - walked its
+default credential chain to `~/.aws/credentials`, which on this machine is
+`varun-admin`: a never-expiring plaintext admin key.
+
+The generator would have worked perfectly. As the wrong identity.
+
+- What happened: found while preparing the first live Kafka produce, before any
+  cloud call was made. `grep -rn "dotenv" generators/ scripts/` returned exactly
+  one hit - a comment in `requirements.txt`. Nothing in `generators/`,
+  `scripts/` or `tests/` calls `load_dotenv()`.
+- What I thought was wrong: nothing yet - this was found by reading the code
+  path ahead of running it, not by a failure. The Kafka half would have failed
+  loudly (`RuntimeError: Kafka sink needs KAFKA_BOOTSTRAP_SERVERS...` against a
+  fully populated `.env`), and chasing *that* is what surfaced the S3 half.
+- Root cause: two separate assumptions that never met. `_kafka_config_from_env`
+  reads `os.environ` and assumes something put `.env` there. `S3BlobSink` called
+  `boto3.client("s3")` with no credentials and inherited boto3's fallback chain.
+  Neither is wrong on its own; together they mean a correct `.env` changes
+  nothing about which identity actually authenticates.
+- Fix: `load_local_env()` in `generators/_common.py`, called from the `main()`
+  of all three generators - **not** from the library functions, for a reason
+  recorded below. Separately, `S3BlobSink` now builds its client through
+  `_s3_client_from_env()`, which **raises** when `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` are absent rather than letting boto3 find something
+  else. Region is passed explicitly too, defaulting to `ap-south-1`.
+- Why nothing caught it: **Session 3 verified the credential, not the code path
+  that uses it.** Every check ran the AWS CLI *as* `ledgerline-dev` and
+  confirmed the policy denied what it should deny. All of that was true and none
+  of it touched `S3BlobSink`. The 27 S3 tests inject a `moto` client through the
+  `client=` parameter, so they never execute the credential branch at all - the
+  one line that decides identity is the one line no test reached.
+- The second, quieter defect: the first fix called `load_local_env()` *inside*
+  `_kafka_config_from_env()`. That broke
+  `test_kafka_config_names_every_missing_variable`, which deletes the four
+  variables and asserts the error names all four - the function silently
+  reloaded them from the real `.env` on disk and raised nothing. A library
+  function that reads an untracked file makes its own error paths unreachable
+  whenever the developer happens to have that file. Moved to `main()` only.
+- Prevention rule: **a claim about *which identity* runs a call must be tested
+  through the same constructor production uses.** Injecting a fake client is the
+  right way to test behaviour and the wrong way to test authentication - the
+  injection skips the decision. Where a default exists that is broader than the
+  intended credential, delete the default: make the absent case raise, so the
+  unsafe path cannot be taken silently. And **never call a config loader from a
+  library function** - only from an entry point - or tests inherit the
+  developer's machine.
+- Lesson: `.env.example` carried the warning *"Leaving these blank falls back to
+  ~/.aws/credentials, which on this machine is an ADMIN key"* since Session 3.
+  It was accurate, prominent, and had no effect, because prose does not execute.
+  The same sentence as a `raise` would have failed the first run. This is the
+  Session 3 lesson at a different layer: a guard that depends on someone reading
+  it is not a guard.
+
+## [2026-09-20] - the first live produce hung for 180 seconds in silence; the port was the REST endpoint
+
+**In plain words:** the very first attempt to send events to Kafka produced no
+output at all and was killed after three minutes. The cause was one wrong
+number: the bootstrap address ended in `:443` instead of `:9092`. Port 443 is
+Confluent's **REST** endpoint - it speaks HTTP, not the Kafka wire protocol - so
+the client sent a Kafka request and got an HTTP response back. It then read the
+first four bytes of `HTTP/1.1 200 ...` as a message-length field, got
+1,213,486,160, and complained that the message was too big.
+
+That number **is** the four ASCII characters `H`, `T`, `T`, `P`. The error text
+advised raising `receive.message.max.bytes`, which would have changed nothing
+and sent the next hour in exactly the wrong direction.
+
+- What happened: `python generators/order_events.py --sink kafka --limit 50`
+  printed nothing for 180s and was terminated. No error, no partial output, no
+  indication of which of three stages had stalled.
+- What I thought was wrong: credentials or the brand-new grants - the service
+  account had been given `CloudClusterAdmin` minutes earlier, so a permissions
+  problem was the obvious suspect.
+- Root cause: two independent problems, and the first one hid the second.
+  1. `KAFKA_BOOTSTRAP_SERVERS` was `...confluent.cloud:443`. The cluster page
+     shows a **REST endpoint** and a **Bootstrap server** one above the other,
+     and both begin `lkc-2255zy2.ap-south-1.aws.pub...`, so they are easy to
+     confuse when the visible part is identical. The broker is on **9092**.
+  2. `KafkaAvroSink.flush()` called `Producer.flush()` with **no timeout**.
+     librdkafka retries a transport failure indefinitely, which is right for a
+     transient blip and useless for a misconfiguration - neither one ever
+     raises. So the wrong port did not produce an error; it produced silence.
+- How it was actually found: by probing the two endpoints separately rather than
+  re-running the generator. A TLS handshake to the bootstrap host succeeded in
+  0.22s and an authenticated `GET /subjects` returned `200 ["orders-value"]`.
+  That second result was the real clue - the subject already existed, so the
+  failed run had got as far as registering a schema and died *after* it.
+  `Producer.list_topics(timeout=20)` then surfaced the actual librdkafka error,
+  because unlike `flush()` it takes a timeout and raises.
+- Fix: `:443` -> `:9092` in `.env`. Separately, `KafkaAvroSink.flush()` now takes
+  a `timeout` (default 60s), checks the count of undelivered messages that
+  `Producer.flush(timeout)` returns, and raises naming that count - and naming
+  the port confusion, since it is the likeliest cause.
+- Why nothing caught it: nothing could. `KafkaAvroSink.send` and `flush` are
+  both marked `# pragma: no cover - needs a broker` and had never executed in
+  three sessions. Session 2 deliberately verified the *schemas* offline with
+  `fastavro` because `confluent_kafka` ships no mock Schema Registry, and that
+  was the right call - it found a real bug. But it could not test transport, and
+  transport is where this lived. The 116-test suite is silent on this code by
+  construction, not by oversight.
+- Prevention rule: **every blocking cloud call gets an explicit timeout, and the
+  error must name the count or the endpoint.** A library that retries forever
+  converts a configuration mistake into a hang, and a hang carries no
+  information - it is the most expensive failure mode per byte of diagnostic.
+  When a run produces no output, probe each hop independently with a short
+  timeout rather than re-running the whole thing with a longer one.
+- Lesson: **an error message can be confidently wrong.** "Invalid response size
+  1213486160 - increase receive.message.max.bytes" is generated by code that has
+  already assumed it is talking to a broker, so it can only describe the problem
+  in broker terms. Decoding the number to `HTTP` took one line and identified
+  the fault exactly; following the message's advice would have led nowhere. When
+  a suggested fix looks disproportionate to the symptom, check whether the
+  component reporting it is entitled to an opinion.
+
 <!-- Append further entries below this line. -->

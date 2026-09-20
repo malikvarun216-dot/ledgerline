@@ -44,6 +44,41 @@ _NULL_SENTINEL = "\x00"
 
 
 # --------------------------------------------------------------------------
+# Local configuration
+# --------------------------------------------------------------------------
+
+_env_loaded = False
+
+
+def load_local_env(path: str | Path = ".env") -> bool:
+    """Load ``.env`` into ``os.environ``. Call once, from a CLI entry point.
+
+    Session 4 found this missing. ``requirements.txt`` has carried
+    ``python-dotenv`` since Session 0 and every docstring here says config
+    "comes from ``.env``", but **nothing ever read the file.** Two different
+    failures came out of that, and only one of them was loud:
+
+    * the Kafka sink raised "needs KAFKA_BOOTSTRAP_SERVERS" against a fully
+      populated ``.env`` — annoying, but it tells you immediately;
+    * ``boto3.client("s3")`` found no credentials in the environment and fell
+      through its default chain to ``~/.aws/credentials``, which on this
+      machine is an **admin** key. It worked perfectly, as the wrong identity.
+
+    Existing environment variables win (``override=False``): a value exported
+    in the shell, or set by a test, must beat the file on disk.
+    """
+    global _env_loaded
+    if _env_loaded:
+        return True
+    try:
+        from dotenv import load_dotenv
+    except ImportError:  # pragma: no cover - dotenv is in requirements.txt
+        return False
+    _env_loaded = load_dotenv(path, override=False)
+    return _env_loaded
+
+
+# --------------------------------------------------------------------------
 # Deterministic identity
 # --------------------------------------------------------------------------
 
@@ -259,7 +294,12 @@ class KafkaAvroSink:
         SCHEMA_REGISTRY_URL, SCHEMA_REGISTRY_API_KEY, SCHEMA_REGISTRY_API_SECRET
     """
 
-    def __init__(self, schemas: dict[str, str], config: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        schemas: dict[str, str],
+        config: dict[str, str] | None = None,
+        client_id: str | None = None,
+    ) -> None:
         from confluent_kafka import Producer
         from confluent_kafka.schema_registry import SchemaRegistryClient
         from confluent_kafka.schema_registry.avro import AvroSerializer
@@ -272,6 +312,13 @@ class KafkaAvroSink:
                 "basic.auth.user.info": cfg["schema.registry.basic.auth.user.info"],
             }
         )
+        # Name the client. librdkafka defaults client.id to "rdkafka", so every
+        # producer this project runs appears under one indistinguishable label
+        # in Confluent's Clients and Stream Lineage views — observed in Session
+        # 4 as "producer rdkafka (2)", with no way to tell which generator, or a
+        # debug script, was which. Falls back to the topic names so the id is
+        # never the default even when a caller forgets to pass one.
+        self.client_id = client_id or f"ledgerline-{'-'.join(sorted(schemas))}"
         self._producer = Producer(
             {
                 "bootstrap.servers": cfg["bootstrap.servers"],
@@ -279,6 +326,7 @@ class KafkaAvroSink:
                 "sasl.mechanisms": "PLAIN",
                 "sasl.username": cfg["sasl.username"],
                 "sasl.password": cfg["sasl.password"],
+                "client.id": self.client_id,
                 # Idempotent producer: dedupes broker-side retries so a network
                 # blip cannot duplicate a record in the topic. Cheap, and it
                 # keeps "exactly once" honest on the produce side too.
@@ -313,8 +361,27 @@ class KafkaAvroSink:
         self._producer.poll(0)
         self.counts[topic] = self.counts.get(topic, 0) + 1
 
-    def flush(self) -> None:  # pragma: no cover - needs a broker
-        self._producer.flush()
+    def flush(self, timeout: float = 60.0) -> None:  # pragma: no cover - needs a broker
+        """Wait for delivery, but give up rather than block forever.
+
+        Session 4: a bare ``flush()`` has no timeout, and librdkafka retries a
+        transport failure indefinitely. Pointed at the wrong port, the first
+        live produce sat in silence for 180 seconds and was killed — no error,
+        no partial output, nothing naming the problem. The retry loop is correct
+        behaviour for a transient blip and useless for a misconfiguration,
+        because neither one ever raises.
+
+        ``Producer.flush(timeout)`` returns the number of messages still
+        undelivered, so a stall becomes a message that says how many.
+        """
+        remaining = self._producer.flush(timeout)
+        if remaining:
+            raise RuntimeError(
+                f"{remaining} message(s) still undelivered after {timeout}s. "
+                "Usually the broker is unreachable or the credential is wrong — "
+                "check KAFKA_BOOTSTRAP_SERVERS uses the Kafka port (9092), "
+                "not the REST endpoint (443)."
+            )
         if self._errors:
             raise RuntimeError(f"{len(self._errors)} delivery failures; first: {self._errors[0]}")
 
@@ -323,6 +390,11 @@ class KafkaAvroSink:
 
 
 def _kafka_config_from_env() -> dict[str, str]:
+    # Deliberately does NOT call load_local_env(). A library function that reads
+    # .env off disk makes its own behaviour depend on an untracked file: a test
+    # that clears these variables would silently get them back, and the error
+    # path below would stop being reachable. main() loads the file; this reads
+    # only the environment it is handed.
     required = {
         "bootstrap.servers": "KAFKA_BOOTSTRAP_SERVERS",
         "sasl.username": "KAFKA_API_KEY",
@@ -403,11 +475,9 @@ class S3BlobSink:
     """The same layout in S3. Auto Loader reads this prefix in Session 6."""
 
     def __init__(self, bucket: str, prefix: str = "", client: Any = None) -> None:
-        import boto3
-
         self.bucket = bucket
         self.prefix = prefix.rstrip("/")
-        self._s3 = client or boto3.client("s3")
+        self._s3 = client if client is not None else _s3_client_from_env()
 
     def _full(self, key: str) -> str:
         return f"{self.prefix}/{key}" if self.prefix else key
@@ -427,6 +497,38 @@ class S3BlobSink:
             for obj in page.get("Contents", []):
                 found.append(obj["Key"][strip:])
         return sorted(found)
+
+
+def _s3_client_from_env() -> Any:
+    """Build an S3 client from explicit ``.env`` credentials, or refuse.
+
+    ``boto3.client("s3")`` with no arguments is not neutral — it walks a
+    credential chain that ends at ``~/.aws/credentials``, which on this machine
+    is a never-expiring **admin** key. So a blank or unloaded ``.env`` does not
+    fail; it silently runs the generator as an account administrator, which is
+    exactly what Session 3 created ``ledgerline-dev`` to avoid.
+
+    ``.env.example`` warned about this in prose. A warning that the code does
+    not enforce is a comment, so this raises instead: no scoped credential, no
+    client. Tests inject their own client and never reach here.
+    """
+    import boto3
+
+    # Same reasoning as _kafka_config_from_env: no load_local_env() here.
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not access_key or not secret_key:
+        raise RuntimeError(
+            "S3BlobSink needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env "
+            "(the scoped ledgerline-dev credential). Refusing to fall back to the "
+            "ambient ~/.aws/credentials profile, which is an admin key."
+        )
+    return boto3.client(
+        "s3",
+        region_name=os.environ.get("AWS_REGION", "ap-south-1"),
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    )
 
 
 def chunked(items: Iterable[Any], size: int) -> Iterable[list[Any]]:
