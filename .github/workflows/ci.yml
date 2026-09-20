@@ -14,13 +14,18 @@ concurrency:
 
 jobs:
   lint-and-test:
-    runs-on: ubuntu-latest
+    # PINNED, not `ubuntu-latest`. GitHub migrates that label to Ubuntu 26 on
+    # 2026-10-19, which would swap the OS, system libs and the toolchain that
+    # pandas/pyarrow wheels resolve against -- on GitHub's schedule, mid-session.
+    # Same reasoning as pinning the dependency list: the environment must not
+    # move on its own. Bump this deliberately, and read the failure if it breaks.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
