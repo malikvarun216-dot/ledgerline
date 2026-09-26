@@ -25,6 +25,29 @@ below it instead.
 - Trade-off: real money (~$22) and **forgotten-cluster risk** — a single node left running a week ≈ $120, six times the entire project budget. Mitigated by mandatory 10-minute auto-terminate, single-node dev, serverless preference, and budget alarms configured in Session 2 *before* any compute runs.
 - Second-order gain: cluster configuration, instance-type selection, autoscaling, Photon, and Jobs-vs-All-Purpose cost decisions become available. Free Edition's serverless-only model hides all of that, and warehouse/cluster sizing is common interview ground.
 
+### Correction (2026-09-26, Session 6) — both "verified blockers" were disproved by running code
+
+The entry above rejected Free Edition on "two verified blockers". **Session 6
+ran into both and neither held:**
+
+1. *"An external Kafka broker cannot be reached."* A Free Edition serverless
+   notebook read all **394,090** records of `orders` from Confluent Cloud,
+   without identity verification.
+2. *"Custom external locations are unsupported (default storage only)."* A
+   Unity Catalog storage credential and a read-only external location on
+   `s3://ledgerline-landing-dev-fffc8b65/ledgerline/` were created, and a
+   notebook read **8,395** customer rows through them.
+
+Which of two things happened cannot be told apart from here: either the
+Session 0 research conflated "custom **workspace** storage locations" (still
+listed as unsupported) with external locations and read "restricted to trusted
+domains" as "cannot reach Kafka", or Free Edition changed between then and now.
+What can be said: the word **"verified" was attached to documentation reading,
+not to a test** — the same gap the Session 6 Free Edition entry closes by
+reading data first. The project now runs on Free Edition; the second-order
+loss this entry names (clusters, instance types, Jobs vs All-Purpose) is real
+and is recorded there.
+
 ## Platform split — Databricks owns Bronze+Silver, Snowflake owns Gold (Session 0)
 - Chosen: two platform-native halves. Databricks for ingest and reconciliation (Unity Catalog, Delta MERGE, Structured Streaming, DLT, Delta ops); Snowflake for the warehouse layer (dbt, Streams & Tasks, Dynamic Tables, zero-copy clone, query profile).
 - Rejected: **single-platform (Databricks only)** — simpler and cheaper, and every pattern including `WHEN NOT MATCHED BY SOURCE` works on Delta. But it forfeits the Snowflake cost-optimization surface (micro-partition pruning, clustering, warehouse sizing), which is a distinct skill and half the stated goal.
@@ -987,4 +1010,30 @@ partitioned, and every column stays text exactly as the file had it.
   only because **one night = one file = one batch**. If a night ever arrived as
   several files split across batches, the later batch would replace the
   earlier one's rows. The replace unit must equal the arrival unit.
+
+## Databricks runs notebooks from a Git folder, not from hand-imported copies (Session 6)
+
+**In plain words:** the Databricks workspace now holds a clone of the GitHub
+repo, and notebooks run from there. A fix goes laptop → `git push` → **Pull**
+in Databricks, so the code that runs is always a commit in git — not a file
+someone imported by hand and then forgot to re-import.
+
+- Chosen: **Databricks Git folder** on `ledgerline`, branch `dev` (the repo's
+  default), full checkout. Authenticated with a GitHub fine-grained token
+  scoped to **this one repo, Contents: Read-only**, stored in Databricks
+  (Linked accounts). Expires 2026-12-25; Pull fails after that until renewed.
+- Why now: the first Bronze fix had to be re-imported by hand to reach the
+  workspace, which is exactly how the running copy drifts from the reviewed
+  one. It had already happened once within an hour.
+- Rejected: **manual import per change.** Zero setup, and a guaranteed drift.
+- Deferred, not rejected: **Asset Bundles deployed from GitHub Actions on
+  push** — fully automatic, and it also defines scheduled jobs. Already in the
+  plan; needs a workspace token in GitHub secrets, and whether Free Edition
+  permits that is unverified.
+- Rejected: **sparse checkout** (only `databricks/`). Built for large repos;
+  this one is ~55 files because raw data is gitignored, and later notebooks
+  may import shared code from outside `databricks/`.
+- Rule that goes with it: **code changes are never committed from inside
+  Databricks.** The token is read-only, so it cannot push anyway — the
+  workspace is a consumer of git, not a second place to author code.
 

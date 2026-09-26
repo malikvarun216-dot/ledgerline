@@ -1084,3 +1084,148 @@ something else — not create it and leave it idle.
   Bronze should find the incident entry, not a mystery.
 - **`requirements-dev.txt` full-set resolution** — unknown since Session 3.
 - **ci #3** stays unconfirmed-cancelled. Only reopen it if evidence appears.
+
+---
+
+## Session 6 — Databricks lands on Free Edition, and the first Bronze tables
+Date: 2026-09-26
+
+**In plain words:** the plan was a paid Databricks workspace inside the AWS
+account. Two walls stood in the way: the AWS account was on a Free plan that
+would have closed it on Oct 17, and — once upgraded — AWS Marketplace refused
+the card because the account is billed by AWS's Indian entity. So the project
+tested Databricks' free tier instead, proved it can read both the S3 bucket
+and the Kafka cluster, and moved there. **$0 for Databricks, no NAT gateway.**
+Then the first Bronze tables were built — the three nightly dimension dumps —
+and proven safe to re-load: forcing a full re-read of all 9 files left every
+count unchanged.
+
+### Scope, as it actually ran
+Planned: create a paid Databricks workspace (`ap-south-1`, via Marketplace),
+Bronze dimension ingest, Bronze order-event ingest. Actual: most of the session
+went to getting a Databricks that could reach the data at all. Bronze dims
+landed and were verified; **Kafka Bronze moves to Session 7.** D4 could not be
+asked (below).
+
+### Start-of-session re-check
+Three items in Session 5's carry list were already stale, and were retired
+rather than copied: the Confluent ACL split had been **applied** in the
+addendum; the 43 poisoned SKUs are **gone** with the old cluster; and `orders`
+holds **394,090** records, not 394,293 — the new cluster has no replayed
+duplicates. Session 5 itself had been committed (`bbec5d7`).
+
+### Built
+- **AWS account upgraded** from the Free plan to Paid (would have closed
+  2026-10-17). Credits of $68.53 carried over.
+- **IAM role `ledgerline-uc-landing-read`** — trusted by Databricks' Unity
+  Catalog role with this account's external ID, self-assuming, read-only and
+  prefix-scoped to `ledgerline/`.
+- **Unity Catalog, in Free Edition** (workspace `dbc-7ce3c403-9521`, us-east-2):
+  storage credential `ledgerline_landing_read`; read-only external location
+  `ledgerline_landing` (file events off); UC secrets
+  `workspace.ledgerline_secrets.{kafka_api_key, kafka_api_secret, sr_api_key,
+  sr_api_secret}`, created entirely in the browser; schema `workspace.bronze`
+  with a `checkpoints` volume.
+- **`databricks/bronze/autoload_dims.py`** — Auto Loader (`AvailableNow`) →
+  `foreachBatch` → `replaceWhere dump_date IN (...)`, strings only, lineage
+  columns, a guard that the file's `dump_date` equals its folder name, and
+  built-in count and idempotency checks.
+- **Databricks Git folder** on the GitHub repo (branch `dev`), with a
+  read-only, single-repo GitHub token. Notebooks now run from git.
+- `pyproject.toml`: ruff ignores `F821` under `databricks/` (runtime-injected
+  `spark`, `dbutils`, `display`). `ruff check .` clean; **the full pytest suite
+  passes**, unchanged in count (no new tests this session — the new code is a
+  notebook, verified in Databricks below).
+
+### Verified
+- **Free Edition reads S3 through Unity Catalog:** `ledgerline/dims/customer/`
+  → **8,395 rows**, equal to the three CSVs parsed locally (1 + 326 + 8,068).
+- **Free Edition reads Kafka through UC secrets:** `orders` → **394,090
+  records**, 131,458 / 132,187 / 130,445 per partition. Raw count only — **Avro
+  decoding was not tested.** Each full read took ~3 min 43 s, unexplained.
+- **Bronze dims land exactly:** customer 1 / 326 / 8,068; product 32,951 × 3;
+  seller 3,095 × 3 — per night, per table, equal to local counts.
+- **Re-loading is harmless, proven two ways:** a plain re-run wrote nothing
+  (no new files → no commit); a forced replay with every checkpoint deleted
+  re-read all 9 files and **left every count unchanged**. `DESCRIBE HISTORY` on
+  `bronze.customer` shows it: v0 create (empty), v1 first load and v2 replay,
+  both `WRITE` / `Overwrite` with predicate `dump_date IN (3 nights)`.
+- Run from the **Git-folder copy**, not an imported one.
+
+### Built but NOT verified
+- **Avro decode from Kafka** (`from_avro` + Schema Registry on serverless) —
+  documented as supported, not run.
+- **Asset Bundles / CI deploy to Free Edition** — whether a workspace token for
+  GitHub Actions is allowed is unknown.
+- **Unity Catalog column masks on Free Edition** — needed for the GDPR work,
+  unverified.
+
+### Not done
+- **Kafka Bronze** (`stream_orders.py`, `stream_cdc.py`) → Session 7.
+- **D4** — the dims contain zero embedded newlines; the 3,852-newline review
+  text was never uploaded. Re-bound to Session 7.
+- **Bronze consumer-group ACL** — today's Kafka test borrowed the
+  `ledgerline-verifier-` prefix; Bronze needs its own.
+
+### Incidents
+Three, each found by something failing, logged when it happened:
+1. **Marketplace refused the card** — the account's Service provider is *Amazon
+   Web Services India Private Limited*; Marketplace does not accept Indian
+   cards. The Session 4 "pay via Marketplace" plan never had a route.
+2. **Databricks could assume the role but not read** — `ListBucket` was scoped
+   to prefixes `ledgerline/` and `ledgerline/*`; the validation lists
+   `ledgerline`. One missing form, `implicitDeny`.
+3. **The re-load test broke the one path it was built to test** —
+   `tableExists()` inside `foreachBatch` (a cloned session on serverless)
+   answered False for an existing table. The first load and the plain re-run
+   were both green and **neither had executed `replaceWhere` once.**
+
+### Decisions
+Seven new entries and four corrections. New: AWS plan upgrade; direct
+Databricks billing (never executed — corrected); **Free Edition, proven by
+reading both sources**; scope +3 (Airflow, windowed streaming, GDPR erasure);
+four folded-in additions (quarantine, schema contract, CDF, stream monitoring);
+the Bronze dims design; the Git folder. Corrections: the Session 4 Marketplace
+bullet; the direct-signup entry; and the **Session 0 "Paid Databricks over Free
+Edition" entry, whose two "verified blockers" both turned out false** when
+code was run against them. `decisions.md` now holds **51** real entries.
+
+### Also changed
+- **Learning check convention** (human's instruction): old weak spots move to a
+  status-tracked **question bank** in `learning.md`; the end-of-session check
+  discusses the session's own work. `CLAUDE.md` updated to match.
+- `CLAUDE.md` verified-facts table gained five rows (AISPL, Free Edition,
+  UC access proven, the `ListBucket` prefix rule, the 3m43s read).
+
+### Cost
+Databricks **$0**. AWS: no billable resource created — one IAM role, and a few
+cents at most of cross-region S3 reads (Mumbai bucket, Ohio workspace).
+Confluent: two ~0.1 GB reads, ~$0.01.
+
+### Next
+**Session 7 — Kafka Bronze: exactly-once from `orders` and `inventory.cdc`**
+
+- **Confluent first:** a READ ACL on a new consumer-group prefix
+  (`ledgerline-bronze-`), so Bronze stops borrowing the verifier's.
+- **`stream_orders.py` / `stream_cdc.py`** — `readStream` Kafka →
+  `foreachBatch` → Delta append with **`txnAppId` + `txnVersion = batch_id`**,
+  `AvailableNow`. Prove it the same way as today: force a replay and show no
+  duplicates by `(partition, offset)`.
+- **Avro decode** via `from_avro` + Schema Registry (UC secrets `sr_*`) —
+  the one Kafka piece not yet run on Free Edition.
+- Folded in, per today's decisions: a **quarantine table** for records that
+  will not decode; an explicit **Schema Registry compatibility mode** plus one
+  refused breaking change; **streaming progress** recorded to a small Delta
+  table.
+- **D4:** land a reviews CSV and load it with Auto Loader defaults vs
+  `multiLine` — then D4 is answerable.
+
+**Carried, each a claim to re-check rather than copy:**
+- `CLAUDE.md` **Platform split** and **Budget** sections still describe a paid
+  Premium workspace with clusters and auto-terminate. Stale since today;
+  needs rewriting for Free Edition.
+- GitHub token for the Git folder **expires 2026-12-25**.
+- Free Edition **deletes long-inactive accounts** — everything must stay
+  rebuildable from git + S3.
+- Queue-full retry still never fired; `requirements-dev.txt` resolution still
+  unknown; ci #3 still unconfirmed.
