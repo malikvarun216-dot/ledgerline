@@ -63,4 +63,5 @@ Thumbs.db
 # are working notes for one person, not part of the project's public story.
 # Excluded for the same reason CLAUDE.md is.
 docs/learning.md
+docs/learning_archive_*.md
 docs/background.md
