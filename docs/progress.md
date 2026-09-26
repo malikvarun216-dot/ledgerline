@@ -707,6 +707,56 @@ because answering an earlier question about consumer groups and offsets had
 already supplied part of its ground. Full results, corrections and the
 carry-forward list in `learning.md`.
 
+### Correction — the CI pin WAS verified, and this entry said otherwise
+Written 2026-09-20, same session, after the human showed the Actions page.
+
+The "Built but NOT verified" list above states that the CI pin is unverified and
+that **"nothing has been pushed since Session 3."** Both were false when
+written.
+
+GitHub Actions shows five runs, all on `dev`:
+
+| Run | Commit | Title | Result |
+|---|---|---|---|
+| ci #5 | `6670905` | first live kafka produce, scoped s3 credential, named kafka clients | **green, 36s** |
+| ci #4 | `d5384a6` | keep learning and background docs local only | green, 46s |
+| ci #3 | `e235376` | keep learning and background docs local only | not green - see below |
+| ci #2 | `7db33d2` | pin ci runner to ubuntu-24.04, bump deprecated actions | **green, 35s** |
+| ci #1 | `3fa442c` | aws cost guards, scoped s3 credential, resolve reviews drift | green, 34s |
+
+**ci #2 is the pin commit and it passed.** ci #5 then passed again on today's
+work, running `ubuntu-24.04` + `actions/checkout@v5` + `actions/setup-python@v6`
+- so the pin is verified twice over, on Linux, including the optional-dependency
+assertion that proves `moto`/`boto3`/`fastavro` actually installed rather than
+the S3 and Avro suites quietly skipping.
+
+**How the error happened, because that is the useful part.** Session 3's entry
+recorded the pin as unverified, which was true at the moment it was written -
+the pin was added *after* that session's green run. The human then pushed, and
+ci #2 ran green. Session 4 opened, read Session 3's `### Next`, and **carried the
+claim forward without re-checking it.** The same shape as the `reviews` drift in
+`incidents.md`: a statement that was true once, inherited rather than
+re-verified, and repeated until something external contradicted it. It survived
+because it cost nothing to believe and nothing in the repository disagreed -
+`git log` shows commits, not whether CI ran on them.
+
+**Prevention rule:** a carry-forward item that names an *external* system's state
+- CI, a cloud console, a billing page - must be re-checked against that system at
+the start of the session that carries it, not copied from the previous entry.
+Local `git log` cannot answer "did CI pass", so its silence is not evidence.
+
+**Open, not resolved here: ci #3 (`e235376`).** It is the only run that is not
+green. Note the SHA mismatch against local history - ci #2's `7db33d2` has no
+local counterpart, because Session 3's `git filter-repo` rewrite changed every
+pre-rewrite SHA (local now holds `81a2efc` for that same commit message). The
+most likely explanation is that ci #3 was **cancelled** rather than failed:
+either the force-push orphaned its commit, or `ci.yml`'s own
+`concurrency: cancel-in-progress: true` superseded it, since #3 and #4 share a
+title and are 28 seconds apart. **Not confirmed** - `gh` is not installed on this
+machine and the repository is private. If it turns out to be a genuine failure
+rather than a cancellation, it earns an `incidents.md` entry about what a history
+rewrite does to in-flight CI.
+
 ### Next
 **Session 5 — Databricks workspace, and the full-scale produce**
 - Push first, and **confirm the CI pin survives** before building on it. Eight
@@ -721,3 +771,316 @@ carry-forward list in `learning.md`.
   binding does not delete keys created under it.
 - **D4 becomes answerable** once Auto Loader reads the S3 dumps — the 3,852
   embedded-newline reviews and `multiLine=false`.
+
+---
+
+## Session 5 — the full produce, and a smoke test that poisoned the topic
+Date: 2026-09-20
+
+**In plain words:** both topics now hold the whole dataset — 394,090 order
+events and 158,346 CDC events — produced, read back independently and counted.
+The produce itself was uneventful, which was the surprise: it took 11 seconds
+and the backpressure handling written for it never fired. The two findings came
+from checking rather than from building. A number every document in this
+project has repeated since Session 1 was wrong by fifty. And Session 4's
+harmless-looking 50-order smoke run turned out to have left 43 SKUs on the CDC
+topic that Silver's `seq` guard will silently resolve the wrong way.
+
+### Scope, as it actually ran
+Planned as the full produce plus the Confluent ACL tightening, with Databricks
+deliberately excluded — the workspace provisions a NAT gateway billing ~$33-41
+a month regardless of use, so it waits for a session that opens with Bronze.
+The produce landed in full. The ACL work is **designed and recorded but not
+applied**: the Confluent CLI is not installed and the change is a console
+action. D4 stays deferred and needs rebinding, since it cannot be asked until
+Auto Loader exists.
+
+### Start-of-session external re-check
+The Session 4 prevention rule says a carry-forward naming an external system
+must be re-checked against that system, not copied. Doing that immediately
+retired two items:
+
+- **"Eight files are uncommitted" was already stale.** `git status` showed only
+  `docs/progress.md` modified, and `git log origin/dev..dev` was empty — `dev`
+  was level with the remote. The push the plan called for had already happened.
+- **ci #3 is recorded as unconfirmed, not resolved.** `gh` is still not
+  installed and the repository is private, so the cancellation hypothesis
+  stands as a hypothesis. Dropped from the carry list at the human's direction
+  rather than left open indefinitely. It earns an incident entry only if it is
+  ever shown to be a genuine failure.
+
+### Built
+- **`KafkaAvroSink.send` survives a full local queue.** `produce()` does not
+  send — it appends to a 100,000-record buffer that a background thread drains,
+  and raises `BufferError` when that buffer is full. The retry polls to let the
+  drain catch up, counts each wait, and is **bounded at 30 attempts** so a dead
+  broker raises instead of reproducing the Session 4 silent hang.
+- **`ProgressTicker`** in `_common.py`, wired into both generators above a
+  25,000-event floor. Writes to stderr so stdout stays a clean summary. A
+  394,090-record loop that prints nothing is indistinguishable from a hang.
+- **Delivery failures are counted in full but kept as a 10-item sample**, so a
+  broker outage cannot build a 394,090-string list at the moment there is least
+  memory to spare. `flush()` now reports the true count.
+- **`scripts/inspect_topic.py`** — the Kafka twin of `inspect_stream.py`, and
+  the thing Session 4 did its verification with and then threw away. Assigns
+  partitions rather than subscribing, never commits, and reads to high
+  watermarks fetched up front. Reuses `inspect_stream`'s report functions, so a
+  topic and a file can be compared line for line.
+- **`inventory_cdc.py` refuses `--limit` with `--sink kafka`** unless
+  `--allow-partial` is passed. `order_events.py` deliberately has no such
+  guard; the asymmetry is measured and test-asserted.
+- **Two stale `# pragma: no cover - needs a broker` markers removed** from
+  `send` and `_on_delivery`. They no longer need a broker, and a pragma is a
+  claim about the code that should stop being made when it stops being true.
+- **125 tests pass** (117 at session start), `ruff check .` clean.
+
+### Verified
+- **The full produce landed and was read back independently.** 394,090 order
+  events in 11.4s (~34,600/s); 158,346 CDC events in 3.6s (~43,900/s). The
+  readback is a separate consumer deserializing through Schema Registry, not
+  the generator's own summary.
+- **Partition skew is a non-issue at scale, and the small-run figure was
+  noise.** `orders` spreads 131,508 / 132,259 / 130,526 across three
+  partitions — **worst drift 0.7% off even**, over 99,441 distinct keys.
+  `inventory.cdc` is 1.6% over 34,448 keys. The same measurement on Session 4's
+  50-order run read **26.1% skewed**, which was never skew at all: three
+  partitions and fifty keys cannot come out even. Worth keeping as the
+  concrete reminder that a distribution statistic on a small sample measures
+  the sample size.
+- **The arithmetic is internally consistent across two independent counts.**
+  `orders` reads 394,293 records against 394,090 distinct ids — exactly the 203
+  Session 4 left, replayed byte-for-byte. It ties out in the sub-counts too:
+  `created` 99,496 = 99,441 orders + 55 replayed, and line-item units 112,709 =
+  112,650 + 59.
+- **Cross-source reconciliation ties out at full scale, for the first time
+  against the whole dataset**: units sold per `order_items` = **112,650**,
+  rebuilt from CDC deltas alone = **112,650**. This is a stated success
+  criterion for the project.
+- **The generator is deterministic, proved rather than assumed.** Two
+  consecutive full CDC runs produce identical `event_id` ordering and identical
+  `seq` ordering, all 158,346 ids distinct. The files' md5s differ — correctly,
+  because `produced_at` is processing time — which is why the comparison is on
+  the id sequence, not the bytes.
+- **394,090 is confirmed** against real data: 99,441 orders, 1,234 synthetic
+  terminal events, 775 orders with no items, 1,382 non-monotonic lifecycles.
+
+### Built but NOT verified — carry to Session 6
+- **The queue-full retry never fired.** `queue_full_waits` came back **0** on
+  both produces: at ~35-56K records/s the 100,000-record buffer was never the
+  constraint. The branch is unit-tested against a fake producer and has never
+  run against a real full queue. Honest status: guarded, not exercised.
+- **`KafkaAvroSink.flush`'s timeout path still has not fired** — unchanged from
+  Session 4, and for the same reason. It needs a broker that fails.
+- **The ACL split is designed, not applied.** No Confluent CLI on this machine;
+  `CloudClusterAdmin` is still in force and the old keys are still live.
+- **`requirements-dev.txt` full-set resolution remains unknown** — unchanged
+  since Session 3.
+
+### Not done
+- **No Databricks workspace**, deliberately and for the second session running.
+  The reasoning is unchanged and recorded in Session 4's decision entry: a
+  workspace provisions a NAT gateway at ~$33-41/month, 24/7, that no
+  auto-terminate covers. Create it in the session that opens with Bronze.
+- **No Snowflake account** — the 30-day calendar binds and Gold is Session 13.
+- **Confluent ACLs not applied.** Designed in full, including the read/write
+  split and the order of operations, and recorded as a decision.
+
+### Incidents
+Two, both found by checking a number rather than by anything failing:
+
+1. **The CDC event count in three sessions of docs was 50 too high.** Every
+   document says 158,396; the generator produces **158,346**, and has since the
+   commit that first recorded it — `git diff` across the only two commits that
+   ever touched the file shows `load_local_env()` and a `client_id` argument,
+   neither of which can change an event count. A one-digit transcription error
+   that propagated into Session 4's entry, into `decisions.md`, and into this
+   session's plan as a production target. It survived because **no test asserts
+   the total**: every invariant the suite checks is scale-free and passes at
+   either number.
+
+2. **Session 4's 50-order smoke run poisoned 43 SKUs on the live CDC topic.** A
+   `--limit` CDC run is not a prefix of the full run — it is a different
+   dataset. Seed stock is `headroom x lifetime demand` measured over the orders
+   the run was handed, so a SKU seeds at 14 units from 50 orders and 66 from
+   99,441, while carrying **the same `seq`**, because `seq` derives from event
+   time and event time does not depend on `--limit`. 53 colliding pairs across
+   43 keys. Silver's guard is `s.seq > t.seq` — *strictly* greater — so a tie
+   updates nothing, the correct value is discarded, and a MERGE that matches no
+   rows raises nothing. Left on the topic deliberately as Session 9/10 material.
+
+### Decisions
+Four appended, bringing `decisions.md` to **43 real entries** (counted this
+session rather than carried — Session 4's "39" was one short, the same class of
+error as the incident above): the full produce appends rather than recreating
+the topics; the verifier assigns and never commits; partial CDC runs are
+refused to Kafka while partial order runs are not; and the Confluent
+authorization split into a writer and a reader identity, designed but not yet
+applied.
+
+### A note on where the session's value came from
+Nothing broke. The produce worked first time, the reconciliation tied out, the
+skew was even, and the code written to handle backpressure was never needed.
+Both findings came from **reading the output carefully rather than checking
+that it appeared** — a count that was 50 off, and a `distinct seq` line that
+was 93 short of the record count. Either could have been skimmed past as
+roughly right. The session's own verifier also failed this test once and had to
+be corrected: it printed `seq monotonic overall: False`, which is a file-shaped
+check applied to a partitioned topic where global ordering cannot hold and
+means nothing. A check that returns `False` on healthy data is worse than no
+check, because it teaches you to look away from the line directly above the
+real evidence.
+
+### Addendum — the whole cluster was rebuilt on a new Confluent account
+Written 2026-09-26, six days after the entry above.
+
+**In plain words:** the email address behind the original Confluent account was
+lost, so the console could not be reached. Rather than keep digging, the
+project moved to a new account and rebuilt everything from scratch. That took
+about forty minutes of console work and **fifteen seconds of producing**,
+because the data is regenerated from local CSVs. Nothing was lost that the
+generators could not remake — which is the first time that design property has
+been tested by anything other than choice.
+
+**Everything above about the old cluster still happened.** The numbers, the
+skew measurements, the 43 poisoned SKUs — all real, all measured. They are
+simply no longer *present*, because the topic they lived on is unreachable.
+Left in place rather than rewritten, per Rule 4.
+
+#### New identifiers, replacing every ID recorded above
+
+| | Old (unreachable) | New |
+|---|---|---|
+| Environment | `default` | `default` (`env-6n6516`) |
+| Cluster | `lkc-2255zy2` | **`lkc-k8xr0m2`** |
+| Service account | `sa-5w01oxq` | **`sa-nyomq06`** |
+| Schema Registry | — | **`lsrc-dowq8jy`** |
+
+Same shape otherwise: Basic, AWS, `ap-south-1`, two topics at 3 partitions,
+Stream Governance Essentials.
+
+#### The ACL split is no longer "designed, not applied" — it is applied
+
+The decision entry written earlier this session records the authorization
+design as recorded-but-not-executed. **It has now been executed**, on the new
+account, and with one correction to the design (see the correction under that
+entry). Final permission set:
+
+| Resource | Name | Pattern | Operation |
+|---|---|---|---|
+| Topic | `orders` | LITERAL | WRITE, READ |
+| Topic | `inventory.cdc` | LITERAL | WRITE, READ |
+| Consumer group | `ledgerline-verifier-` | PREFIXED | READ |
+| Schema Registry subjects | all, in `default` | — | `DeveloperWrite` |
+
+**No `CloudClusterAdmin`, and no role binding of any kind on the cluster.** The
+knowing downgrade accepted in Session 4 was never re-incurred: the new account
+was built least-privilege from the first key, so there was nothing to retire.
+The `Granted permissions` table for this service account holds exactly one
+row, scoped to Schema Registry.
+
+#### Two authorization facts learned by being denied, not by reading
+
+1. **A Schema Registry API key authenticates but authorizes nothing.** With a
+   valid SR key and no role binding, the first produce failed with
+   `User is denied operation Write on Subject: orders-value` (403, SR code
+   40301). The key proves identity; `DeveloperWrite` grants permission. They
+   are separate steps and creating the key does not imply the second.
+2. **`assign()` does not avoid the consumer-group ACL.** Covered in full in the
+   correction under the verifier decision. Short version: skipping the
+   rebalance protocol does not skip the group *coordinator lookup*, and that
+   lookup is authorized against the group resource.
+
+Both failed fast with messages that named the operation and the resource —
+worth contrasting with Session 4's wrong-port hang, which named nothing and
+cost three minutes.
+
+#### Re-verified on the new cluster, from an empty start
+
+- `orders`: **394,090 records, 394,090 distinct `event_id`** — no duplicates,
+  because there is no Session 4 smoke run underneath this time. `created` =
+  99,441, exactly the distinct order count. Line-item units **112,650**.
+- `inventory.cdc`: **158,346 records, 158,346 distinct**, 34,448 seed inserts —
+  exactly one per SKU. Reconciliation ties out again: **112,650 = 112,650**.
+- **All 34,448 keys have ascending `seq`. Zero ties.** The 43 poisoned SKUs are
+  gone, and the guard built this session is what will keep them gone.
+- Partition spread is *identical* to the old cluster's — 33,162 / 33,356 /
+  32,923 distinct keys, worst drift 0.7%. Same keys, same hash, same
+  partitions, different cluster. A small but real demonstration that Kafka's
+  default partitioner is deterministic rather than merely even.
+- Produce throughput roughly doubled: **62,130/s** for orders against 34,645/s
+  on the old cluster, **52,502/s** for CDC against 43,875/s. Same code, same
+  laptop, same region, six days apart. Not investigated; recorded because an
+  unexplained 1.8x is worth not pretending to understand. `queue_full_waits`
+  was **0** again, so the local buffer still was not the constraint.
+
+#### Consequence for Session 9/10 — better, not worse
+
+The seq-collision incident recorded earlier this session ends by saying the 43
+poisoned SKUs were left on the topic deliberately, as material for Session 9's
+MERGE guard and Session 10's assert-the-bug-first experiment. **They are no
+longer there.** That is an improvement: Session 10 can now recreate the
+contamination *on purpose* with the `--allow-partial` flag built this session,
+which makes it one of the six planned deliberate failures instead of an
+accident being preserved. The incident entry stands as a true account of what
+happened; only its closing paragraph is superseded.
+
+#### Cost, now measured rather than estimated
+
+The console shows Basic's real rates: **1st eCKU free**, then $0.15/eCKU-hr;
+**data in/out $0.06/GB**; **storage $0.09/GB-month**. This project moves about
+0.2 GB in and out per full rebuild and stores about 0.1 GB, so the entire
+produce-and-verify cycle costs **roughly two cents**, against $400 of trial
+credit. `CLAUDE.md` says "Confluent Basic is $0 at rest"; it is closer to
+**$0.01/month** at rest with this data volume. Immaterial to the budget, and
+corrected because a number that is nearly right is still a number that was
+never checked.
+
+#### One resource deleted that nobody asked for
+
+Creating the environment auto-provisioned a **Flink compute pool**
+(`default.env-6n6516.ap-south-1`), Running, 0 current CFUs, 50 max. This
+project does not use Flink in any session. It was deleted. Structurally the
+same concern as the Databricks NAT gateway deferred twice this session: a
+billable resource created as a side effect of something else, which none of
+the project's cost guards watch because none of them started it.
+
+### Next
+**Session 6 — Databricks workspace and the first Bronze ingest**
+
+The workspace has now been deferred twice, both times correctly. It stops being
+correct the moment a session opens with Bronze work, because the NAT gateway
+bills from creation whether or not anything reads from it. So this session
+creates it *and uses it the same day*, or defers it a third time and does
+something else — not create it and leave it idle.
+
+- **Create the Databricks workspace**: `ap-south-1`, Premium (the floor — AWS
+  Standard was discontinued 2025-10-01), paid via **AWS Marketplace** so DBUs
+  land inside Session 3's `ledgerline-monthly` and `ledgerline-daily-spike`
+  budgets. Via a credit card they are invisible to every guard built so far.
+- **10-minute auto-terminate on the cluster before running anything.** The
+  named highest-risk item in this project: a single node left a week is ~$120
+  against a ~$22 budget.
+- **Bronze dimension ingest** — Auto Loader + `Trigger.AvailableNow` +
+  `replaceWhere` over the 9 objects already in
+  `s3://ledgerline-landing-dev-fffc8b65/ledgerline/dims/`.
+- **D4 becomes answerable here**, and must be re-bound in `learning.md` from
+  "expected ~S5" to this session: Auto Loader against a CSV with 3,852 newlines
+  inside quoted fields, `multiLine=false` by default, what lands in Bronze and
+  what it costs to fix.
+- **Bronze order-event ingest** from the `orders` topic — 394,293 records
+  waiting, of which 203 are deliberate duplicates. Bronze appends; the dedup is
+  Silver's job in Session 8.
+
+**Carried, and each one is a claim to re-check rather than copy:**
+- **Apply the Confluent ACL split** designed this session. Create and test the
+  two new credentials *before* deleting the old ones, or a wrong ACL set locks
+  the project out of its own cluster. Removing the `CloudClusterAdmin` binding
+  does **not** revoke keys created under it.
+- **The queue-full retry has still never fired** (`queue_full_waits` = 0 at
+  35-56K/s). Not a gap to close by producing more — it fires when a broker is
+  slow, not when a topic is large. Leave it guarded and unexercised, and say so.
+- **43 poisoned SKUs sit on `inventory.cdc`** with tied `seq` values. Deliberate
+  Session 9/10 material, not damage to repair. Anyone reading a `seq` tie in
+  Bronze should find the incident entry, not a mystery.
+- **`requirements-dev.txt` full-set resolution** — unknown since Session 3.
+- **ci #3** stays unconfirmed-cancelled. Only reopen it if evidence appears.

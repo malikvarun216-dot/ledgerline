@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from importlib.util import find_spec
 
 import pytest
 
@@ -307,3 +308,171 @@ def test_load_local_env_does_not_override_an_already_set_variable(tmp_path, monk
     common.load_local_env(env_file)
 
     assert os.environ["LEDGERLINE_PROBE"] == "from_environment"
+
+
+# --------------------------------------------------------------------------
+# Producing at scale  (Session 5)
+# --------------------------------------------------------------------------
+
+HAS_CONFLUENT = find_spec("confluent_kafka") is not None
+needs_confluent = pytest.mark.skipif(
+    not HAS_CONFLUENT, reason="confluent_kafka not installed"
+)
+
+
+class _FakeProducer:
+    """A producer whose local queue is full for the first ``full_for`` sends.
+
+    Stands in for librdkafka's queue without a broker. ``produce`` raises
+    ``BufferError`` — the real class's queue-full signal — until ``poll`` has
+    been called enough times to "drain" it.
+    """
+
+    def __init__(self, full_for: int = 0, drain_per_poll: int = 1) -> None:
+        self.full_for = full_for
+        self.drain_per_poll = drain_per_poll
+        self.produced: list[tuple] = []
+        self.polls: list[float] = []
+
+    def produce(self, topic, key, value, on_delivery=None):
+        if self.full_for > 0:
+            raise BufferError("Local: Queue full")
+        self.produced.append((topic, key, value))
+
+    def poll(self, timeout=0):
+        self.polls.append(timeout)
+        if timeout:  # only a blocking poll drains; poll(0) just serves callbacks
+            self.full_for = max(0, self.full_for - self.drain_per_poll)
+        return 0
+
+
+def _sink_with(producer):
+    """A ``KafkaAvroSink`` wrapped around a fake producer.
+
+    Built without ``__init__`` deliberately: the constructor opens a real
+    Producer and a Schema Registry connection, and neither is the thing under
+    test here. The serializers are replaced with identity functions so the
+    test exercises the queue logic rather than Avro encoding, which
+    ``test_avro_contract.py`` already covers.
+    """
+    from generators._common import KafkaAvroSink
+
+    sink = object.__new__(KafkaAvroSink)
+    sink._producer = producer
+    sink._key_serializer = lambda k: k.encode("utf-8")
+    sink._value_serializers = {"orders": lambda v, ctx: b"encoded"}
+    sink.counts = {}
+    sink._errors = []
+    sink.error_count = 0
+    sink.queue_full_waits = 0
+    sink.client_id = "ledgerline-test"
+    return sink
+
+
+@needs_confluent
+def test_send_waits_out_a_full_queue_instead_of_failing():
+    """Backpressure is not an error — it is the broker being slower than the loop.
+
+    ``produce()`` does not send; it appends to a local queue of 100,000 records
+    that a background thread drains. Session 4 produced 187 and never filled
+    it. Session 5 produces 394,090 from a local CSV, which is far faster than a
+    TLS round-trip to ap-south-1, so the queue fills and ``produce()`` raises
+    ``BufferError``.
+
+    The record must still arrive. Before this change the exception escaped and
+    the run died partway through with the topic half-written — the worst
+    outcome available, because a partial produce looks like a complete one to
+    anything counting afterwards.
+    """
+    producer = _FakeProducer(full_for=3)
+    sink = _sink_with(producer)
+
+    sink.send("orders", "order-1", {"event_id": "abc"})
+
+    assert producer.produced == [("orders", b"order-1", b"encoded")]
+    assert sink.counts == {"orders": 1}
+    assert sink.queue_full_waits == 3, "each wait must be counted, not swallowed"
+
+
+@needs_confluent
+def test_send_gives_up_when_nothing_drains_rather_than_looping_forever():
+    """A queue that never empties is a dead broker, and must say so.
+
+    This is the Session 4 lesson applied to a different call. ``flush()``
+    without a timeout turned a wrong port into 180 seconds of silence; an
+    unbounded retry around ``produce()`` would do exactly the same thing, and
+    for the same reason — waiting forever is correct for a transient blip and
+    useless for a misconfiguration, because neither one ever raises.
+
+    The error has to carry the counts. "Queue full" alone does not tell you
+    whether 12 records or 380,000 made it in, and that difference decides
+    whether you re-run or investigate.
+    """
+    from generators._common import KafkaAvroSink
+
+    producer = _FakeProducer(full_for=10_000)  # never drains within the budget
+    sink = _sink_with(producer)
+    sink.counts = {"orders": 12_345}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sink.send("orders", "order-1", {"event_id": "abc"})
+
+    message = str(excinfo.value)
+    assert "12,345" in message, "the error must say how much got through"
+    assert "orders" in message
+    assert sink.queue_full_waits == KafkaAvroSink._QUEUE_FULL_ATTEMPTS
+    assert producer.produced == []
+
+
+@needs_confluent
+def test_delivery_failures_are_counted_in_full_but_kept_in_sample():
+    """394,090 broken deliveries must not become 394,090 strings in memory.
+
+    Only the count and a first example are ever read. Keeping every message
+    would turn a broker outage into a memory problem on top of a delivery
+    problem, at exactly the moment there is least headroom to spare.
+    """
+    from generators._common import KafkaAvroSink
+
+    sink = _sink_with(_FakeProducer())
+    for index in range(1_000):
+        sink._on_delivery(f"failure {index}", None)
+
+    assert sink.error_count == 1_000
+    assert len(sink._errors) == KafkaAvroSink._MAX_KEPT_ERRORS
+    assert sink._errors[0] == "failure 0", "the sample must be the first, not the last"
+
+
+def test_progress_ticker_reports_on_boundaries_only(capsys):
+    """Every 25,000 records, not every record — and to stderr, not stdout.
+
+    stdout carries the generator's summary table, which is an artifact worth
+    piping and diffing. Progress is terminal noise by design and belongs on the
+    other stream, or a redirect captures 16 progress lines wrapped around the
+    numbers someone actually wanted.
+    """
+    from generators._common import ProgressTicker
+
+    ticker = ProgressTicker(total=10, every=4, label="events")
+    for _ in range(10):
+        ticker.tick()
+    ticker.done()
+
+    captured = capsys.readouterr()
+    assert captured.out == "", "progress must not pollute stdout"
+    # boundaries crossed at 4 and 8, plus the final done() line
+    assert captured.err.count("\n") == 3
+    assert "10 events in" in captured.err
+
+
+def test_progress_floor_is_above_a_smoke_run():
+    """The floor has to sit above the runs that are meant to stay quiet.
+
+    Both generators default ``--limit`` to nothing but are routinely run with a
+    few hundred orders while iterating. If the floor ever drops under a smoke
+    run, every test and every quick check starts emitting progress lines.
+    """
+    from generators import inventory_cdc, order_events
+
+    assert order_events.PROGRESS_FLOOR == inventory_cdc.PROGRESS_FLOOR
+    assert order_events.PROGRESS_FLOOR > 5_000

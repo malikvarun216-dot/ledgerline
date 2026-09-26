@@ -80,6 +80,11 @@ from generators._common import (
 SOURCE = "inventory_cdc"
 DEFAULT_TOPIC = "inventory.cdc"
 
+# Below this many events a run finishes before anyone wonders whether it
+# is stuck, and the summary table is the better output. Above it, silence
+# is the Session 4 failure mode.
+PROGRESS_FLOOR = 25_000
+
 OP_INSERT = "I"
 OP_UPDATE = "U"
 OP_DELETE = "D"
@@ -392,6 +397,7 @@ def emit(
     sink: MessageSink,
     topic: str = DEFAULT_TOPIC,
     clock: ReplayClock | None = None,
+    progress: bool = False,
 ) -> int:
     """Send to the sink keyed by ``sku_key``.
 
@@ -400,13 +406,24 @@ def emit(
     would scatter a SKU's history across partitions and make the ``seq`` guard
     load-bearing for correctness rather than a belt-and-braces check.
     """
-    from generators._common import from_micros
+    from generators._common import ProgressTicker, from_micros
+
+    # A silent loop over 394,090 records is indistinguishable from the
+    # Session 4 hang. Off for small runs, where the summary arrives first.
+    ticker = ProgressTicker(len(events), label="cdc events") if progress else None
 
     for event in events:
         if clock is not None and clock.paced:
             clock.sleep_until(from_micros(event["event_ts"]))
         sink.send(topic, event["sku_key"], event)
+        if ticker is not None:
+            ticker.tick()
+    # flush() is outside the ticker: the count above is what has been
+    # *enqueued*, and the records still in the local queue are delivered
+    # here. A run that looks finished at 100% can still be flushing.
     sink.flush()
+    if ticker is not None:
+        ticker.done()
     return len(events)
 
 
@@ -426,6 +443,11 @@ def main() -> int:
     parser.add_argument("--speedup", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=20260919)
     parser.add_argument("--print-schema", action="store_true")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="permit --limit with --sink kafka; see the guard in main()",
+    )
     args = parser.parse_args()
 
     if args.print_schema:
@@ -451,6 +473,41 @@ def main() -> int:
     reconstructed = sum(units_sold_from_cdc(events).values())
     ordering = shuffle_out_of_order(events, args.out_of_order_pct, args.seed)
 
+    if args.sink == "kafka" and args.limit and not args.allow_partial:
+        # A --limit run of THIS generator is not a prefix of the full run, and
+        # that is the whole reason this guard exists.
+        #
+        # Seed stock is headroom x lifetime demand, and lifetime demand is
+        # measured over whatever orders the run was given. So the same SKU
+        # seeded from 50 orders and from 99,441 orders carries a different
+        # stock_qty -- while sharing a sku_key AND a seq, because seq is
+        # derived from event time and event time does not depend on --limit.
+        #
+        # Session 5 found 53 such pairs already on the topic, left by Session
+        # 4's 50-order smoke run. Silver's guard is "s.seq > t.seq", strictly
+        # greater, so it rejects the correct full-run value in favour of the
+        # partial-run one already sitting in the target -- and rejects it
+        # silently, because a MERGE that matches no rows is not an error.
+        #
+        # order_events.py deliberately has no equivalent guard: an order's
+        # lifecycle does not depend on how many other orders were loaded, so
+        # its --limit run IS a true prefix. Measured, not assumed -- all 203
+        # records Session 4 left on `orders` are byte-identical duplicates of
+        # full-run events.
+        raise SystemExit(
+            f"refusing to produce a --limit {args.limit:,} run to topic "
+            f"{args.topic!r}.\n"
+            "  A partial CDC run is a DIFFERENT dataset, not a smaller one: it\n"
+            "  seeds stock from the demand it can see, so the same SKU gets the\n"
+            "  same seq with a different stock_qty. Mixed into one topic those\n"
+            "  events are indistinguishable to Silver's 's.seq > t.seq' guard,\n"
+            "  which keeps whichever landed first and drops the other in\n"
+            "  silence.\n"
+            "  Use --sink jsonl for a partial run, or pass --allow-partial if\n"
+            "  contaminating the topic is the point (Session 10 does exactly\n"
+            "  that, deliberately)."
+        )
+
     if args.sink == "kafka":
         from generators._common import KafkaAvroSink
 
@@ -467,7 +524,7 @@ def main() -> int:
         clock = ReplayClock(business_start=from_micros(events[0]["event_ts"]), speedup=args.speedup)
 
     try:
-        sent = emit(ordering, sink, args.topic, clock)
+        sent = emit(ordering, sink, args.topic, clock, progress=len(ordering) >= PROGRESS_FLOOR)
     finally:
         sink.close()
 
@@ -477,6 +534,13 @@ def main() -> int:
     print(f"  restocks       op=U      {stats['restocks']:>9,}")
     print(f"  delists        op=D      {stats['delists']:>9,}")
     print(f"  events emitted           {sent:>9,}  -> topic {args.topic!r}")
+    waits = getattr(sink, "queue_full_waits", 0)
+    if waits:
+        # How often the generator outran the broker and had to wait for the
+        # local queue to drain. Zero means the 100,000-record buffer was
+        # never the constraint; a large number is the honest throughput
+        # story, and it is invisible unless it is printed.
+        print(f"  queue-full waits         {waits:>9,}  (backpressure, not errors)")
     print()
     print(f"  units sold per order_items        {stats['units_sold']:>9,}")
     print(f"  units sold rebuilt from CDC deltas{reconstructed:>9,}  <- must match")

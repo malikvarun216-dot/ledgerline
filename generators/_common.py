@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -205,6 +206,69 @@ def _seconds(count: float):
     return timedelta(seconds=count)
 
 
+class ProgressTicker:
+    """Say something every N records, so a long run is visibly alive.
+
+    Session 4's first produce sat silent for 180 seconds and was killed. The
+    cause was a wrong port, but the reason it cost three minutes is that
+    *silence looks the same as work*. 187 records finish before anyone wonders;
+    394,090 do not.
+
+    So this prints a line every ``every`` records with the count, the rate and
+    an estimate of what is left. It writes to **stderr**, not stdout, so the
+    generator's summary table stays a clean artifact that can be piped or
+    diffed while the progress goes to the terminal.
+
+    Deliberately not a progress bar: the output is meant to survive being
+    scrolled back through and pasted into an incident entry, and a bar that
+    redraws itself in place leaves nothing behind.
+    """
+
+    def __init__(
+        self,
+        total: int,
+        every: int = 25_000,
+        label: str = "records",
+        stream: Any | None = None,
+    ) -> None:
+        self.total = total
+        self.every = max(1, every)
+        self.label = label
+        self.stream = stream if stream is not None else sys.stderr
+        self.seen = 0
+        self.started = time.monotonic()
+
+    def tick(self, count: int = 1) -> None:
+        """Count ``count`` more records, printing when a boundary is crossed."""
+        previous = self.seen
+        self.seen += count
+        if self.seen // self.every > previous // self.every:
+            self._line()
+
+    def _line(self) -> None:
+        elapsed = time.monotonic() - self.started
+        rate = self.seen / elapsed if elapsed > 0 else 0.0
+        parts = [f"  {self.seen:>9,} / {self.total:,} {self.label}"]
+        if self.total:
+            parts.append(f"{self.seen / self.total:>5.0%}")
+        parts.append(f"{rate:>8,.0f}/s")
+        remaining = self.total - self.seen
+        if remaining > 0 and rate > 0:
+            parts.append(f"eta {remaining / rate:>5.0f}s")
+        print("   ".join(parts), file=self.stream, flush=True)
+
+    def done(self) -> float:
+        """Print the final tally and return the elapsed seconds."""
+        elapsed = time.monotonic() - self.started
+        rate = self.seen / elapsed if elapsed > 0 else 0.0
+        print(
+            f"  {self.seen:>9,} {self.label} in {elapsed:,.1f}s  ({rate:,.0f}/s)",
+            file=self.stream,
+            flush=True,
+        )
+        return elapsed
+
+
 # --------------------------------------------------------------------------
 # Message sinks  (order events, inventory CDC)
 # --------------------------------------------------------------------------
@@ -294,6 +358,19 @@ class KafkaAvroSink:
         SCHEMA_REGISTRY_URL, SCHEMA_REGISTRY_API_KEY, SCHEMA_REGISTRY_API_SECRET
     """
 
+    # How long ``send`` will wait out a full local queue before deciding the
+    # broker is not draining at all. 30 x 1s: a healthy cluster empties a
+    # 100,000-record queue in far less than one poll, so thirty consecutive
+    # polls that free nothing is not slowness.
+    _QUEUE_FULL_ATTEMPTS = 30
+    _QUEUE_FULL_POLL_SECONDS = 1.0
+
+    # Delivery failures are kept for the message, not for the record — at
+    # 394,090 records a broker-wide outage would otherwise build a list of
+    # 394,090 near-identical strings in memory while the real count is the
+    # only part anyone reads.
+    _MAX_KEPT_ERRORS = 10
+
     def __init__(
         self,
         schemas: dict[str, str],
@@ -341,23 +418,69 @@ class KafkaAvroSink:
         }
         self.counts: dict[str, int] = {}
         self._errors: list[str] = []
+        self.error_count = 0
+        self.queue_full_waits = 0
 
-    def _on_delivery(self, err, msg) -> None:  # pragma: no cover - needs a broker
+    def _on_delivery(self, err, msg) -> None:
         if err is not None:
-            self._errors.append(str(err))
+            self.error_count += 1
+            if len(self._errors) < self._MAX_KEPT_ERRORS:
+                self._errors.append(str(err))
 
-    def send(self, topic: str, key: str, value: dict[str, Any]) -> None:  # pragma: no cover
+    def send(self, topic: str, key: str, value: dict[str, Any]) -> None:
+        """Serialize and enqueue one record, waiting out a full local queue.
+
+        ``produce()`` does not send anything. It appends to librdkafka's local
+        queue, which a background thread drains to the broker. The queue holds
+        ``queue.buffering.max.messages`` records — 100,000 by default — and
+        ``produce()`` raises ``BufferError`` once it is full.
+
+        Session 4 produced 187 records and never came close. Session 5 produces
+        394,090, and a generator reading a local CSV is much faster than a TLS
+        round-trip to ap-south-1, so the application *will* outrun the broker
+        and the queue *will* fill. The fix is not a bigger queue — it is to
+        stop producing and let the drain catch up, which is what ``poll()``
+        does: it serves delivery callbacks and frees the slots they held.
+
+        Bounded on purpose. An unbounded retry loop would turn a dead broker
+        back into the Session 4 silent hang, which is the specific failure this
+        class already exists to prevent. After ``_QUEUE_FULL_ATTEMPTS`` of
+        polling with nothing draining, the broker is not accepting and saying
+        so beats waiting.
+        """
         from confluent_kafka.serialization import MessageField, SerializationContext
 
         payload = self._value_serializers[topic](
             value, SerializationContext(topic, MessageField.VALUE)
         )
-        self._producer.produce(
-            topic=topic,
-            key=self._key_serializer(key),
-            value=payload,
-            on_delivery=self._on_delivery,
-        )
+        encoded_key = self._key_serializer(key)
+
+        for _ in range(self._QUEUE_FULL_ATTEMPTS):
+            try:
+                self._producer.produce(
+                    topic=topic,
+                    key=encoded_key,
+                    value=payload,
+                    on_delivery=self._on_delivery,
+                )
+                break
+            except BufferError:
+                # Backpressure, not an error: the broker is simply slower than
+                # this loop. Counted because "how often did we outrun the
+                # broker" is the throughput number worth having afterwards.
+                self.queue_full_waits += 1
+                self._producer.poll(self._QUEUE_FULL_POLL_SECONDS)
+        else:
+            raise RuntimeError(
+                f"local producer queue still full for topic {topic!r} after "
+                f"{self._QUEUE_FULL_ATTEMPTS} polls of "
+                f"{self._QUEUE_FULL_POLL_SECONDS}s "
+                f"({self.queue_full_waits:,} waits so far, "
+                f"{sum(self.counts.values()):,} records enqueued). "
+                "Nothing is draining — the broker is unreachable, throttling, "
+                "or rejecting writes for this credential."
+            )
+
         self._producer.poll(0)
         self.counts[topic] = self.counts.get(topic, 0) + 1
 
@@ -382,8 +505,8 @@ class KafkaAvroSink:
                 "check KAFKA_BOOTSTRAP_SERVERS uses the Kafka port (9092), "
                 "not the REST endpoint (443)."
             )
-        if self._errors:
-            raise RuntimeError(f"{len(self._errors)} delivery failures; first: {self._errors[0]}")
+        if self.error_count:
+            raise RuntimeError(f"{self.error_count} delivery failures; first: {self._errors[0]}")
 
     def close(self) -> None:  # pragma: no cover - needs a broker
         self.flush()

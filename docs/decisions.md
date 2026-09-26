@@ -407,3 +407,240 @@ and there was no way to tell which was which.
   producer config sets `client.id` and that the fallback contains no `rdkafka`.
   It tests the *fallback*, because the generators pass an explicit id today and
   the branch that could regress is the one where a caller forgets.
+
+## The full produce appends to the existing topics rather than recreating them (Session 5)
+
+**In plain words:** the two topics already held Session 4's small test run. The
+full produce could either be added on top, or the topics could be deleted and
+rebuilt so the counts came out round. We added on top. Deleting a topic so a
+number looks tidy is editing the record, and the messy number turned out to be
+the most informative thing this session produced.
+
+- Chosen: **produce the full run into the existing topics.** `orders` now holds
+  394,293 records with 394,090 distinct `event_id` — the extra 203 are Session
+  4's run replayed byte-for-byte. `inventory.cdc` holds 158,439 with 158,399
+  distinct.
+- Rejected: **delete and recreate both topics for a clean baseline.** It would
+  have made the readback read 394,090 of 394,090 and measured partition skew on
+  exactly one produce. Against that: 203 extra records in 394,293 is 0.05% and
+  moves the skew figure by nothing measurable, and the duplicates are direct
+  evidence for the Session 1 deterministic-id decision — a replay produces the
+  *same* events, which is what `exp_01` has to assert on. With `uuid4` the
+  topic would read 394,293 distinct ids and the duplication would be invisible
+  in the data.
+- What this bought that a clean topic would have hidden: the CDC half did
+  **not** come back as clean duplicates. It came back with 43 keys carrying a
+  tied `seq`, which is a real defect in how a partial run interacts with the
+  Silver guard, found only because the old data was still there to collide
+  with. Recorded as an incident. Recreating the topics would have deleted the
+  evidence before anyone read it.
+- Trade-off: every future count on these topics carries a +203/+93 offset that
+  has to be explained rather than read off. Accepted, and the arithmetic is
+  written down in `progress.md` so the explanation is one lookup rather than a
+  re-derivation.
+
+### Correction (2026-09-26) — the topics were recreated after all, on a new account
+
+This entry chose to append to the existing topics rather than recreate them,
+and the reasoning holds for the decision as it was faced. It was overtaken by
+events: the Confluent account became unreachable and everything was rebuilt on
+a new one, so the topics are clean regardless of what was chosen.
+
+What the decision got right is worth keeping even though it was undone. The
+203 duplicates it preserved are the reason the CDC collision was found at all —
+a clean topic would have had nothing to collide with, and the `seq` defect
+would have surfaced in Session 9 against data nobody could trace to a smoke
+test. The choice not to tidy paid for itself within the hour, then the tidying
+happened anyway for an unrelated reason.
+
+The rebuilt topics read 394,090 of 394,090 distinct and 158,346 of 158,346
+distinct. See the migration addendum in `progress.md`.
+
+## The topic verifier assigns partitions and never commits (Session 5)
+
+**In plain words:** to check what actually landed on a topic you have to read
+it, and reading a Kafka topic normally leaves a mark — a consumer group, a
+committed offset, a position the next reader starts from. A tool that changes
+what it measures is not a measurement. This one reads without joining a group
+and without committing anything.
+
+- Chosen: `scripts/inspect_topic.py` calls **`assign()`** on every partition at
+  offset 0, with `enable.auto.commit=False`, and reads until each partition
+  reaches the high watermark it fetched up front.
+- Rejected: **`subscribe()` with a consumer group**, which is the normal way to
+  consume. It joins the group protocol, triggers a rebalance, and leaves a
+  group visible in the console with committed offsets attached. The second run
+  would then start where the first stopped and print zero records — and the
+  natural reading of "zero records" is "the topic is empty", not "I moved my
+  own bookmark". That misreading is on the carried weak-spot list from Session
+  4 as an unanswered question, which is part of why it is worth building the
+  version that cannot produce it.
+- Rejected: **poll until nothing arrives for N seconds**, the usual shortcut
+  for "read to the end". It cannot distinguish a finished read from a stalled
+  one, which is precisely the confusion that cost Session 4 three minutes of
+  silence. High watermarks make the end of the topic a number fetched before
+  the read starts.
+- Consequence worth keeping: because it never joins a group, the verifier needs
+  no consumer-group ACL — only `READ` and `DESCRIBE` on the topic. The
+  least-privilege set got smaller as a side effect of the correctness choice.
+- Trade-off: `assign()` does not follow partition additions. If either topic is
+  ever expanded past 3 partitions, the verifier reads the partitions that exist
+  at the moment it starts and would silently miss a fourth. Acceptable while
+  partition count is fixed by the cluster's Basic tier and stated here so it is
+  not discovered as a mystery undercount.
+
+### Correction (Session 5, same session) — the verifier DOES need a consumer-group ACL
+
+The entry above says, as a selling point of assigning rather than subscribing:
+
+> "because it never joins a group, the verifier needs no consumer-group ACL —
+> only `READ` and `DESCRIBE` on the topic. The least-privilege set got smaller
+> as a side effect of the correctness choice."
+
+**That is wrong, and it was tested the same session.** Rebuilt on a new
+Confluent account with exactly those topic-only ACLs, the verifier failed on
+the first read:
+
+```
+GROUP_AUTHORIZATION_FAILED — FindCoordinator response error
+```
+
+**What the reasoning got right and what it got wrong.** `assign()` does avoid
+the group *rebalance* protocol — no JoinGroup, no SyncGroup, no partition
+reassignment, no committed offsets. All of that stands. What it does not avoid
+is the **group coordinator lookup**. librdkafka resolves a coordinator for
+whatever `group.id` is configured, and it does so eagerly, before any commit
+is attempted and regardless of `enable.auto.commit=False`. That lookup is
+itself authorized against the consumer-group resource. So the permission is
+needed for a call that happens *before* the behaviour the permission is
+usually about.
+
+**Fix applied:** one more ACL, `READ` on consumer group `ledgerline-verifier-`
+with pattern **PREFIXED** — prefixed rather than literal because the verifier
+names its group per topic (`ledgerline-verifier-orders`,
+`ledgerline-verifier-inventory-cdc`).
+
+**The design choice itself was not wrong.** Assigning instead of subscribing is
+still correct, and still for the stated reason: a verifier must not leave
+committed offsets behind, or its second run reads zero records and the natural
+misreading is "the topic is empty". What was wrong was a *bonus* claimed on top
+of it — that the correctness choice also shrank the permission set. It did not.
+
+**Why the mistake is worth keeping.** It came from reasoning about a client
+library's behaviour from its API surface instead of running it. `assign()`
+versus `subscribe()` is a real distinction and the inference from it was
+plausible; it was simply never executed against a broker that would refuse.
+Session 4's carry-forward list already flags *mechanism inside a client
+library* as the weakest area on the list, twice over — this is a third
+instance of the same class, and the first one caught by a permission denial
+rather than by a wrong number.
+
+**Prevention rule: a permission set derived by reading code is a hypothesis
+until a credential refuses something.** The way to test it is to grant exactly
+the derived set and run the real workload — which is what happened here, only
+by accident rather than by design. Deriving grants from the calls a program
+makes is still the right method; it just produces a claim that has to be
+executed, not a conclusion.
+
+## A partial CDC run is refused to Kafka; a partial order run is not (Session 5)
+
+**In plain words:** running the CDC generator over the first 50 orders and
+producing that to the shared topic corrupts it, because the small run and the
+full run disagree about starting stock levels while stamping their events with
+identical sequence numbers. Running the *order* generator over the first 50
+orders and producing that is harmless. The generators are therefore treated
+differently on purpose, which looks inconsistent and is not.
+
+- Chosen: `inventory_cdc.py` **refuses `--limit` together with `--sink kafka`**
+  unless `--allow-partial` is passed, and the refusal explains the mechanism
+  rather than only denying it.
+- Why the two sources differ, measured rather than assumed:
+  - an **order's lifecycle** is built from that order's own timestamps and does
+    not depend on how many other orders were loaded, so a `--limit` run is a
+    true prefix. All 203 records Session 4 left on `orders` came back as
+    byte-identical duplicates;
+  - a **SKU's seed stock** is `headroom x lifetime demand` measured over the
+    orders the run was given, so the same SKU seeds at 14 units from 50 orders
+    and 66 units from 99,441 — while carrying the same `seq`, because `seq`
+    derives from event time and event time does not depend on `--limit`.
+- Rejected: **guarding both generators for consistency.** Tidier, and wrong: it
+  would forbid a safe and useful thing (smoke-producing a few hundred orders)
+  on the strength of a resemblance. A test asserts the asymmetry so that
+  "make them the same" has to argue with something.
+- Rejected: **making `seq` unique across runs**, for instance by mixing in a run
+  id or a wall-clock stamp. That would break replay determinism, which is the
+  property `exp_01` exists to assert and the reason `assign_seq` derives `seq`
+  from event time in the first place. The problem is not that `seq` is
+  insufficiently unique; it is that two different datasets were put in one
+  topic.
+- Rejected: **cleaning the 43 poisoned SKUs off the topic.** They are better
+  material than a pristine feed: Session 9's `seq` guard and in-batch dedup now
+  have a real tie to fail on, and Session 10 can assert the bug is present
+  before fixing it, which is a stated success criterion.
+- Trade-off: `--allow-partial` exists, so the guard is a speed bump rather than
+  a wall. Deliberate — Session 10 contaminates the topic on purpose, and a
+  guard with no override would be worked around by editing the source, which is
+  worse than an audited flag.
+
+## Confluent authorization splits into a writer and a reader, by ACL (Session 5, designed — not yet applied)
+
+**In plain words:** today one identity can do everything to the cluster,
+including delete the topics it writes to. The replacement is two identities: one
+that can only write the two topics, and one that can only read them. The
+verifier that checks what landed then *cannot* alter what it is checking — a
+property the code currently only promises.
+
+**Status: designed and recorded, not applied.** The Confluent CLI is not
+installed on this machine and the change is a console action. Written down now,
+at the moment the decision was made, rather than after it is executed — the
+discipline's first rule. `progress.md` records it under *not done*.
+
+- Chosen: retire **`CloudClusterAdmin`** and replace it with per-topic ACLs
+  across **two** service accounts:
+
+  | Identity | ACL | Why |
+  |---|---|---|
+  | `sa-ledgerline-producer` | `WRITE`, `DESCRIBE` on `orders` and `inventory.cdc` | what the two generators do |
+  | `sa-ledgerline-verifier` | `READ`, `DESCRIBE` on `orders` and `inventory.cdc` | what `inspect_topic.py` does |
+
+- Derived from the code, not from a template. Each grant traces to a call:
+  - `DESCRIBE` — both clients fetch topic metadata at startup. A producer that
+    can `WRITE` but not `DESCRIBE` fails before sending anything and the error
+    reads like a connection fault, which is the trap the Session 4 entry
+    flagged in advance.
+  - `WRITE` — `Producer.produce`.
+  - `READ` — the verifier's fetches, plus `get_watermark_offsets`.
+  - **No consumer-group ACL for either.** This is the part worth noticing: the
+    verifier `assign()`s partitions instead of subscribing, so it never joins
+    the group protocol and never commits. A design choice made for correctness
+    — a verifier must not disturb what it measures — turned out to shrink the
+    permission set as well. The two arguments point the same way, which is
+    usually a sign the design is right.
+  - **No `IDEMPOTENT_WRITE` on the cluster.** The producers run with
+    `enable.idempotence=true`, which on older brokers required a cluster-level
+    grant; since KIP-679 (Kafka 3.0) topic `WRITE` covers it, and Confluent
+    Cloud is well past that. Named here because if the produce breaks after the
+    switch, this is the first thing to suspect.
+- Rejected: **one service account holding both read and write ACLs.** Half the
+  console work and it keeps the current single-credential setup. Rejected
+  because it throws away the only enforcement available: with one identity,
+  "the verifier does not write to the topic" is a claim about code that could be
+  changed by an edit; with two, it is a claim about a credential that cannot.
+  The same reasoning as Session 3's scoped S3 user — and Session 4 proved that
+  reasoning is not theoretical, because the scoped user existed for a whole
+  session while the code quietly authenticated as an admin.
+- Rejected: **keeping `CloudClusterAdmin` now that the produce is green.** It
+  was accepted in Session 4 as a knowing downgrade with an explicit revisit
+  condition: "when the first produce is green." It is green — 394,090 and
+  158,346 events landed and were read back. The condition fired, so the
+  downgrade expires rather than quietly becoming permanent.
+- **Keys must be revoked deliberately, not assumed gone.** Carried from the
+  Session 4 entry and still the trap: removing a role binding does **not**
+  delete API keys created under it. The old cluster key keeps working with
+  whatever the account can still do. Order of operations matters — create and
+  test the new credentials *before* deleting the old ones, or a wrong ACL set
+  locks the project out of its own cluster with no working key to fix it.
+- Trade-off: two more credentials in `.env` and two more things to rotate, on a
+  project whose Kafka clients are two generators and one script. Accepted: the
+  split is the interview-defensible answer and the cost is a few lines of
+  configuration, not ongoing effort.

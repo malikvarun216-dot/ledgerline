@@ -69,6 +69,11 @@ from generators._common import (
 SOURCE = "order_events"
 DEFAULT_TOPIC = "orders"
 
+# Below this many events a run finishes before anyone wonders whether it
+# is stuck, and the summary table is the better output. Above it, silence
+# is the Session 4 failure mode.
+PROGRESS_FLOOR = 25_000
+
 # (event_type, the Olist column whose non-null value triggers it).
 # Order matters: it is the canonical lifecycle order, used to check that a
 # row's timestamps actually ascend.
@@ -314,6 +319,7 @@ def emit(
     sink: MessageSink,
     topic: str = DEFAULT_TOPIC,
     clock: ReplayClock | None = None,
+    progress: bool = False,
 ) -> int:
     """Send events to the sink, keyed by ``order_id``.
 
@@ -324,13 +330,24 @@ def emit(
     Keying on ``event_id`` (or round-robin) would spread them across
     partitions and lose that guarantee for no gain.
     """
-    from generators._common import from_micros
+    from generators._common import ProgressTicker, from_micros
+
+    # A silent loop over 394,090 records is indistinguishable from the
+    # Session 4 hang. Off for small runs, where the summary arrives first.
+    ticker = ProgressTicker(len(events), label="order events") if progress else None
 
     for event in events:
         if clock is not None and clock.paced:
             clock.sleep_until(from_micros(event["event_ts"]))
         sink.send(topic, event["order_id"], event)
+        if ticker is not None:
+            ticker.tick()
+    # flush() is outside the ticker: the count above is what has been
+    # *enqueued*, and the records still in the local queue are delivered
+    # here. A run that looks finished at 100% can still be flushing.
     sink.flush()
+    if ticker is not None:
+        ticker.done()
     return len(events)
 
 
@@ -379,12 +396,19 @@ def main() -> int:
         clock = ReplayClock(business_start=from_micros(events[0]["event_ts"]), speedup=args.speedup)
 
     try:
-        sent = emit(events, sink, args.topic, clock)
+        sent = emit(events, sink, args.topic, clock, progress=len(events) >= PROGRESS_FLOOR)
     finally:
         sink.close()
 
     print(f"  orders read              {stats['orders']:>9,}")
     print(f"  events emitted           {sent:>9,}  -> topic {args.topic!r}")
+    waits = getattr(sink, "queue_full_waits", 0)
+    if waits:
+        # How often the generator outran the broker and had to wait for the
+        # local queue to drain. Zero means the 100,000-record buffer was
+        # never the constraint; a large number is the honest throughput
+        # story, and it is invisible unless it is printed.
+        print(f"  queue-full waits         {waits:>9,}  (backpressure, not errors)")
     print(f"  synthetic terminal evts  {stats['synthetic_terminal']:>9,}  (canceled / unavailable)")
     print(f"  orders with no items     {stats['orders_without_items']:>9,}")
     print(f"  non-monotonic lifecycles {stats['non_monotonic_orders']:>9,}  (source data quality)")

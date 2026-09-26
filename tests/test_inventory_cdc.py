@@ -309,3 +309,93 @@ def test_many_skus_do_not_collide_on_one_seed_timestamp():
     events, stats = build_cdc_events(order_items, orders, restock_every=0)
     assert stats["skus"] == n
     assert len({e["seq"] for e in events}) == len(events), "seq collision"
+
+
+# --------------------------------------------------------------------------
+# Partial runs must not reach the topic  (Session 5)
+# --------------------------------------------------------------------------
+
+
+def _run_cdc(argv: list[str]) -> tuple[int, str]:
+    """Run the generator's ``main`` with ``argv``, returning (exit code, stderr)."""
+    import contextlib
+    import io
+    import sys
+
+    from generators import inventory_cdc
+
+    stderr = io.StringIO()
+    old = sys.argv
+    sys.argv = ["inventory_cdc.py", *argv]
+    try:
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            code = inventory_cdc.main()
+    except SystemExit as exit_signal:
+        code = exit_signal.code
+        if isinstance(code, str):
+            stderr.write(code)
+            code = 1
+    finally:
+        sys.argv = old
+    return code, stderr.getvalue()
+
+
+def test_partial_cdc_run_is_refused_for_kafka():
+    """A --limit CDC run is a different dataset, not a smaller one.
+
+    Seed stock is ``headroom x lifetime demand`` measured over the orders the
+    run was given, so the same SKU seeded from 50 orders and from 99,441 orders
+    carries a different ``stock_qty`` — while sharing a ``sku_key`` and a
+    ``seq``, because ``seq`` comes from event time and event time does not
+    depend on ``--limit``.
+
+    Session 5 measured 53 such pairs sitting on the live topic, left there by
+    Session 4's smoke run: 43 SKUs whose ``seq`` values are tied rather than
+    ascending. Silver's ``s.seq > t.seq`` is strictly greater, so it keeps
+    whichever landed first and discards the other without raising — a wrong
+    stock level that persists instead of an error that surfaces.
+
+    The guard must fire *before* a producer is constructed, so this passes no
+    credentials and still expects a clean refusal rather than a connection
+    error.
+    """
+    code, message = _run_cdc(["--sink", "kafka", "--limit", "50"])
+
+    assert code == 1
+    assert "refusing" in message
+    assert "--limit 50" in message
+    assert "seq" in message, "the error must name the mechanism, not just refuse"
+    assert "--allow-partial" in message, "the error must name the escape hatch"
+
+
+def test_partial_cdc_run_is_allowed_when_asked_for_explicitly():
+    """Session 10 contaminates the topic on purpose, so the door must open.
+
+    Checked by confirming the guard is not what stops it: with the flag set the
+    run gets past the refusal and fails on the missing broker instead, which is
+    a different failure entirely.
+    """
+    code, message = _run_cdc(["--sink", "kafka", "--limit", "50", "--allow-partial"])
+
+    assert "refusing" not in message
+    assert code != 0 or message == "", "no broker in tests, so this cannot succeed"
+
+
+def test_order_events_has_no_partial_guard_and_that_is_deliberate():
+    """Orders genuinely are a prefix, so guarding them would be cargo-culted.
+
+    An order's lifecycle is built from its own timestamps and does not depend
+    on how many other orders were loaded. Measured rather than assumed: all 203
+    records Session 4's 50-order run left on the `orders` topic turned out to
+    be byte-identical duplicates of full-run events, which is why the full
+    readback reports 394,293 records against 394,090 distinct ids.
+
+    This asserts the asymmetry is real, so that "add the same guard to both for
+    consistency" has to argue with a test rather than look tidy.
+    """
+    import inspect
+
+    from generators import inventory_cdc, order_events
+
+    assert "allow_partial" in inspect.getsource(inventory_cdc.main)
+    assert "allow_partial" not in inspect.getsource(order_events.main)

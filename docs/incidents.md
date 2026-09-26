@@ -228,4 +228,173 @@ and sent the next hour in exactly the wrong direction.
   a suggested fix looks disproportionate to the symptom, check whether the
   component reporting it is entitled to an opinion.
 
+## [2026-09-20] — the CDC event count in three sessions of docs was 50 too high
+
+**In plain words:** every document in this project says the inventory CDC feed
+produces **158,396** events. It produces **158,346**. The generator has been
+right the whole time; the number written down beside it was wrong by fifty,
+from the first session that recorded it, and nothing ever re-derived it. It
+reached Session 5's plan as a target to produce against.
+
+- What happened: Session 1 ran the CDC generator over the full dataset and
+  recorded "34,448 SKUs, 158,396 events" in `progress.md`. Session 4 quoted that
+  figure twice more — once in its own "not verified" list, once in the Session 5
+  plan — and `decisions.md` quotes it a fourth time inside the `client.id`
+  entry. Session 5 ran the generator to confirm the target before producing to
+  Kafka and got 158,346.
+- What I thought was wrong: the generator. A 50-event drift against a recorded
+  figure looks like non-determinism, which would be serious — `exp_01` asserts
+  on replay producing byte-identical events, so a generator that drifts between
+  runs invalidates the whole exactly-once experiment.
+- Root cause: a transcription error. `158,346` → `158,396` is one digit, `4`
+  to `9`. The generator's event-producing logic is **unchanged since the commit
+  that first recorded the number**: `git diff` across the only two commits that
+  ever touched `inventory_cdc.py` shows two additions, `load_local_env()` and a
+  `client_id` argument, neither of which can alter an event count.
+- Fix: none in code. The correction is appended to `progress.md` and the true
+  figure is 158,346, which decomposes exactly: 34,448 seeds + 102,425 sales +
+  21,473 restocks + 0 delists.
+- Verified rather than assumed, because "the docs are wrong" is the convenient
+  conclusion and deserved more resistance than "the code is wrong":
+  two consecutive full runs produce **identical `event_id` ordering and
+  identical `seq` ordering**, all 158,346 ids distinct, `seq` monotonic across
+  the whole feed. The files' md5s differ — correctly, because `produced_at` is
+  processing time and moves every run — which is why the comparison is on the
+  id sequence and not on the bytes.
+- Why nothing caught it: **no test asserts the total.** The suite checks
+  reconciliation (units sold = units rebuilt from deltas), seq monotonicity,
+  dedup behaviour and op-flag handling, all of which are true at any scale and
+  all of which pass at 158,346 exactly as they would at 158,396. The count is
+  the one property that appears only in prose. A number that lives solely in a
+  document cannot be contradicted by a test suite, however green.
+- Prevention rule: **a headline number that appears in a plan must be
+  re-derived by running the thing, not copied from the entry that first said
+  it.** The same shape as the CI carry-forward corrected at the end of Session
+  4, with one extra turn of the screw: that number described an external system
+  and so at least had an obvious owner to go and ask. This one was derivable
+  locally in 28 seconds for three sessions and still nobody ran it, because a
+  number already written down does not look like a question.
+- Lesson: the reconciliation tying out — 112,650 units sold against 112,650
+  rebuilt from CDC deltas — is the load-bearing invariant, and it was correct in
+  Session 1 and is correct now. Getting the *important* number right is not
+  evidence that the number next to it is right. They were written in the same
+  sentence and only one of them was ever checked again.
+
+## [2026-09-20] — a 50-order smoke run poisoned 43 SKUs on the live CDC topic, and `seq` cannot tell
+
+**In plain words:** Session 4 produced a small 50-order CDC run to the real
+topic to check the plumbing worked. Session 5 produced the full 99,441-order
+run to the same topic. Those two runs disagree about how much stock 43 SKUs
+started with — and they stamp that disagreement with the **same `seq`**, so the
+one guard built to resolve exactly this kind of conflict cannot see it. Silver
+will keep whichever arrived first and throw the other away without saying so.
+
+- What happened: the full produce landed 158,346 CDC events on a topic that
+  already held 93 from Session 4. Reading the topic back reported
+  `distinct seq 158,346 of 158,439` — every one of Session 4's `seq` values
+  already existed in the full run — and 43 of 34,448 keys carrying a tied,
+  non-ascending `seq`.
+- What I thought was wrong: the generator's `seq` derivation, or a restart
+  resetting a counter. Both wrong, and the second is specifically the failure
+  `assign_seq` was designed to be immune to. It still is: `seq` is derived from
+  event time, not counted, so there is no counter to reset. That immunity is
+  real and it is not what failed.
+- Root cause: **a `--limit` run is not a prefix of the full run — it is a
+  different dataset that shares keys and timestamps.** Seed stock is
+  `headroom x lifetime demand`, and lifetime demand is measured over whatever
+  orders the run was handed. The same SKU seeded from 50 orders gets
+  `stock_qty=14`; seeded from 99,441 it gets `stock_qty=66`. Meanwhile `seq` is
+  a pure function of event time, and event time does not depend on `--limit`.
+  So the two events collide exactly:
+
+      sku_key c1488892...|1554a685...   seq 1472937319000000000
+        50-order run:  op=I seed  prev=None -> stock=14
+        full run:      op=I seed  prev=None -> stock=66
+
+  Measured: 53 colliding pairs across 43 SKUs, against 40 Session 4 events that
+  *are* honest byte-identical replays.
+- Why this is worse than a duplicate: Silver's guard is
+  `WHEN MATCHED AND s.seq > t.seq THEN UPDATE SET *` — **strictly** greater. A
+  tie is not greater, so the MERGE matches the row and updates nothing. The
+  correct full-run stock level is discarded in favour of the partial-run one
+  already in the target, and a MERGE that updates zero rows is not an error. No
+  exception, no log line, no row count that looks wrong. Just a stock level
+  that is quietly 14 instead of 66, forever.
+- Fix: `inventory_cdc.py` now **refuses `--limit` together with `--sink kafka`**
+  unless `--allow-partial` is passed. The refusal names the mechanism rather
+  than just saying no, and names the escape hatch, because Session 10 will want
+  to contaminate the topic deliberately. Three tests cover it: that it fires,
+  that the flag opens it, and that `order_events.py` deliberately has no
+  equivalent.
+- The asymmetry is measured, not assumed: **orders genuinely are a prefix.** An
+  order's lifecycle is built from its own timestamps and does not depend on how
+  many other orders were loaded, so all 203 records Session 4 left on `orders`
+  are byte-identical duplicates — which is exactly why the full readback says
+  394,293 records against 394,090 distinct ids. Adding the same guard to both
+  generators would have looked consistent and been wrong.
+- Why nothing caught it: three separate reasons stacked, and the third is the
+  one worth keeping.
+  1. **No Silver exists yet.** The guard that this breaks is written in Session
+     9. The damage was done in Session 4 and would have surfaced five sessions
+     later, against data nobody would still connect to a smoke test.
+  2. **Every invariant the suite checks is scale-free.** Reconciliation,
+     monotonicity within a run, dedup, op handling — all hold at 93 events and
+     at 158,346. None of them is a statement about *two runs sharing a topic*,
+     and a topic is not something a unit test has.
+  3. **The verifier printed `seq monotonic overall: False` and that line was
+     meaningless.** It is a file-shaped check: a JSONL file is written in emit
+     order, so global ascent is fair. A topic is read three partitions
+     interleaved and can never be globally ascending, whatever the data says.
+     A check that returns `False` for healthy data trains you to ignore it, and
+     it was sitting directly above the tied-`seq` evidence.
+- Prevention rule: **never produce a partial run of a state-carrying source
+  into a shared topic.** Append-only event sources (orders) tolerate it because
+  a subset is a prefix. Any source that derives a value from the *scope* of its
+  input — a seed, an opening balance, a high-water mark, anything computed from
+  "all the data I was given" — does not, and the resulting events are
+  indistinguishable from legitimate ones at the point where it matters. Second
+  rule, from reason 3: **a health check must be capable of returning True.**
+  Before trusting a check, confirm it passes on data known to be good;
+  otherwise it is decoration that costs attention.
+- Left on the topic deliberately, not cleaned up. The 43 poisoned SKUs are
+  better material for Session 9 than a pristine feed would be: the in-batch
+  dedup and the `seq` guard now have a real tie to fail on, and Session 10 can
+  assert the bug is present before fixing it — which is a stated success
+  criterion for this project. Recorded here so that a future session finds an
+  explanation rather than a mystery.
+
+### Correction (2026-09-26) — the 43 poisoned SKUs are no longer on any reachable topic
+
+The entry above closes by saying the poisoned SKUs were "left on the topic
+deliberately, not cleaned up", as material for Session 9 and 10. That was true
+when written. It is no longer true, for a reason unrelated to the incident: the
+Confluent account was lost and the project rebuilt on a new one, so the topic
+holding them is unreachable. The rebuilt `inventory.cdc` reads **34,448 of
+34,448 keys with ascending `seq`, zero ties**.
+
+**Everything else in the entry stands.** The collision was real, measured at 53
+pairs across 43 keys, and the mechanism is unchanged — a `--limit` CDC run is a
+different dataset, not a prefix, because seed stock is derived from the scope
+of the input while `seq` is derived from event time.
+
+**The guard built in response is what matters now, and it survived the
+rebuild:** `inventory_cdc.py` still refuses `--limit` with `--sink kafka`
+unless `--allow-partial` is passed, and the three tests still cover it. The
+defect cannot recur by accident on the new cluster.
+
+**For Session 9/10 this is better, not worse.** Recreating the contamination is
+now one deliberate command rather than an artifact being carefully preserved:
+
+```
+python generators/inventory_cdc.py --sink kafka --limit 50 --allow-partial
+```
+
+run before the full produce. That turns it into one of the project's six
+planned deliberate failures, which is what it should have been in the first
+place — the original was an accident that happened to be useful.
+
+**Prevention rule, unchanged and now the whole value of the entry:** never
+produce a partial run of a state-carrying source into a shared topic. The
+evidence is gone; the rule and the guard are not.
+
 <!-- Append further entries below this line. -->
