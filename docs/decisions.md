@@ -375,6 +375,18 @@ this project has built would catch it.
   friendlier number - rates vary by region and by serverless vs classic, and EC2
   is billed separately by AWS either way.
 
+### Correction (2026-09-26, Session 6) — the Marketplace payment route does not exist for this account
+
+The "decided in advance" bullet above chose AWS Marketplace billing so that
+DBUs would appear in the AWS budgets. **That route is not available here.** The
+account's Service provider is *Amazon Web Services India Private Limited*, and
+AWS Marketplace does not accept cards from Indian (AISPL) accounts. The subscribe
+page refused with "invalid or unsupported payment method". Full account in
+`incidents.md`; the replacement choice is the Session 6 entry at the end of this
+file. The reasoning in the bullet — budgets can only guard what lands on the AWS
+bill — was sound; the premise that the route existed was never checked against
+this account.
+
 ## Every Kafka client names itself; the default `client.id` is refused (Session 4)
 
 **In plain words:** Confluent's monitoring screens show which clients are
@@ -644,3 +656,335 @@ discipline's first rule. `progress.md` records it under *not done*.
   project whose Kafka clients are two generators and one script. Accepted: the
   split is the interview-defensible answer and the cost is a few lines of
   configuration, not ongoing effort.
+
+## The AWS account was upgraded from the Free plan to the Paid plan (Session 6)
+
+**In plain words:** the AWS account this whole project runs on was on AWS's
+Free plan, which **closes the account on a fixed date** — Oct 17, 2026, 22 days
+out — or when its credits run out, whichever comes first. No document in five
+sessions had recorded that. It was found on the console home page while getting
+ready to create the Databricks workspace, and the account was upgraded to the
+Paid plan the same day (confirmed by AWS email, 2026-09-26).
+
+- Chosen: **upgrade to the Paid plan** before creating anything on Databricks.
+- Why it was forced, not merely preferred — two independent reasons:
+  1. **The closure date would have taken the project down mid-build.** The S3
+     landing bucket, both budgets, the scoped `ledgerline-dev` user and any
+     Databricks workspace network all live in this account. Oct 17 falls around
+     Session 8-9, in the middle of Silver.
+  2. **Free plan accounts cannot subscribe to paid AWS Marketplace offers**
+     (AWS docs: Free plans exclude "certain AWS Marketplace offers that can
+     incur charges"). Session 5 chose Marketplace billing for Databricks
+     precisely so its charges land in `ledgerline-monthly` and
+     `ledgerline-daily-spike`. On the Free plan that route does not exist.
+- Credits are not lost: AWS applies the remaining **$68.53** to future bills
+  after upgrading, until they expire. At the measured September run-rate
+  (forecast **$12.42** for the month) the credits were never going to be the
+  constraint — **the calendar was**, the same shape as the Snowflake trial.
+- Rejected: **stay on the Free plan and sign up to Databricks directly with a
+  card** (it offers a free trial). Avoids the upgrade, but fixes neither
+  problem: the account still closes Oct 17, and card-billed DBUs are invisible
+  to every AWS budget built in Session 3 — the exact gap the Marketplace choice
+  existed to close.
+- Consequence: credits no longer cap spend. On the Free plan, running out of
+  credits stopped the account; on the Paid plan it starts charging the card.
+  The `IncludeCredit: false` budgets were already measuring gross spend, so
+  they need no change — they were the right design for exactly this moment.
+- Why nothing caught it for five sessions: every AWS action so far was done as
+  `varun-admin`, and **`varun-admin` cannot see billing** — the Cost and usage
+  panel reads "Access denied" for it. The free-plan notice and the countdown
+  only render for a principal with billing access. Session 3's Cost Explorer
+  work evidently ran as root and did not look at the plan banner.
+- Rule taken from it: **when a project depends on an account, record the
+  account's own expiry alongside the trials.** A 30-day Snowflake trial was
+  tracked from day one because it was chosen; the AWS clock was inherited from
+  jobpulse, so nobody chose it and nobody wrote it down.
+- **Verified on the console, not only by email.** After the upgrade the Cost
+  and usage panel no longer carries the sentence "Credits cover your free plan
+  costs. Your access to AWS services will end when credits are depleted or free
+  period ends", the Upgrade action is gone, and credits still read **$68.53**.
+  "Days remaining" now reads *Unable to load* rather than a date — the widget
+  has no countdown left to render. Weaker evidence on its own than a blank
+  field would be, but consistent with the email and the removed sentence.
+
+## Databricks is billed directly by Databricks, not through AWS Marketplace (Session 6)
+
+**In plain words:** the account was signed up for at databricks.com, on its
+14-day free trial ($400 of usage credit), instead of through AWS Marketplace.
+Marketplace was the plan, but it refuses cards on Indian AWS accounts. The cost
+is that **Databricks' own charges never appear in the AWS budgets**, so a budget
+inside the Databricks account console has to do that job instead.
+
+- Chosen: **direct Databricks signup, 14-day trial**, workspace created into
+  the existing AWS account (`240939827246`, `ap-south-1`, Premium) with the
+  Quickstart CloudFormation template. After the trial it rolls onto
+  pay-as-you-go, billed by Databricks to the card.
+- Rejected: **AWS Support → Pay By Invoice, then Marketplace.** Keeps the one
+  property the Session 4 decision wanted — DBUs on the AWS bill — but AWS says
+  the switch can take up to seven days, and Databricks work would wait for it.
+  Worth less than it looks, too: during the trial DBUs are paid from trial
+  credit, so the AWS budgets would read $0 for Databricks until the trial ended
+  either way.
+- Rejected: **Databricks Free Edition.** Serverless-only and no NAT gateway, so
+  it is the cheapest option by far. Not chosen because it was not verified that
+  Free Edition can reach an external Kafka cluster or a customer S3 bucket, and
+  those two connections are all of Bronze. Left open, not dismissed — it is the
+  right thing to check if the NAT cost becomes the problem.
+- What the AWS budgets still see: the NAT gateway, the EC2 instances clusters
+  run on, the workspace's S3 root bucket. What they do **not** see: DBUs.
+- Guard that replaces the lost visibility: **a budget alert in the Databricks
+  account console**, created before the first cluster runs. Already listed in
+  `CLAUDE.md` as a planned guard; it is now the only guard on DBU spend rather
+  than a second one.
+- Consequence: three clocks now run at once — Databricks trial (~2026-10-10,
+  then pay-as-you-go, no stop), Snowflake trial (30 days from whenever it is
+  started; not started), and the NAT gateway (~$1.10/day from workspace
+  creation until the network stack is deleted). The plan that follows from
+  them: do the Databricks sessions (6-12) back to back inside the trial, tear
+  down the workspace network, then start Snowflake for Gold at Session 13.
+- Account identity: the Databricks account is registered to an email address
+  the owner controls long-term, not necessarily the AWS one. Recorded because
+  Session 5's Confluent account was lost with its email and had to be rebuilt
+  from scratch.
+
+### Correction (2026-09-26, same session) — the direct-signup trial above was never created
+
+The entry above records a direct Databricks signup on the 14-day trial. **That
+did not happen.** Signing in at databricks.com landed in an existing
+**Databricks Free Edition** account on the same email, and the next entry
+records why the project stayed there. The trial reasoning above is left as
+written; it is still the fallback if Free Edition stops being enough.
+
+## Databricks runs on Free Edition, proven by reading both sources, not by reading the docs (Session 6)
+
+**In plain words:** Databricks' free, no-expiry, serverless-only tier turned
+out to reach both of this project's sources — the S3 landing bucket and the
+Confluent Kafka cluster — so the project uses it instead of a paid workspace.
+**No NAT gateway, no trial clock, $0 for Databricks.** The docs did not say it
+would work; two notebook reads proved it did.
+
+- Chosen: **Databricks Free Edition** (workspace `dbc-7ce3c403-9521`,
+  metastore `metastore_aws_us_east_2`), serverless compute only.
+- The decision rule, set by the human before testing: *if both sources can
+  be read, Free Edition; if either fails, the 14-day trial.* Both passed:
+  - **S3:** Unity Catalog storage credential `ledgerline_landing_read` →
+    IAM role `ledgerline-uc-landing-read` (read-only, prefix-scoped to
+    `ledgerline/`) → external location `ledgerline_landing` (read-only, file
+    events off). A notebook read `ledgerline/dims/customer/` and returned
+    **8,395 rows**, equal to the three customer CSVs parsed locally.
+  - **Kafka:** credentials stored as **Unity Catalog secrets** in
+    `workspace.ledgerline_secrets` (`kafka_api_key`, `kafka_api_secret`,
+    `sr_api_key`, `sr_api_secret`), created in the browser — no CLI. A batch
+    read of `orders` returned **394,090 records**, split 131,458 / 132,187 /
+    130,445 across the three partitions.
+- Why the docs could not settle it: the Free Edition limitations page never
+  mentions storage credentials, external locations or Kafka — neither allowed
+  nor forbidden — and says outbound internet is "restricted to a limited set of
+  trusted domains". Silence is not support, so it was tested. Identity
+  verification (which widens egress) was **not** needed.
+- Rejected: **the 14-day trial, workspace in this AWS account.** Classic
+  clusters, the account console, and a workspace beside the data in
+  `ap-south-1`. Costs a NAT gateway at ~$1.10/day from creation, a trial that
+  rolls into pay-as-you-go around 2026-10-10, and DBU spend invisible to the
+  AWS budgets (Marketplace is closed to this AISPL account). For a ~$22
+  project, paying that to get what the tests showed is already available was
+  not justified.
+- Rejected: **waiting up to seven days for AWS Pay By Invoice, then
+  Marketplace.** Solves only billing visibility, which Free Edition makes moot.
+- What is given up, named rather than glossed — the interview surface this
+  project loses:
+  - **No classic clusters.** No instance types, no single-node vs multi-node,
+    no hands-on 10-minute auto-terminate, no Jobs Compute vs All-Purpose
+    pricing. These become things explained, not things done.
+  - **No account console**, so no Databricks budget alerts and no
+    account-level APIs. Nothing to guard, since nothing is billed.
+  - **Quotas:** 5 concurrent job tasks, one active pipeline per type, one
+    2X-Small SQL warehouse. Sufficient for this data volume.
+- What is gained besides cost: serverless only permits `AvailableNow` / `Once`
+  triggers — a `ProcessingTime` stream raises
+  `INFINITE_STREAMING_TRIGGER_NOT_SUPPORTED`. **The forgotten always-on stream,
+  which `CLAUDE.md` names as the project's highest cost risk, cannot be
+  started here.** And Unity Catalog secrets are more Databricks surface than
+  the classic secret scopes would have been.
+- Cross-region, by accident not design: the workspace is in **us-east-2
+  (Ohio)**; the bucket and Confluent are in **ap-south-1 (Mumbai)**. Free
+  Edition does not let you pick. Inter-region S3 transfer is cents at this
+  volume.
+- **Unexplained, recorded rather than guessed:** each full read of `orders`
+  (~0.1 GB) took **~3 min 43 s**. Serverless start-up and a Mumbai→Ohio
+  internet path are the suspects; not measured. During the first run I
+  misread "0 rows read, 3 tasks running" as blocked worker egress. It was just
+  slow — the rows-read counter only moves when tasks finish.
+- Risks accepted: Free Edition is **non-commercial use only** (fine for a
+  learning project) and **accounts inactive for extended periods may be
+  deleted** — the same class of loss as the Session 5 Confluent account.
+  Mitigation is structural: everything that matters lives in git and S3, and
+  Bronze is rebuildable from both.
+- Carried from the test: it reused the consumer-group prefix
+  `ledgerline-verifier-`, which already had a READ ACL, so the test measured
+  connectivity and nothing else. **Bronze gets its own group prefix and ACL**
+  before `stream_orders.py` runs.
+- Consequence for the plan: the Databricks clock is gone. The Session 6
+  "three clocks" reasoning reduces to one — Snowflake's 30 days, still not
+  started, still for Session 13.
+
+## Scope grows by three: Airflow, windowed streaming, and GDPR erasure (Session 6)
+
+**In plain words:** three skills the project did not cover are added — an
+Airflow pipeline that runs every platform end to end, streaming with windows
+and watermarks, and GDPR-style "delete this customer everywhere". Each was
+added only after finding a place where a real shop with this data would
+genuinely use it, per the thesis. Roughly 3-4 extra sessions, $0 extra.
+Placement below is tentative and will be fixed when each session opens.
+
+### 1. Airflow orchestrates the whole pipeline, across platforms
+
+- Chosen: **one Airflow DAG** (local, Docker) that runs produce → Databricks
+  Bronze/Silver jobs → Parquet export → Snowflake `COPY INTO` → `dbt run` →
+  reconciliation check. Its strongest use is **backfill**: dimension dumps are
+  partitioned by `dump_date`, so the DAG's logical date `{{ ds }}` drives
+  `replaceWhere dump_date = '{{ ds }}'`, and `airflow dags backfill` re-runs
+  any past night idempotently. Replayability becomes a demonstration, not a
+  claim.
+- Rejected: **Databricks Workflows alone.** Honest note: Workflows *can* run a
+  dbt task against Snowflake, so this is not "impossible otherwise". Rejected
+  because it puts orchestration inside the one platform that is on a free tier
+  whose inactive accounts may be deleted, and because an orchestrator that is
+  not also one of the systems it coordinates is the more common production
+  shape. Workflows still get used for the Databricks-internal jobs themselves.
+- Rejected: **Snowflake Tasks as the orchestrator.** In-warehouse only; they
+  are already planned for Streams & Tasks inside Gold and cannot drive
+  Databricks.
+- Placement: after Gold's first model exists (~Session 15+), so the DAG spans
+  both platforms from its first run.
+
+### 2. Windowed streaming, built where the two topics genuinely meet
+
+- Chosen, two pieces:
+  - **Stream-stream join of `orders` with `inventory.cdc`, with watermarks**:
+    "order lines with no matching stock decrement within 1 hour". The two
+    topics are causally coupled by design, so this is the streaming form of the
+    batch reconciliation already proven (112,650 units = 112,650).
+  - **`dropDuplicatesWithinWatermark` vs `MERGE` for Silver order dedup, built
+    both.** Expected result: the watermark version silently keeps a duplicate
+    that arrives after the watermark (a replay days later), while `MERGE` on
+    `event_id` catches it. A deliberate-failure comparison with a recorded
+    winner.
+- Rejected: **keeping reconciliation batch-only (Gold).** Cheaper, but leaves
+  watermarks, event time vs processing time, and state cleanup as theory —
+  the in-scope Streaming items nothing else in the project builds.
+- Constraint: Free Edition allows only `AvailableNow`/`Once` triggers, so
+  "real time" here means state carried in the checkpoint between runs, not
+  seconds of latency. Stated up front so nobody claims otherwise.
+- Placement: after Silver inventory exists (~Session 11).
+
+### 3. GDPR / PII: erasure through layers built to never forget
+
+- Chosen: the customer generator adds **deterministic synthetic PII** (name,
+  email, phone), seeded by `customer_unique_id` so every run produces the same
+  values. Then: pseudonymise in Silver (salted hash), keep raw PII in one
+  restricted table, and build **right to erasure** for one customer across
+  Bronze, Silver, Gold and Snowflake.
+- Why it is hard, which is why it is worth building: **Kafka topics are
+  immutable** and **Delta time travel keeps deleted rows in old files until
+  `VACUUM`**; Snowflake adds Time Travel and Fail-safe on top. The candidate
+  answer is **crypto-shredding** (encrypt PII with a per-customer key, delete
+  the key), to be weighed against physical deletes when that session opens.
+- Masking: Snowflake masking policies (trial accounts are Enterprise edition);
+  Unity Catalog column masks **only if Free Edition supports them — to be
+  verified, not assumed**, given this session's experience with undocumented
+  Free Edition behaviour.
+- Rejected: **leaving the data PII-free.** Olist was anonymised before
+  publication, so there is nothing to protect — which would make every GDPR
+  claim theoretical. Rejected also: **importing real-looking PII from another
+  dataset**; synthetic, deterministic, and labelled as such is the honest
+  version.
+- Placement: lakehouse half after Silver (~Session 12); Snowflake half inside
+  the Gold window.
+
+### Cost to the calendar
+
+Databricks now has no clock, so items 2 and 3's lakehouse half cost time only.
+The Snowflake trial's 30 days are the one binding clock: GDPR masking/erasure
+in Snowflake and the Airflow DAG both add work inside that window, and should
+be planned before the trial is started, not discovered during it.
+
+## Four smaller additions folded into existing sessions: quarantine, schema contract, CDF, stream monitoring (Session 6)
+
+**In plain words:** four more skills are added, none big enough for its own
+session — each rides inside work already planned. Bad rows get a table of
+their own instead of vanishing; a breaking schema change gets refused on
+purpose; Silver's export reads only what changed; and every stream reports
+whether it is falling behind.
+
+- **Quarantine / dead-letter table — Bronze (S7), with DLT expectations (S11).**
+  A Kafka message that will not decode, or lacks its key, lands in a
+  `*_quarantine` table with a `reason` column and its Kafka coordinates
+  (partition, offset) — never silently dropped. Rejected: **failing the whole
+  batch** on one bad record, which turns one corrupt message into a stopped
+  pipeline; and **dropping bad rows**, which makes the loss invisible.
+- **Schema evolution as an enforced contract — Kafka side (S7).**
+  Set an explicit Schema Registry compatibility mode on both subjects (the
+  current mode has never been checked, only defaulted), then run a
+  deliberate experiment: register a breaking change and assert it is refused.
+  Optionally a CI step that checks a schema against the registry before merge.
+  Rejected: **relying on the default** — a contract nobody has seen refuse
+  anything is an assumption, not a contract.
+- **Change Data Feed — Silver → bridge export (Gold window).**
+  Silver tables are MERGE-written, so a plain stream over them fails or
+  re-reads rewritten files. Enable CDF and export only
+  `insert`/`update_postimage` rows since the last exported version.
+  Rejected: **re-exporting whole Silver tables** each run — simpler, and
+  correct, but it copies unchanged rows every time and hides the
+  "what changed since version N" skill the pattern exists to teach.
+- **Streaming monitoring — every Bronze/Silver stream (S7 onward).**
+  Record each batch's `StreamingQueryProgress` (input rows, batch duration,
+  offsets behind latest) to a small Delta table, and add one check that fails
+  when the backlog grows run over run. Rejected: **Kafka consumer-group lag
+  tools**, which read offsets committed to Kafka — Spark keeps its offsets in
+  the checkpoint, so those tools report stale or no lag for Spark readers.
+- Considered and **left out on purpose**, recorded so the omission reads as a
+  judgment rather than a gap: per-key stateful processing
+  (`applyInPandasWithState`) — this data has no cumulative counters that need
+  state across batches; and event-clock repair — timestamps come from the
+  dataset, not from faulty devices. Building either would be coverage for its
+  own sake, against the project thesis.
+
+## Bronze dimension tables: unpartitioned, `replaceWhere` on a column, every value a string (Session 6)
+
+**In plain words:** each nightly dump is loaded into a Bronze table in a way
+that makes loading the same night twice harmless — the second load replaces
+that night's rows instead of adding a copy. The tables are deliberately not
+partitioned, and every column stays text exactly as the file had it.
+
+- Chosen: Auto Loader (`AvailableNow`) → `foreachBatch` → overwrite with
+  `replaceWhere dump_date IN (<dates in this batch>)` into
+  `workspace.bronze.{customer,product,seller}`. Two independent guarantees:
+  the **checkpoint** stops a normal re-run from re-reading a file, and
+  **`replaceWhere`** makes a re-read harmless if the checkpoint is ever lost
+  or a night is backfilled.
+- Chosen: **no `PARTITIONED BY`.** ~117K rows across 9 dumps; partitioning by
+  date would produce many tiny files for no pruning benefit. `replaceWhere`
+  is a predicate Delta evaluates, not a partition operation, so it works
+  without partitions — and Delta checks every written row matches it, so a
+  row with a stray date fails the write instead of landing silently.
+- Rejected: **partition by `dump_date` + dynamic partition overwrite.** The
+  textbook shape, and correct, but at this size it is a small-file problem
+  created on purpose. Revisit only if a dimension grows by orders of magnitude.
+- Rejected: **plain append.** Simplest, and exactly-once as long as the
+  checkpoint survives. It does not survive a checkpoint reset — every night
+  would double — and Airflow backfill (planned) re-processes nights by design.
+- Chosen: **strings only** (`cloudFiles.inferColumnTypes=false`). Bronze is the
+  faithful record; typing belongs in Silver, where a bad value can be flagged
+  rather than silently nulled by an inference guess at ingest.
+- Chosen: **the file's own `dump_date` column is the key, and must equal the
+  folder name** (`dump_date=YYYY-MM-DD`). The generator writes both. Auto
+  Loader's automatic folder-to-column inference is switched off
+  (`cloudFiles.partitionColumns=""`) so the two cannot collide, and every batch
+  asserts they agree — a disagreement would make `replaceWhere` replace the
+  wrong night.
+- Named constraint, so it is not rediscovered as an incident: this is safe
+  only because **one night = one file = one batch**. If a night ever arrived as
+  several files split across batches, the later batch would replace the
+  earlier one's rows. The replace unit must equal the arrival unit.
+

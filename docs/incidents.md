@@ -397,4 +397,125 @@ place — the original was an accident that happened to be useful.
 produce a partial run of a state-carrying source into a shared topic. The
 evidence is gone; the rule and the guard are not.
 
+## [2026-09-26] — Databricks could not be subscribed on AWS Marketplace; the account is Indian and Marketplace rejects Indian cards
+
+**In plain words:** Session 5 decided to pay for Databricks through AWS
+Marketplace so its charges would show up in the AWS budgets. On the day, the
+subscribe page refused with "You can't accept this offer without a valid
+payment method". The card was fine. The account is billed by AWS's Indian
+entity, and **AWS Marketplace does not accept credit or debit cards from Indian
+accounts at all**. The plan was built on a payment route this account never had.
+
+- What happened: `Try for free` on the Databricks listing reached the terms
+  page, then showed *"You used an invalid or unsupported payment method during
+  your last attempt to create an agreement"*. `Subscribe` stayed disabled.
+  This was minutes after upgrading the account from the Free plan to the Paid
+  plan, which removed the first blocker and exposed this one.
+- What I thought was wrong: first, the Free plan, which does block paid
+  Marketplace offers and was genuinely present. Fixing that was necessary and
+  not sufficient. Second, a card problem on the user's side. Also wrong.
+- Root cause: **Account → Service provider reads "Amazon Web Services India
+  Private Limited"** (AISPL). Under RBI rules on payment aggregators storing
+  card data, AWS Marketplace stopped accepting cards on file for AISPL
+  customers in 2022. The only supported route is switching the account to
+  **Pay By Invoice** through AWS Customer Service, which AWS says can take up to
+  seven days to become usable.
+- Why nothing caught it: every earlier AWS action in this project — S3, IAM,
+  budgets — is a first-party AWS service, and those accept the card normally.
+  Only a **third-party purchase** goes through the path that checks the
+  billing entity, and this was the project's first. The Session 5 decision
+  was researched against Databricks' and AWS's general documentation, which
+  describes Marketplace billing as universally available; the India exception
+  lives in a Marketplace blog post, not on the Databricks listing or the
+  subscribe page. The error message itself blames the payment method and never
+  names the billing entity.
+- Fix: none applied yet — the payment route is a decision, recorded
+  separately once made.
+- Prevention rule: **before choosing a billing route, read the account's
+  Service provider line.** Which legal entity bills the account decides what can
+  be bought through it, and that is a one-line check on the Account page that
+  no amount of product documentation substitutes for. More generally: a plan
+  that depends on "it will show up on the AWS bill" must be checked against
+  *this* account, not against AWS in the abstract.
+
+## [2026-09-26] — Databricks could assume the IAM role but could not read the bucket; the list permission was scoped one character too tightly
+
+**In plain words:** Databricks was given an AWS role that may read the
+`ledgerline/` folder of the landing bucket. It could log in as that role, but
+its "can I read this?" check failed with *Permission Denied*. The role allowed
+listing files under the prefix `ledgerline/` — with a slash — and the check
+asked for `ledgerline` without one. One missing character, and AWS says no.
+
+- What happened: creating the Unity Catalog external location
+  `s3://ledgerline-landing-dev-fffc8b65/ledgerline/` ran Databricks' built-in
+  validation. **Assume Role, Self Assume Role, External ID Condition: Success.
+  Read: Failed.** Plus two File Events failures, which are a separate optional
+  feature (below).
+- What I checked and ruled out, read-only via the AWS CLI: the inline policy
+  *was* attached and pasted correctly; the bucket uses SSE-S3 (AES256), not
+  KMS, so no decrypt permission was missing; the bucket has no bucket policy
+  that could deny.
+- Root cause: the `s3:ListBucket` statement carried a condition
+  `s3:prefix` in `["ledgerline/", "ledgerline/*"]`. A list request with prefix
+  `ledgerline` matches neither. `aws iam simulate-principal-policy` with
+  `s3:prefix=ledgerline` returned **`implicitDeny`**. Adding `"ledgerline"` to
+  the list — the only change made — turned Read, List and Path Exists green.
+  That the validation sends the no-slash form is inferred from the fix, not
+  observed: S3 list calls are data events and are not in CloudTrail by default.
+- Why nothing caught it: the policy was written to be least-privilege, and it
+  was correct for every request *I* imagined, all of which named a folder the
+  way a human writes one — with a trailing slash. The request that failed came
+  from software normalising the path differently. The error named neither the
+  action nor the prefix, only "Permission Denied — check the path and the
+  credential", which points at the two things that were fine.
+- File Events failures: Databricks can subscribe to S3 event notifications
+  (SNS/SQS) so Auto Loader learns of new files without listing. The role was
+  deliberately given no SNS/SQS permissions; Auto Loader falls back to
+  directory listing, which for 9 files is free. Recorded as a choice, not a
+  fault.
+- End-to-end proof, not just a green validation: a notebook on Free Edition
+  serverless read `ledgerline/dims/customer/` and returned **8,395 rows** —
+  the same count as the three customer CSVs downloaded and parsed locally
+  (1 + 326 + 8,068).
+- Prevention rule: **when an S3 policy scopes `ListBucket` by `s3:prefix`,
+  list the prefix both with and without the trailing slash** —
+  `["p", "p/", "p/*"]`. And before handing a scoped policy to another system,
+  run `aws iam simulate-principal-policy` against the request shapes that
+  system might send, not only the ones you would send.
+
+## [2026-09-26] — the Bronze re-load test failed because "does this table exist?" answered No for a table that existed
+
+**In plain words:** the Bronze notebook decided between "create the table" and
+"replace this night's rows" by asking Databricks whether the table already
+existed. Inside the streaming batch function it answered **No** for a table
+that had been created minutes earlier, so the code tried to create it again
+and Databricks refused. The replace path — the one the whole design depends
+on — had never actually run.
+
+- What happened: first load and plain re-run both passed with exact counts
+  (customer 8,395; product 98,853; seller 9,285). The forced replay —
+  checkpoints deleted so Auto Loader re-reads all 9 files — failed with
+  `TABLE_OR_VIEW_ALREADY_EXISTS: bronze.customer`, raised from the
+  create-table branch (cell line 27).
+- Root cause, as far as verified: `spark.catalog.tableExists(...)`, called
+  inside `foreachBatch`, returned `False` for an existing Unity Catalog table.
+  On serverless, `foreachBatch` runs in a separate *cloned* Spark Connect
+  session (the error names it). **Why** the check is wrong there was not
+  investigated; the observation is what is recorded.
+- Why nothing caught it: the two earlier runs could not reach the broken
+  branch. The first load legitimately took the create path; the plain re-run
+  found no new files, so `foreachBatch` was never called at all. **Two green
+  checks, zero executions of `replaceWhere`.** A passing test only covers the
+  code it actually ran — and here the test designed to exercise the replace
+  path was the first thing that did.
+- Fix: removed the branch. Each empty table is created once, before the stream
+  starts, in the notebook's own session; `foreachBatch` now always writes with
+  `replaceWhere`, including the first-ever batch. One path, exercised every
+  run.
+- Prevention rule: **don't branch on catalog state inside `foreachBatch`.** Set
+  up tables before the stream starts, and keep the batch function a single
+  write path. More generally: when a design has a "normal" path and a
+  "recovery" path, make sure a test actually drives the recovery path — a
+  re-run with nothing new to process proves nothing about it.
+
 <!-- Append further entries below this line. -->

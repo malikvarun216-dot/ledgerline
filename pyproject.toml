@@ -35,6 +35,8 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 # Tests assert on literal fixture values; magic numbers are the point.
 "tests/*" = ["B011"]
+# Databricks notebooks: the runtime injects spark, dbutils and display as globals.
+"databricks/*" = ["F821"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
