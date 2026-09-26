@@ -1037,3 +1037,102 @@ someone imported by hand and then forgot to re-import.
   Databricks.** The token is read-only, so it cannot push anyway — the
   workspace is a consumer of git, not a second place to author code.
 
+## Live data is treated as production: the contaminated topic is repaired downstream, not deleted (Session 6)
+
+**In plain words:** 159 wrong events landed on `inventory.cdc` from the test
+suite. The quick fix was to delete the topic and regenerate it. It was
+rejected: the project now treats its live topics the way a company treats
+production — where deleting a shared topic is almost never allowed — so the
+topic stays as it is, and every downstream layer excludes the bad events
+using a published denylist. Mistakes like this one are treated as material,
+not embarrassments.
+
+- Standing principle, at the human's instruction: **aim for what a real
+  production team would do.** Experiments and the mistakes they cause are the
+  point of the project; the response to a mistake is the production response,
+  even when a sandbox shortcut exists.
+- What was measured first (step 2 of any incident response — identify before
+  fixing): every live record was compared with a clean local regeneration.
+  279 extra records = **120 exact duplicates** of real events (harmless — Silver
+  dedups on `event_id`) + **159 contaminated records** (53 distinct
+  `event_id`s × 3 runs). They touch **23 SKUs**, and **0 SKUs end with the
+  wrong final stock**: the bad events carry early `seq` values that later,
+  correct events supersede. What *is* wrong is anything computed from the raw
+  log: units sold reads **112,806** against a true **112,650**; excluding the
+  denylist and deduplicating on `event_id` gives exactly **112,650**.
+- Chosen: **denylist + downstream filtering.** The 53 event IDs, with how they
+  were identified, are committed at
+  `ops/incidents/2026-09-26_inventory_cdc_denylist.json`. Bronze (S7) ingests
+  the topic **unfiltered** — it is the faithful record, including the
+  mistake. Silver (S9) excludes the denylist before its MERGE. The reconciliation
+  must read 112,650 from the filtered data.
+- Rejected: **delete, recreate, re-produce the topic.** Clean and fast here,
+  because the generator can rebuild every event. In production the topic is
+  often the only copy of history and other teams read it; this would also
+  erase the evidence the incident entry is about.
+- Rejected: **compensating events** (publish corrections). The right tool
+  when current state is wrong — here current state is already right for all
+  23 SKUs. What is wrong is history and totals, and adding more events cannot
+  retract ones already counted; it would make the log's arithmetic worse.
+- Rejected: **a repair topic** (`inventory.cdc.v2` minus the bad events, then
+  move consumers). Real, and the answer when many consumers can't each add a
+  filter. Here there is one consumer (Bronze), so a denylist is the smaller,
+  reversible change.
+- Named gaps this exposed, each a candidate for its session:
+  - **No provenance on events.** The bad runs could only be found by
+    re-generating the truth and diffing. A per-run ID in a message header
+    (candidate for S7) would make it one query.
+  - **The verifier overstates ties.** Its "43 keys with a tied seq" counts
+    identical duplicates as conflicts; only 23 keys have genuinely different
+    events at the same `seq`. It should report the two separately.
+  - **Test and live credentials were the same.** The laptop `.env` holds the
+    one writer key. Production would give dev/test a credential with no write
+    permission on live topics. Candidate: a dev-only service account whose
+    ACLs cover a `dev.` topic prefix only.
+- Consequence for Session 10: the CDC-correctness experiment (`exp_04`) now
+  has a real contamination to work on — assert the raw totals are wrong
+  (112,806), apply the denylist, assert they are right (112,650).
+
+
+## Drill sessions between build phases: break the guarantees on purpose, and re-break every past incident (Session 6)
+
+**In plain words:** after each major layer is finished, one session is spent
+not building anything but *attacking* what was built — replaying data,
+crashing jobs mid-run, deleting checkpoints — to prove the idempotency,
+replay and dedup guarantees actually hold. The same session re-triggers every
+past incident on purpose to confirm its guard still catches it. Production
+teams call these **game days** and **incident regression**.
+
+- Chosen: three drills, named rather than numbered so existing references to
+  S9, S10, S13 and S17 stay correct:
+  - **Drill 1 — after Session 7** (Bronze complete): replay, idempotency,
+    exactly-once into Bronze, and incident regression.
+  - **Drill 2 — after Session 10** (Silver complete): dedup, MERGE correctness,
+    out-of-order events, end-to-end reconciliation (including the S6
+    denylist: 112,806 → 112,650).
+  - **Drill 3 — after Gold, inside the Snowflake window**: late data, SCD2
+    point-in-time, the whole pipeline replayed from empty.
+- Each drill has three parts: (1) break each guarantee on purpose and assert
+  it holds — or assert the bug first, then fix; (2) re-trigger every past
+  incident on the data path and confirm its guard fires — **an incident with
+  no automated guard is itself a finding**, fixed in the drill; (3) a
+  discussion-style revision of the question-bank items the drill touched.
+- Why between phases, not at the end: a guarantee can only be attacked once
+  the layer providing it exists, and a weakness found right after a layer is
+  cheaper than one found three layers later. Why not only inside build
+  sessions: build sessions test what they build; nothing re-checks earlier
+  guards against later changes — which is how the Session 5 guard's own test
+  became the Session 6 contamination.
+- Rejected: **relying on the six deliberate-failure experiments alone.** They
+  each prove one pattern once, in the session that builds it. They do not
+  re-run past incidents, and nothing re-runs them after later changes.
+- Rejected: **a single drill at the end of the project.** Too late to be
+  cheap, and it would collide with the Snowflake trial's closing days.
+- Rejected: **numbering drills as sessions** (S8 = drill). Renumbering would
+  silently break every existing "Session 9 / 10 / 13 / 17" reference in the
+  docs and the deferred question bank.
+- Known gap going in: the S5 incident "CDC event count 50 too high" has **no
+  automated guard** — no test asserts the total of 158,346. Drill 1 builds it.
+- Consistent with the Session 6 principle "treat live systems as production":
+  drills run against the live topics and tables, with before/after counts,
+  not against copies.

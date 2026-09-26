@@ -587,4 +587,22 @@ entirely.
   system. Second rule: **a test that exercises a "dangerous on purpose" path
   must assert *where* it stops**, so that stopping later is a failure.
 
+### Correction (2026-09-26, same day) — the topic is not being cleaned, and the damage is smaller than stated
+
+The entry above says the topic "is still contaminated — cleaning it is a
+separate, human-approved action (delete + recreate + re-produce)". **That
+plan was dropped.** The project now treats live topics as production, so the
+topic stays and downstream layers exclude the bad events (decision entry,
+"Live data is treated as production").
+
+The entry also repeats the verifier's "43 keys with a tied `seq`". **That
+overstates it.** Comparing every live record with a clean regeneration: 120 of
+the 279 extra records are exact duplicates of real events, which also show up
+as "tied" but carry identical content. The genuine contamination is **159
+records, 53 distinct event IDs, touching 23 SKUs** — and **no SKU ends with the
+wrong final stock**, because the bad events sit at early `seq` values that
+correct later events supersede. Totals computed from the raw log are wrong
+(112,806 units against 112,650). The denylist is at
+`ops/incidents/2026-09-26_inventory_cdc_denylist.json`.
+
 <!-- Append further entries below this line. -->

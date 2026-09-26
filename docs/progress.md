@@ -1258,3 +1258,56 @@ the problem stayed invisible. Full account in `incidents.md`.
   stale facts, and a standing note that the **Snowflake bullet must be rewritten
   the same way — from verified facts — when the trial is created (Session 13).**
 
+- **CI confirmed green after the fix** — GitHub Actions run #8 (`80e3eb0`, the
+  fix) and #9 (`40960eb`) passed; #6 and #7 were the red runs.
+- **Why the failing tests reached CI only now:** the Session 5 commit
+  (`bbec5d7`) has no CI run of its own — it was pushed together with the
+  Session 6 Bronze commit, and Actions runs only the newest commit of a push.
+  The tests written in Session 5 were first exercised by CI in run #6.
+- **ci #3, carried as unconfirmed since Session 4, is closed:** the Actions
+  list shows #3 with the *cancelled* icon, not the failure icon #6/#7 carry,
+  and #3/#4 are the same commit message a minute apart with #4 green —
+  consistent with `cancel-in-progress: true`. Not a failure; removed from the
+  carry list.
+- **Two candidates raised by "what would production do?"** — not decided,
+  to weigh when their sessions open: (1) **S7:** stamp a provenance header (a
+  per-run ID) on every generated event, so a bad run can be found by query
+  rather than by symptoms; (2) **S10:** make the deliberate-contamination
+  experiment end with the production fix — a compensating event, or a Silver
+  repair via Delta time travel — rather than recreating the topic.
+
+### Next — revised: Drill 1 follows Session 7
+Recorded the same day, after the `### Next` above. Session 7 is unchanged.
+Added (decision entry "Drill sessions between build phases"):
+
+**Drill 1 — after Session 7, before Silver (Session 8)**
+
+*Part 1 — break the guarantees on purpose, prove they hold*
+- Dims replay: re-deliver an existing night's file with changed content →
+  `replaceWhere` replaces that night only; other nights untouched.
+- New data only: the generator adds a 4th night → Auto Loader loads that one
+  file.
+- Crash mid-load: stop the Kafka Bronze job partway, restart → no gaps and no
+  duplicates by `(partition, offset)`.
+- The `txnAppId` trap: delete the checkpoint but keep the same app ID →
+  assert Delta **silently skips** batches (data loss, no error); then fix with
+  a new app ID.
+- Producer duplicates: run the order generator twice → Bronze keeps both
+  (correct for Bronze); count duplicates by `event_id`.
+- Contaminated CDC: Bronze holds all 158,625; the denylist matches exactly 159.
+
+*Part 2 — re-break past incidents, confirm each guard fires*
+- S2 CRLF bytes · S3 `.env` not loaded → admin key · S4 wrong port / silent
+  hang · S5 partial CDC run to Kafka · S6 S3 prefix without trailing slash ·
+  S6 `tableExists` in `foreachBatch` · S6 tests publishing to live (count the
+  topic before and after the suite).
+- **S5 "CDC count 50 off" has no guard** → build a test asserting 158,346.
+
+*Part 3 — revision discussion:* bank items B1, B2, B4, B5, B10, B11, B13, B14.
+
+**Carried into Session 7 from this addendum:** the production-style remediation
+(Bronze ingests `inventory.cdc` unfiltered; denylist at
+`ops/incidents/2026-09-26_inventory_cdc_denylist.json`), and the candidates for
+a provenance header, a dev-only Kafka credential, and a verifier that reports
+duplicates and genuine `seq` conflicts separately. **Remove "clean the topic"
+from any list — the topic stays as it is, by decision.**
