@@ -8,6 +8,7 @@ restart-safe. Everything Session 9 and Session 10 do rests on those.
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from generators._common import MemorySink, from_micros
 from generators.inventory_cdc import (
@@ -368,17 +369,38 @@ def test_partial_cdc_run_is_refused_for_kafka():
     assert "--allow-partial" in message, "the error must name the escape hatch"
 
 
-def test_partial_cdc_run_is_allowed_when_asked_for_explicitly():
+def test_partial_cdc_run_is_allowed_when_asked_for_explicitly(raw_dir):
     """Session 10 contaminates the topic on purpose, so the door must open.
 
-    Checked by confirming the guard is not what stops it: with the flag set the
-    run gets past the refusal and fails on the missing broker instead, which is
-    a different failure entirely.
-    """
-    code, message = _run_cdc(["--sink", "kafka", "--limit", "50", "--allow-partial"])
+    Checked by confirming the guard is not what stops it: with the flag set,
+    the run gets past the refusal, loads data, builds events, and only then
+    fails -- at the Kafka sink, because tests have no Kafka credentials
+    (``no_live_services`` in conftest) and CI has no ``confluent_kafka``.
 
-    assert "refusing" not in message
-    assert code != 0 or message == "", "no broker in tests, so this cannot succeed"
+    Session 6: the first version of this test ran against the real
+    ``data/raw`` and a real ``.env``, so on a developer machine it did NOT
+    fail at the sink -- it published a 50-order partial run to the live topic,
+    three times. It now uses the fixture Olist and asserts the exact kind of
+    failure, so "it got further than expected" is a red test, not a produce.
+    """
+    import sys
+
+    from generators import inventory_cdc
+
+    argv = ["inventory_cdc.py", "--sink", "kafka", "--limit", "50", "--allow-partial",
+            "--raw-dir", str(raw_dir)]
+    old = sys.argv
+    sys.argv = argv
+    try:
+        # SystemExit (the refusal) is deliberately NOT in this tuple: if the
+        # guard fired, it propagates and the test fails.
+        with pytest.raises((ImportError, RuntimeError)) as stopped_at_sink:
+            inventory_cdc.main()
+    finally:
+        sys.argv = old
+
+    message = str(stopped_at_sink.value)
+    assert "confluent_kafka" in message or "KAFKA_BOOTSTRAP_SERVERS" in message
 
 
 def test_order_events_has_no_partial_guard_and_that_is_deliberate():

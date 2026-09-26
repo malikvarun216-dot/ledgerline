@@ -33,6 +33,56 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Every credential a generator could find. Cleared for every test.
+_LIVE_CREDENTIALS = (
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "KAFKA_API_KEY",
+    "KAFKA_API_SECRET",
+    "SCHEMA_REGISTRY_URL",
+    "SCHEMA_REGISTRY_API_KEY",
+    "SCHEMA_REGISTRY_API_SECRET",
+    "DATABRICKS_HOST",
+    "DATABRICKS_TOKEN",
+    "SNOWFLAKE_ACCOUNT",
+    "SNOWFLAKE_USER",
+    "AWS_PROFILE",
+    "AWS_SESSION_TOKEN",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_live_services(monkeypatch, tmp_path):
+    """No test may reach a real broker, registry or bucket — ever.
+
+    Session 6 found the suite producing to the live Confluent topic. A test ran
+    ``inventory_cdc.main()`` with ``--sink kafka``; ``main()`` reads ``.env``,
+    and on a developer machine that file holds real keys and
+    ``confluent_kafka`` is installed. So a test whose docstring expected "no
+    broker in tests" instead published a 50-order partial CDC run — three
+    times — re-creating the 43 tied-``seq`` SKUs of the Session 5 incident.
+    CI never showed it: CI has neither ``.env`` nor ``confluent_kafka``.
+
+    Three layers, so that no single slip reopens the door:
+
+    * ``.env`` is never read (``load_local_env`` sees it as already loaded);
+    * the credentials it would have supplied are removed from the process;
+    * AWS gets throwaway keys and no credentials file, so a stray boto3 call
+      fails authentication instead of falling back to ``~/.aws/credentials``
+      — an admin key on the author's machine.
+
+    A test that needs a variable sets it itself with ``monkeypatch.setenv``,
+    which runs after this fixture and wins.
+    """
+    from generators import _common
+
+    monkeypatch.setattr(_common, "_env_loaded", True)
+    for name in _LIVE_CREDENTIALS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing-not-a-real-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing-not-a-real-secret")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-aws-credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-aws-config"))
+
 # Stable IDs, readable in failure output. Real Olist IDs are 32-char hashes;
 # these are short on purpose so an assertion diff is legible.
 CU_MOVER = "cu_mover"

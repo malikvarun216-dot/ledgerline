@@ -518,4 +518,73 @@ on — had never actually run.
   "recovery" path, make sure a test actually drives the recovery path — a
   re-run with nothing new to process proves nothing about it.
 
+## [2026-09-26] — the test suite published to the live Kafka topic, re-poisoning 43 SKUs; CI failed for a different reason and hid it
+
+**In plain words:** one of the tests written in Session 5 to *protect* the CDC
+topic from partial runs was itself producing a partial run to the real topic
+every time the tests ran on the laptop. It ran three times today, and put the
+same 43 conflicting stock values back onto `inventory.cdc` that the Session 5
+incident had been about. CI showed a red build that pointed somewhere else
+entirely.
+
+- What happened: `dev` went red on GitHub Actions — 2 failed, 120 passed —
+  both in `tests/test_inventory_cdc.py`, both with
+  `olist_orders_dataset.csv not found`. Investigating why those two tests
+  needed real data led to asking what they do on a machine that **has** it.
+- The contamination, measured with the read-only verifier: `inventory.cdc`
+  holds **158,625** records against a clean **158,346** — **279 extra, exactly
+  3 × 93** (three 50-order runs). **43 keys with a tied `seq`**, 226 duplicate
+  `event_id`s, every record `produced_at 2026-09-26`. `orders` checked too:
+  394,090 records, 394,090 distinct — untouched.
+- Root cause, two parts:
+  1. `test_partial_cdc_run_is_allowed_when_asked_for_explicitly` runs
+     `inventory_cdc.main()` with `--sink kafka --limit 50 --allow-partial`.
+     `main()` calls `load_local_env()`, which reads `.env` — on the laptop
+     that file holds the **real** Confluent keys, and `confluent_kafka` is
+     installed. The test's docstring assumed "no broker in tests"; on a
+     developer machine there was one, fully authorized.
+  2. The refusal guard sat **after** the full Olist load, so even the
+     *refusal* test needed `data/raw/` — which CI does not have (gitignored,
+     ~120 MB). That is the CI failure.
+- Who ran it: pytest ran locally in Session 5 and **twice in Session 6 by
+  Claude**, as a routine check after editing the Bronze notebook and
+  `pyproject.toml`. Nobody knew the suite could produce.
+- Why nothing caught it — the valuable part:
+  - **CI could never see it.** CI has no `.env` and no `confluent_kafka`, so
+    there the test fails at import and passes the assertion. The one
+    environment that could have exposed the produce was the one where the
+    test "passed".
+  - **The local suite was green.** A produce that succeeds is not an error;
+    the test's assertion (`code != 0 or message == ""`) was satisfied either
+    way.
+  - **The test's intent and its effect were opposite**, and the docstring
+    described the intent. It was written to prove the door *can* open for
+    Session 10's deliberate contamination — and it opened the door for real.
+  - The `.env` loader was added in Session 4 precisely so CLIs would find
+    their keys. Tests that call a CLI's `main()` inherit that.
+- Fix, three parts:
+  1. `tests/conftest.py`: an **autouse fixture `no_live_services`** — for every
+     test, `.env` is never read, Kafka / Schema Registry / Databricks /
+     Snowflake credentials are removed, and AWS gets throwaway keys with no
+     credentials file (so a stray boto3 call cannot fall back to the admin key
+     in `~/.aws/credentials`).
+  2. `inventory_cdc.main()`: the partial-run guard now runs **before** any data
+     is loaded — it depends only on arguments.
+  3. The "allowed" test uses the fixture Olist and asserts it stops **at the
+     Kafka sink** (`ImportError` or the missing-credentials `RuntimeError`),
+     so "got further than expected" is a red test, not a produce.
+- Verified after the fix: full suite green, lint clean; the refusal fires with
+  a non-existent `--raw-dir`; and **the live topic was re-counted after a full
+  local test run: still 158,625** — the suite no longer reaches it.
+- Not yet done: the topic itself is still contaminated. Cleaning it is a
+  separate, human-approved action (delete + recreate + re-produce), recorded
+  when taken.
+- Prevention rule: **tests must be unable to reach a live service, by
+  construction — not by the absence of credentials on the machine running
+  them.** Any test that calls a CLI entry point inherits whatever that entry
+  point loads (`.env`, `~/.aws`, installed clients). Isolate at the fixture
+  level, for every test, and prove it with a before/after count on the real
+  system. Second rule: **a test that exercises a "dangerous on purpose" path
+  must assert *where* it stops**, so that stopping later is a failure.
+
 <!-- Append further entries below this line. -->

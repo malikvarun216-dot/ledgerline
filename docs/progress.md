@@ -1229,3 +1229,32 @@ Confluent: two ~0.1 GB reads, ~$0.01.
   rebuildable from git + S3.
 - Queue-full retry still never fired; `requirements-dev.txt` resolution still
   unknown; ci #3 still unconfirmed.
+
+### Addendum — CI went red, and the test suite had been publishing to Kafka
+Written the same day, after the entry above.
+
+**In plain words:** the push of this session's work turned CI red (2 of 122
+tests). Chasing why found something worse: on the laptop, one of those tests
+was publishing a 50-order partial CDC run to the **live** `inventory.cdc`
+topic every time the suite ran. It ran three times today — twice by Claude.
+The entry above says the suite passes; it did, and that green was part of how
+the problem stayed invisible. Full account in `incidents.md`.
+
+- **Measured:** `inventory.cdc` = **158,625** records (clean is 158,346): 279
+  extra = 3 x 93, **43 keys with a tied `seq`** again. `orders` untouched
+  (394,090 / 394,090 distinct).
+- **Fixed:** autouse fixture `no_live_services` in `tests/conftest.py` — no
+  test can read `.env`, see a live credential, or fall back to
+  `~/.aws/credentials`. The partial-run guard now fires before any data load
+  (the actual CI failure: CI has no `data/raw`). The "allowed" test uses
+  fixture data and asserts it stops at the Kafka sink.
+- **Verified:** suite green and lint clean locally; refusal works with a
+  non-existent `--raw-dir`; **the live topic re-counted after a full local
+  test run: still 158,625** — the suite no longer reaches it. CI result on the
+  next push: not yet seen.
+- **Not done:** the topic is still contaminated — cleaning it needs a
+  human-approved delete + recreate + re-produce.
+- `CLAUDE.md` rewritten for Free Edition: platform split, budget section, two
+  stale facts, and a standing note that the **Snowflake bullet must be rewritten
+  the same way — from verified facts — when the trial is created (Session 13).**
+

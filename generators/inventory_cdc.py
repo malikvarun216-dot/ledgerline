@@ -454,25 +454,9 @@ def main() -> int:
         print(json.dumps(AVRO_SCHEMA, indent=2))
         return 0
 
-    orders = olist.load("orders", args.raw_dir).sort_values("order_purchase_timestamp", kind="stable")
-    if args.limit:
-        orders = orders.head(args.limit)
-    items = olist.load("order_items", args.raw_dir)
-    items = items[items["order_id"].isin(set(orders["order_id"]))]
-
-    events, stats = build_cdc_events(
-        items,
-        orders,
-        headroom=args.headroom,
-        restock_every=args.restock_every,
-        restock_qty=args.restock_qty,
-        delist_count=args.delist_count,
-        seed=args.seed,
-    )
-
-    reconstructed = sum(units_sold_from_cdc(events).values())
-    ordering = shuffle_out_of_order(events, args.out_of_order_pct, args.seed)
-
+    # Checked before any data is loaded: it depends only on the arguments, so
+    # refusing should not first cost a full Olist load -- and a test of the
+    # refusal must not need the raw CSVs, which CI does not have.
     if args.sink == "kafka" and args.limit and not args.allow_partial:
         # A --limit run of THIS generator is not a prefix of the full run, and
         # that is the whole reason this guard exists.
@@ -507,6 +491,25 @@ def main() -> int:
             "  contaminating the topic is the point (Session 10 does exactly\n"
             "  that, deliberately)."
         )
+
+    orders = olist.load("orders", args.raw_dir).sort_values("order_purchase_timestamp", kind="stable")
+    if args.limit:
+        orders = orders.head(args.limit)
+    items = olist.load("order_items", args.raw_dir)
+    items = items[items["order_id"].isin(set(orders["order_id"]))]
+
+    events, stats = build_cdc_events(
+        items,
+        orders,
+        headroom=args.headroom,
+        restock_every=args.restock_every,
+        restock_qty=args.restock_qty,
+        delist_count=args.delist_count,
+        seed=args.seed,
+    )
+
+    reconstructed = sum(units_sold_from_cdc(events).values())
+    ordering = shuffle_out_of_order(events, args.out_of_order_pct, args.seed)
 
     if args.sink == "kafka":
         from generators._common import KafkaAvroSink
