@@ -41,43 +41,75 @@ STREAM_ARGS = {
     "app_id": APP_ID,
 }
 
-run_stream(**STREAM_ARGS)
+progress = run_stream(**STREAM_ARGS)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Verify — against the topic itself, counted independently on a laptop
+# MAGIC ## Verify — every message on the topic, once; every event of the dataset, at least once
 # MAGIC
-# MAGIC `scripts/inspect_topic.py` read the live topic without Spark: 394,090 records, 394,090 distinct
-# MAGIC `event_id`, 131,458 / 132,187 / 130,445 per partition, 99,441 `created` events carrying
-# MAGIC 112,650 units. Bronze must reproduce every one of those numbers.
+# MAGIC **Messages** are checked against the broker's own end offsets for this run (`topic_end`).
+# MAGIC Session 7 checked against numbers the laptop counted (394,090; 131,458 / 132,187 / 130,445),
+# MAGIC written into this notebook — correct that day, and wrong the moment a legitimate message
+# MAGIC arrived. The laptop verifier is still the independent cross-check, run by hand.
+# MAGIC
+# MAGIC **Events** are a property of the dataset, not of the topic: the full order run is 394,090
+# MAGIC distinct `event_id`s, 99,441 `created` events, 112,650 units. Since Drill 1 the topic also
+# MAGIC holds deliberate duplicates — two 10-order partial runs, 37 messages each, every one labelled
+# MAGIC with a `ledgerline.run_id` header. Bronze keeps them (it is the faithful record); Silver
+# MAGIC removes them by `event_id`. So: every extra row must be a labelled one.
 
 # COMMAND ----------
 
-PER_PARTITION = {0: 131_458, 1: 132_187, 2: 130_445}
-
-check_coordinates(TABLE, QUARANTINE, PER_PARTITION)
+END = topic_end(progress)
+print(f"topic end, per partition (broker): {END}  total {sum(END.values()):,}")
+check_coordinates(TABLE, QUARANTINE, END)
 
 facts = spark.sql(
     f"""
-    SELECT count(*) AS rows,
-           count(DISTINCT event_id) AS distinct_event_ids,
-           count_if(event_type = 'created') AS created,
-           sum(CASE WHEN event_type = 'created' THEN size(items) END) AS units,
-           count(DISTINCT _schema_id) AS schema_ids,
-           min(event_ts) AS first_event, max(event_ts) AS last_event,
-           min(produced_at) AS first_produced, max(produced_at) AS last_produced
-    FROM {TABLE}
+    WITH one_per_event AS (
+      SELECT * FROM {TABLE}
+      QUALIFY row_number() OVER (PARTITION BY event_id ORDER BY _kafka_partition, _kafka_offset) = 1
+    )
+    SELECT (SELECT count(*) FROM {TABLE}) AS rows,
+           (SELECT count(DISTINCT event_id) FROM {TABLE}) AS distinct_event_ids,
+           (SELECT count_if({header_sql('ledgerline.run_id')} IS NOT NULL) FROM {TABLE}) AS labelled_rows,
+           (SELECT count_if(event_type = 'created') FROM one_per_event) AS created,
+           (SELECT sum(CASE WHEN event_type = 'created' THEN size(items) END) FROM one_per_event) AS units,
+           (SELECT count(DISTINCT _schema_id) FROM {TABLE}) AS schema_ids
     """
 ).collect()[0]
 print(facts)
-assert facts.rows == 394_090
+assert facts.rows == sum(END.values())
 assert facts.distinct_event_ids == 394_090
+# Every duplicate came from a labelled run, and every labelled row is a duplicate.
+assert facts.rows - facts.distinct_event_ids == facts.labelled_rows
 assert facts.created == 99_441
 assert facts.units == 112_650
 
 check_batches_not_doubled(TABLE)
 check_backlog(STREAM)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Who sent the extra messages — one query, thanks to the provenance header
+
+# COMMAND ----------
+
+display(
+    spark.sql(
+        f"""
+        SELECT {header_sql('ledgerline.run_id')} AS run_id,
+               {header_sql('ledgerline.producer')} AS producer,
+               {header_sql('ledgerline.scope')} AS scope,
+               count(*) AS messages, count(DISTINCT event_id) AS events,
+               min(_kafka_timestamp) AS first_at, max(_kafka_timestamp) AS last_at
+        FROM {TABLE}
+        GROUP BY ALL ORDER BY first_at
+        """
+    )
+)
 
 # COMMAND ----------
 
@@ -97,8 +129,7 @@ quarantine_self_test(TABLE, SUBJECT)
 
 # COMMAND ----------
 
-run_stream(**STREAM_ARGS)
-check_coordinates(TABLE, QUARANTINE, PER_PARTITION)
+check_coordinates(TABLE, QUARANTINE, topic_end(run_stream(**STREAM_ARGS)))
 
 # COMMAND ----------
 

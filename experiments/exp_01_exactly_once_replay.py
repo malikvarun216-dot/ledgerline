@@ -44,7 +44,8 @@
 
 TOPIC = "orders"
 SUBJECT = "orders-value"
-TOTAL = 394_090
+# The topic's size is read from the broker on each load (topic_end), not written here: it was
+# 394,090 until Drill 1 added 74 labelled duplicates, and a frozen total would have failed.
 EXP_STATE = f"/Volumes/{CATALOG}/{SCHEMA}/checkpoints/exp_01"
 
 
@@ -80,12 +81,12 @@ def load_then_replay_last_batch(variant, idempotent):
     args = fresh(variant)
 
     # 1. A clean, complete load.
-    run_stream(**args, idempotent=idempotent)
+    total = sum(topic_end(run_stream(**args, idempotent=idempotent)).values())
     offsets, commits = batch_files(args["checkpoint"], "offsets"), batch_files(args["checkpoint"], "commits")
     last = commits[-1]
     print(f"{variant}: checkpoint after the load — offsets {offsets}, commits {commits}")
     assert offsets == commits == list(range(last + 1)), "checkpoint not in the expected shape"
-    assert spark.table(args["table"]).count() == TOTAL
+    assert spark.table(args["table"]).count() == total
 
     # 2. Leave the state a crash would: batch `last` is in Delta, its offsets are logged,
     #    its "done" marker is not.
@@ -110,6 +111,7 @@ def load_then_replay_last_batch(variant, idempotent):
     ).collect()[0]
     result = {
         "variant": variant,
+        "total": total,
         "replayed_batch": last,
         "rows": s.rows,
         "distinct_offsets": s.distinct_offsets,
@@ -122,7 +124,7 @@ def load_then_replay_last_batch(variant, idempotent):
     # The replay covered exactly the batch's own offsets — the same rows, not new ones.
     assert result["replay_rows_by_offsets"] == result["replayed_batch_size"]
     # Nothing lost in either variant.
-    assert result["distinct_offsets"] == TOTAL
+    assert result["distinct_offsets"] == total
     check_batches_not_doubled(args["table"], expect_equal=idempotent)
     return result, args
 
@@ -136,7 +138,7 @@ def load_then_replay_last_batch(variant, idempotent):
 
 bug, bug_args = load_then_replay_last_batch("bug", idempotent=False)
 assert bug["duplicate_rows"] == bug["replayed_batch_size"] > 0, "expected the replayed batch to be doubled"
-assert bug["rows"] == TOTAL + bug["replayed_batch_size"]
+assert bug["rows"] == bug["total"] + bug["replayed_batch_size"]
 assert bug["rows_stamped_replayed_batch"] == 2 * bug["replayed_batch_size"]
 print(f"BUG PRESENT: {bug['duplicate_rows']:,} duplicate rows, and the job reported success.")
 
@@ -149,7 +151,7 @@ print(f"BUG PRESENT: {bug['duplicate_rows']:,} duplicate rows, and the job repor
 
 fix, fix_args = load_then_replay_last_batch("fix", idempotent=True)
 assert fix["duplicate_rows"] == 0
-assert fix["rows"] == TOTAL
+assert fix["rows"] == fix["total"]
 assert fix["rows_stamped_replayed_batch"] == fix["replayed_batch_size"]
 print(
     f"FIX HOLDS: batch {fix['replayed_batch']} re-ran, and Delta skipped its write — "

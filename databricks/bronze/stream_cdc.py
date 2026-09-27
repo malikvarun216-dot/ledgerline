@@ -41,22 +41,24 @@ STREAM_ARGS = {
     "app_id": APP_ID,
 }
 
-run_stream(**STREAM_ARGS)
+progress = run_stream(**STREAM_ARGS)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Verify — against the topic, counted independently on a laptop
+# MAGIC ## Verify — against the topic's own end offsets, then against what the topic is known to hold
 # MAGIC
-# MAGIC The topic holds 158,625 records: 158,346 clean events, 120 exact duplicates of clean events,
-# MAGIC and 159 contaminated records (53 distinct `event_id`s, three test runs each). So Bronze must hold
-# MAGIC 158,625 rows and 158,346 + 53 = **158,399** distinct `event_id`s.
+# MAGIC Messages are checked against the broker's end offsets for this run (`topic_end`), not against
+# MAGIC numbers written into this notebook (see stream_orders). The laptop counted 158,625 on
+# MAGIC 2026-09-27 (52,838 / 53,699 / 52,088): 158,346 clean events, 120 exact duplicates of clean
+# MAGIC events, and 159 contaminated records (53 distinct `event_id`s, three test runs each). So Bronze
+# MAGIC must hold 158,346 + 53 = **158,399** distinct `event_id`s.
 
 # COMMAND ----------
 
-PER_PARTITION = {0: 52_838, 1: 53_699, 2: 52_088}
-
-check_coordinates(TABLE, QUARANTINE, PER_PARTITION)
+END = topic_end(progress)
+print(f"topic end, per partition (broker): {END}  total {sum(END.values()):,}")
+check_coordinates(TABLE, QUARANTINE, END)
 
 facts = spark.sql(
     f"""
@@ -69,7 +71,7 @@ facts = spark.sql(
     """
 ).collect()[0]
 print(facts)
-assert facts.rows == 158_625
+assert facts.rows == sum(END.values())
 assert facts.distinct_event_ids == 158_399
 
 check_batches_not_doubled(TABLE)
@@ -137,8 +139,7 @@ assert recon.clean_events == 158_346
 
 # COMMAND ----------
 
-run_stream(**STREAM_ARGS)
-check_coordinates(TABLE, QUARANTINE, PER_PARTITION)
+check_coordinates(TABLE, QUARANTINE, topic_end(run_stream(**STREAM_ARGS)))
 
 # COMMAND ----------
 

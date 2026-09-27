@@ -81,17 +81,24 @@ def _secret(key):
 # COMMAND ----------
 
 
-def read_kafka(topic):
+def kafka_options():
+    """Where the cluster is and how to log in. Shared by the stream and by one-off batch reads."""
     jaas = (
         "kafkashaded.org.apache.kafka.common.security.plain.PlainLoginModule required "
         f'username="{_secret("kafka_api_key")}" password="{_secret("kafka_api_secret")}";'
     )
+    return {
+        "kafka.bootstrap.servers": BOOTSTRAP,
+        "kafka.security.protocol": "SASL_SSL",
+        "kafka.sasl.mechanism": "PLAIN",
+        "kafka.sasl.jaas.config": jaas,
+    }
+
+
+def read_kafka(topic):
     return (
         spark.readStream.format("kafka")
-        .option("kafka.bootstrap.servers", BOOTSTRAP)
-        .option("kafka.security.protocol", "SASL_SSL")
-        .option("kafka.sasl.mechanism", "PLAIN")
-        .option("kafka.sasl.jaas.config", jaas)
+        .options(**kafka_options())
         .option("subscribe", topic)
         # Used ONCE, when the checkpoint is brand new. Every later run resumes from the
         # checkpoint and ignores this line — a restart never goes back to "earliest".
@@ -243,6 +250,57 @@ def ensure_retention(table):
         print(f"{table}: old data files now kept {FILE_RETENTION}")
 
 
+class UnsafeStreamReset(RuntimeError):
+    """A stream with no history was about to write into a table that already has rows."""
+
+
+def _missing_path(error):
+    text = f"{type(error).__name__} {error}".lower()
+    return any(s in text for s in ("not found", "filenotfound", "no such file"))
+
+
+def checkpoint_has_history(checkpoint):
+    """True once Spark has planned any batch here (an `offsets/N` file exists).
+
+    `offsets/N` is written BEFORE batch N runs, so a crash in the very first batch still counts
+    as history: the restart re-runs batch 0 with the same offsets, and txnVersion covers it.
+    """
+    try:
+        return any(f.name.isdigit() for f in dbutils.fs.ls(f"{checkpoint}/offsets"))
+    except Exception as e:
+        if _missing_path(e):
+            return False
+        raise
+
+
+def refuse_unsafe_reset(checkpoint, app_id, tables):
+    """A stream with no history may only write into empty tables.
+
+    The two memories of a stream must be reset together or not at all: Spark's (the checkpoint)
+    and Delta's (the app id's last txnVersion, inside each table's log). A fresh checkpoint over a
+    non-empty table means one of two mistakes, and both are silent:
+
+    - same app id: batch ids restart at 0 while Delta remembers this app at N, so Delta skips
+      batches 0..N as "already written" — including any new messages they now contain. Lost,
+      no error (Drill 1 shows it).
+    - new app id: nothing is skipped, and the whole topic is appended a second time.
+
+    The only safe reset is a rebuild: new GENERATION (new checkpoint AND new app id) into an empty
+    table. decisions.md, "Kafka Bronze" (Session 7) and the Drill 1 guard entry.
+    """
+    if checkpoint_has_history(checkpoint):
+        return
+    for table in tables:
+        if spark.table(table).limit(1).count():
+            raise UnsafeStreamReset(
+                f"checkpoint {checkpoint} has no history, but {table} already holds rows. "
+                f"Either the checkpoint was deleted while app id {app_id!r} was kept (Delta would "
+                "silently skip every batch up to the version it remembers — new messages lost), or "
+                "a new generation is writing into the old table (everything duplicated). Restore "
+                "the checkpoint, or bump GENERATION and rebuild into an empty table."
+            )
+
+
 def run_stream(
     *,
     stream,
@@ -253,11 +311,17 @@ def run_stream(
     checkpoint,
     app_id,
     idempotent=True,
+    guard_reset=True,
 ):
     """Run one AvailableNow pass: read everything new, write it, stop. Progress is recorded
-    even when the run fails, and the failure is re-raised. Returns the progress rows."""
+    even when the run fails, and the failure is re-raised. Returns the progress rows.
+
+    `guard_reset=False` exists ONLY so Drill 1 can show the checkpoint-reset trap first.
+    """
     decoded = decode(read_kafka(topic), subject)
     create_tables(decoded, table, quarantine_table)
+    if guard_reset:
+        refuse_unsafe_reset(checkpoint, app_id, (table, quarantine_table))
     ensure_progress_table()
     query = (
         decoded.writeStream.foreachBatch(
@@ -435,12 +499,37 @@ def check_backlog(stream):
 # COMMAND ----------
 
 
+def topic_end(progress_rows):
+    """{partition: offset one past the last message}, as the broker reported it for this run.
+
+    Spark asks Kafka for each partition's latest offset when a run starts (the `latestOffset` in
+    every progress report). That is the broker's own count, so a table can be checked against the
+    topic as it is today — not against a number frozen in a notebook, which Session 7 did
+    (394,090) and which the first legitimate new message would have turned into a false failure.
+    Offsets start at 0 on these topics, so the end offset is also the count Bronze must hold.
+    """
+    ends = {}
+    for r in progress_rows:
+        for key, offset in json.loads(r["latest_offsets"] or "{}").items():
+            partition = int(key.rsplit("/", 1)[1])
+            ends[partition] = max(ends.get(partition, 0), offset)
+    assert ends, "no progress report carried latest offsets: cannot tell where the topic ends"
+    return ends
+
+
+# A Kafka header's value, as text; NULL when the message has no such header. The 552,715
+# messages produced before Drill 1 carry no headers at all.
+def header_sql(key):
+    return f"cast(try_element_at(map_from_entries(_kafka_headers), '{key}') AS STRING)"
+
+
 def check_coordinates(table, quarantine_table, per_partition):
     """Every Kafka offset exactly once.
 
     Per partition: rows == distinct offsets (no duplicates) and rows == max - min + 1 (no gaps —
-    offsets on these topics are contiguous: no transactions, no compaction). And the per-partition
-    counts must equal what the laptop's read-only verifier counted on the topic itself.
+    offsets on these topics are contiguous: no transactions, no compaction), and both equal the
+    expected count: `topic_end()` of the run, i.e. the broker's latest offset. The laptop's
+    read-only verifier (scripts/inspect_topic.py) stays the independent cross-check, run by hand.
     """
     got = {
         r._kafka_partition: r
