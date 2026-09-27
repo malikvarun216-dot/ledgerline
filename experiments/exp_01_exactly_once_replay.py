@@ -66,38 +66,36 @@ def crash_then_resume(variant, idempotent):
     landed_before_restart = spark.table(args["table"]).count()
     run_stream(**args, idempotent=idempotent)
 
+    # Batch sizes come from the table itself: the distinct offsets each batch wrote. A batch
+    # written twice still has the same distinct offsets — only its row count doubles.
     s = spark.sql(
         f"""
         SELECT count(*) AS rows,
                count(DISTINCT _kafka_partition, _kafka_offset) AS distinct_offsets,
-               count_if(_batch_id = {CRASH_AFTER}) AS rows_stamped_crashed_batch
+               count_if(_batch_id = {CRASH_AFTER}) AS rows_stamped_crashed_batch,
+               count(DISTINCT CASE WHEN _batch_id = {CRASH_AFTER}
+                          THEN concat(_kafka_partition, ':', _kafka_offset) END) AS crashed_batch_size,
+               count(DISTINCT CASE WHEN _batch_id <= {CRASH_AFTER}
+                          THEN concat(_kafka_partition, ':', _kafka_offset) END) AS batches_0_to_crash
         FROM {args['table']}
         """
     ).collect()[0]
-    sizes = {
-        r.batch_id: r.n
-        for r in spark.sql(
-            f"""SELECT batch_id, max(num_input_rows) AS n FROM {PROGRESS_TABLE}
-                WHERE app_id = '{args['app_id']}' GROUP BY batch_id"""
-        ).collect()
-    }
-    crashed_batch = sizes[CRASH_AFTER]
     result = {
         "variant": variant,
         "rows": s.rows,
         "distinct_offsets": s.distinct_offsets,
         "duplicate_rows": s.rows - s.distinct_offsets,
-        "crashed_batch_size": crashed_batch,
+        "crashed_batch_size": s.crashed_batch_size,
         "rows_stamped_crashed_batch": s.rows_stamped_crashed_batch,
         "landed_before_restart": landed_before_restart,
-        "batches_0_to_crash": sum(sizes[b] for b in range(CRASH_AFTER + 1)),
+        "batches_0_to_crash": s.batches_0_to_crash,
     }
     print(result)
     # The crash happened in the right window: batch N's rows were already in Delta.
     assert result["landed_before_restart"] == result["batches_0_to_crash"], "crash was not after the commit"
     # Nothing lost in either variant.
     assert result["distinct_offsets"] == TOTAL
-    check_batches_not_doubled(args["table"], args["app_id"], expect_equal=idempotent)
+    check_batches_not_doubled(args["table"], expect_equal=idempotent)
     return result, args
 
 

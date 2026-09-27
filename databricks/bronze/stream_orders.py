@@ -76,7 +76,7 @@ assert facts.distinct_event_ids == 394_090
 assert facts.created == 99_441
 assert facts.units == 112_650
 
-check_batches_not_doubled(TABLE, APP_ID)
+check_batches_not_doubled(TABLE)
 check_backlog(STREAM)
 
 # COMMAND ----------

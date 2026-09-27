@@ -605,4 +605,98 @@ correct later events supersede. Totals computed from the raw log are wrong
 (112,806 units against 112,650). The denylist is at
 `ops/incidents/2026-09-26_inventory_cdc_denylist.json`.
 
+## [2026-09-27] — Bronze `orders` loaded perfectly, but the per-batch progress log crashed, and my error handler hid where
+
+**In plain words:** the first real Kafka → Bronze run read all 394,090 order
+messages into `workspace.bronze.orders` exactly once — every count matched the
+topic. But the small piece of code that writes down *how each batch went*
+(rows, time, backlog) crashed with `'NoneType' object has no attribute
+'items'`, so its table, `workspace.bronze.stream_progress`, was never created.
+The next check reads that table, so it failed with `TABLE_OR_VIEW_NOT_FOUND`
+and the notebook stopped. The data is right; the monitoring is broken.
+
+- What happened, in order: `created workspace.bronze.orders` and
+  `..._quarantine`; three "Spark Server has not sent updates … in 60 seconds …
+  typically not a problem" notices (batches took over a minute each); then
+  `bronze.orders: could not record progress: AttributeError: 'NoneType' object
+  has no attribute 'items'`. The verify cell then passed every data check —
+  p0/p1/p2 = 131,458 / 132,187 / 130,445 with rows = distinct offsets = span,
+  0 quarantined, 394,090 distinct `event_id`, 99,441 `created`, 112,650 units,
+  one schema id — and failed at `check_batches_not_doubled` on the missing
+  table. The quarantine self-test, the plain re-run and the history cell were
+  skipped.
+- Impact on data: **none.** Exactly-once for this run is already proven by the
+  coordinate check — in every partition, rows = distinct offsets = (max − min +
+  1), so every offset landed once and none is missing. The per-batch check was
+  extra evidence, not the guarantee.
+- What I thought first: my own offset parser (`_offsets`) choking on a
+  missing start offset for the first batch.
+- What reading PySpark 4.0.1's source showed (not yet confirmed on the
+  platform): on Spark Connect, `query.recentProgress` rebuilds each report with
+  `StreamingQueryProgress.fromJson`, which calls
+  `j["observedMetrics"].items()` whenever that key is present — a `null` there
+  raises exactly this error, *inside PySpark*, before my code sees anything.
+  Separately, in 4.0 the progress object became a subclass of `dict` and
+  stores each offset as `str(...)` of a Python dict (`"{'orders': {...}}"`,
+  or `"None"`), which is not JSON — so my parser would have failed next even
+  if PySpark had not. Two stacked defects, the first masking the second.
+- Why nothing caught it before the real run: the Session 7 probe tested the
+  three unknowns I *recognised* (registry reachable, `from_avro`, group ACL).
+  The shape of Spark's progress object was an unknown I did not recognise — I
+  wrote the parser from memory of the pre-4.0 format and never ran it. And the
+  handler I wrote so that "bookkeeping never hides the real failure" printed
+  only the exception message, **dropping the traceback** — so it hid the one
+  fact needed to fix it: which line failed.
+- Fix: pending precise identification (a small diagnostic stream that prints
+  the traceback and the raw progress JSON). Recorded below when done.
+- Prevention rule: **a catch-all handler prints the full traceback, never just
+  the message** — "don't crash" must not mean "don't say where". And **code
+  that parses another library's output is run against one real object before
+  a real job depends on it**: the probe step covers every shape the job reads,
+  not only the ones that feel risky.
+
+### Root cause identified (2026-09-27, same session) — it was my parser, and my reading of PySpark's source was wrong
+
+**In plain words:** Spark reports "where did this batch start reading?" For the
+very first batch there is no answer, and on this platform the report says so
+with the **four-letter text `"null"`**, not with an empty value. My code only
+treated an *empty* value as "no answer". The text `"null"` is not empty, so the
+code parsed it, got nothing back, and then tried to read offsets out of that
+nothing — the crash.
+
+- How it was identified: a diagnostic stream over the last 30 `orders`
+  messages printed (A) the raw report as the server sends it and (B) what
+  PySpark turns it into. Platform: **PySpark 4.3.0.dev0**. (A) has
+  `"startOffset":null` and `"observedMetrics":{}`; (B) `recentProgress`
+  worked, is a `dict`, and holds `startOffset = 'null'` (a string) and
+  `endOffset = '{"orders":{"0":131458,…}}'` (a JSON string).
+- **Correction to the entry above.** It named, from PySpark **4.0.1**'s
+  source, a null `observedMetrics` crashing inside PySpark, plus offsets stored
+  as Python-dict text. **Both were wrong for this platform**: `observedMetrics`
+  arrives as `{}`, offsets arrive as proper JSON, and PySpark raised nothing.
+  My first guess — my own parser and the missing first start offset — was the
+  right one. Reading the source of a *different version* is a hypothesis, not
+  an identification; only the diagnostic made it one.
+- Fix, three parts:
+  1. `_offsets` returns None for None, JSON null *and* the text `"null"`.
+     Checked on the laptop against the exact values the diagnostic printed.
+  2. `_as_dict` reads `progress.json` — the server's own JSON, Spark's
+     documented format — instead of PySpark's converted copy, whose value
+     types have already changed once (dict subclass since 4.0).
+  3. `check_batches_not_doubled` no longer reads the progress table. It
+     compares, per `_batch_id`, rows in the table against distinct Kafka
+     offsets — **a correctness check now reads the data, never the
+     monitoring**. The progress table (created up front now, so it can never be
+     missing) stays what it should have been: monitoring.
+  Plus the handler now prints the full traceback.
+- Also seen in the diagnostic, recorded because it explains the slowness: one
+  batch that read nothing still took **11.9 s** — 2.9 s just to ask Kafka for
+  the latest offsets (Ohio → Mumbai), 0.4 s planning, 0.4 s writing the
+  checkpoint. The per-batch cost is mostly fixed overhead. Its
+  `numInputRows = 0` is not a problem: the diagnostic's batch function did
+  nothing with the data, and Spark only reads what something uses.
+- Prevention rule, sharpened: **identify on the platform, not from the
+  source.** When a library's behaviour is in question, print what the running
+  system actually returns before writing or fixing code against it.
+
 <!-- Append further entries below this line. -->

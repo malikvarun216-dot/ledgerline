@@ -72,7 +72,7 @@ print(facts)
 assert facts.rows == 158_625
 assert facts.distinct_event_ids == 158_399
 
-check_batches_not_doubled(TABLE, APP_ID)
+check_batches_not_doubled(TABLE)
 check_backlog(STREAM)
 
 # COMMAND ----------

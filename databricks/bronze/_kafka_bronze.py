@@ -23,6 +23,7 @@
 # COMMAND ----------
 
 import json
+import traceback
 import uuid
 from datetime import UTC, datetime
 
@@ -242,6 +243,7 @@ def run_stream(
     even when the run fails, and the failure is re-raised."""
     decoded = decode(read_kafka(topic), subject)
     create_tables(decoded, table, quarantine_table)
+    ensure_progress_table()
     query = (
         decoded.writeStream.foreachBatch(
             make_batch_writer(
@@ -265,8 +267,11 @@ def run_stream(
             rows = record_progress(query, stream=stream, app_id=app_id)
             read = sum(r["num_input_rows"] for r in rows)
             print(f"{stream}: {len(rows)} batch(es) completed, {read:,} rows, {seconds:.0f}s")
-        except Exception as e:  # never let bookkeeping hide the real failure
-            print(f"{stream}: could not record progress: {type(e).__name__}: {e}")
+        except Exception:
+            # Bookkeeping must not hide the real failure — and must not hide its own either:
+            # the full traceback, not just the message (incidents.md, 2026-09-27).
+            print(f"{stream}: could not record progress:")
+            traceback.print_exc()
 
 
 # COMMAND ----------
@@ -289,16 +294,40 @@ PROGRESS_COLUMNS = (
 )
 
 
+def ensure_progress_table():
+    """Created before any stream starts, so checks that read it never meet a missing table."""
+    spark.sql(
+        f"CREATE TABLE IF NOT EXISTS {PROGRESS_TABLE} ("
+        + PROGRESS_COLUMNS.replace("batch_started_at STRING", "batch_started_at TIMESTAMP").replace(
+            "recorded_at STRING", "recorded_at TIMESTAMP"
+        )
+        + ")"
+    )
+
+
 def _as_dict(progress):
-    # Older PySpark returns dicts; newer returns StreamingQueryProgress objects with .json.
-    return progress if isinstance(progress, dict) else json.loads(progress.json)
+    """The report exactly as Spark's server sent it.
+
+    Since PySpark 4.0 the report object is itself a dict subclass whose values PySpark has
+    already converted (offsets as strings, a missing one as the text "null"). `.json` is the
+    server's own JSON, the documented format, so read that whenever it exists.
+    """
+    return json.loads(progress.json) if hasattr(progress, "json") else dict(progress)
 
 
 def _offsets(value):
-    """'{"orders":{"0":5,"1":7}}' -> {"orders/0": 5, "orders/1": 7}. None for a first batch."""
-    if not value:
+    """'{"orders":{"0":5,"1":7}}' -> {"orders/0": 5, "orders/1": 7}.
+
+    None when there is no offset. A stream's first batch has no start offset, and depending on
+    the PySpark version that arrives as None, as JSON null, or as the four-letter text "null"
+    (seen on Free Edition, PySpark 4.3.0.dev0). The text "null" is truthy and parses to None —
+    which is what crashed the first run.
+    """
+    if value is None:
         return None
     parsed = json.loads(value) if isinstance(value, str) else value
+    if parsed is None:
+        return None
     return {f"{t}/{p}": int(o) for t, parts in parsed.items() for p, o in parts.items()}
 
 
@@ -410,31 +439,30 @@ def check_coordinates(table, quarantine_table, per_partition):
     assert quarantined == 0, f"{quarantine_table} is not empty"
 
 
-def check_batches_not_doubled(table, app_id, *, expect_equal=True):
-    """Rows stamped with each batch_id must equal what Spark says that batch read.
+def check_batches_not_doubled(table, *, expect_equal=True):
+    """Per batch: rows in the table vs distinct Kafka offsets that batch wrote.
 
-    A batch that was written twice shows up here as exactly double. exp_01's bug-first run
-    passes expect_equal=False, because there the doubling is the point.
+    A batch written once has rows == distinct offsets. A batch written twice has exactly
+    double. Reads only the table — the evidence is the data itself, not Spark's progress
+    reports, which are monitoring and can be lost (they were, on the first orders run).
+    exp_01's bug-first run passes expect_equal=False, because there the doubling is the point.
     """
     rows = spark.sql(
         f"""
-        WITH written AS (SELECT _batch_id, count(*) AS rows_in_table FROM {table} GROUP BY _batch_id),
-             reported AS (
-               SELECT batch_id, max(num_input_rows) AS rows_read, count(*) AS progress_reports
-               FROM {PROGRESS_TABLE} WHERE app_id = '{app_id}' AND num_input_rows > 0
-               GROUP BY batch_id)
-        SELECT coalesce(w._batch_id, r.batch_id) AS batch_id, w.rows_in_table, r.rows_read,
-               r.progress_reports
-        FROM written w FULL OUTER JOIN reported r ON w._batch_id = r.batch_id
-        ORDER BY batch_id
+        SELECT _batch_id AS batch_id, count(*) AS rows_in_table,
+               count(DISTINCT _kafka_partition, _kafka_offset) AS distinct_offsets
+        FROM {table} GROUP BY _batch_id ORDER BY _batch_id
         """
     ).collect()
     for r in rows:
-        ok = r.rows_in_table == r.rows_read
-        verdict = "OK" if ok else "MISMATCH"
-        print(f"batch {r.batch_id}: in table {r.rows_in_table}, read {r.rows_read}  {verdict}")
+        verdict = "OK" if r.rows_in_table == r.distinct_offsets else "WRITTEN MORE THAN ONCE"
+        print(
+            f"batch {r.batch_id}: rows {r.rows_in_table:,}, "
+            f"distinct offsets {r.distinct_offsets:,}  {verdict}"
+        )
     if expect_equal:
-        assert rows and all(r.rows_in_table == r.rows_read for r in rows), f"{table}: a batch was doubled"
+        doubled = [r.batch_id for r in rows if r.rows_in_table != r.distinct_offsets]
+        assert rows and not doubled, f"{table}: batch(es) {doubled} written more than once"
     return rows
 
 
