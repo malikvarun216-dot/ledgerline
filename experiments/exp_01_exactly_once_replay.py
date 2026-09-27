@@ -41,7 +41,11 @@ def fresh(variant):
     checkpoint = f"{EXP_STATE}/{variant}"
     for name in (table, quarantine):
         spark.sql(f"DROP TABLE IF EXISTS {name}")
-    dbutils.fs.rm(checkpoint, True)
+    try:
+        dbutils.fs.rm(checkpoint, True)
+    except Exception as e:  # the very first run has no checkpoint to remove — anything else is real
+        if "not found" not in str(e).lower() and "FileNotFound" not in type(e).__name__:
+            raise
     return {
         "stream": f"exp01.{variant}",
         "topic": TOPIC,
