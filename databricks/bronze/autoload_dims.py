@@ -13,6 +13,10 @@
 # MAGIC **Safe to "Run all" at any time.** Session 6's version also held the forced-replay proof
 # MAGIC (delete every checkpoint, re-read every file), so "Run all" on the production notebook deleted
 # MAGIC production state. That proof now lives in `drills/drill1_dims_1`.
+# MAGIC
+# MAGIC **A night re-delivered at the same path is read again** (`allowOverwrites`). With Auto Loader's
+# MAGIC default, a corrected dump was skipped without a word — Drill 1 showed Bronze keeping the old
+# MAGIC values. `replaceWhere` is what makes the re-read safe: it replaces that night, never appends.
 
 # COMMAND ----------
 
@@ -34,7 +38,7 @@ def run_all():
     for dim in DIMS:
         # Paths unchanged since Session 6 ({STATE}/{dim}/schema and /checkpoint): moving them
         # would start a new stream that re-reads every file.
-        ingest(f"{LANDING}/{dim}/", f"{CATALOG}.{SCHEMA}.{dim}", f"{STATE}/{dim}")
+        ingest(f"{LANDING}/{dim}/", f"{CATALOG}.{SCHEMA}.{dim}", f"{STATE}/{dim}", allow_overwrites=True)
 
 
 run_all()
