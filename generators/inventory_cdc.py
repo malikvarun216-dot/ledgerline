@@ -512,10 +512,12 @@ def main() -> int:
     ordering = shuffle_out_of_order(events, args.out_of_order_pct, args.seed)
 
     if args.sink == "kafka":
-        from generators._common import KafkaAvroSink
+        from generators._common import KafkaAvroSink, run_scope
 
         sink: MessageSink = KafkaAvroSink(
-            {args.topic: json.dumps(AVRO_SCHEMA)}, client_id=f"ledgerline-{SOURCE}"
+            {args.topic: json.dumps(AVRO_SCHEMA)},
+            client_id=f"ledgerline-{SOURCE}",
+            scope=run_scope(args.limit),
         )
     else:
         sink = JsonlSink(args.out_dir)
@@ -537,6 +539,9 @@ def main() -> int:
     print(f"  restocks       op=U      {stats['restocks']:>9,}")
     print(f"  delists        op=D      {stats['delists']:>9,}")
     print(f"  events emitted           {sent:>9,}  -> topic {args.topic!r}")
+    if getattr(sink, "run_id", None):
+        # Every message of this run carries it as header ledgerline.run_id.
+        print(f"  run id                   {sink.run_id}")
     waits = getattr(sink, "queue_full_waits", 0)
     if waits:
         # How often the generator outran the broker and had to wait for the

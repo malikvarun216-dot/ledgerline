@@ -346,6 +346,29 @@ class MemorySink:
         return [key for t, key, _ in self.messages if t == topic]
 
 
+def provenance_headers(producer: str, scope: str, run_id: str) -> list[tuple[str, bytes]]:
+    """The label every produced message carries: which run, which program, how much.
+
+    Session 6 found 159 bad messages on ``inventory.cdc`` and could only
+    identify them by regenerating the whole topic and diffing, because nothing
+    in a message said which run had sent it. With these headers a bad run is one
+    ``GROUP BY`` in Bronze, which has stored headers since Session 7.
+
+    Headers, not Avro fields: they describe the delivery, not the event, and the
+    same event sent twice is still one business fact (decisions.md, Drill 1).
+    """
+    return [
+        ("ledgerline.run_id", run_id.encode("utf-8")),
+        ("ledgerline.producer", producer.encode("utf-8")),
+        ("ledgerline.scope", scope.encode("utf-8")),
+    ]
+
+
+def run_scope(limit: int | None) -> str:
+    """``full`` for a whole-dataset run, ``limit=N`` for a partial one."""
+    return f"limit={limit}" if limit else "full"
+
+
 class KafkaAvroSink:
     """Confluent Cloud producer with Avro serialization via Schema Registry.
 
@@ -376,7 +399,10 @@ class KafkaAvroSink:
         schemas: dict[str, str],
         config: dict[str, str] | None = None,
         client_id: str | None = None,
+        scope: str = "unspecified",
     ) -> None:
+        import uuid
+
         from confluent_kafka import Producer
         from confluent_kafka.schema_registry import SchemaRegistryClient
         from confluent_kafka.schema_registry.avro import AvroSerializer
@@ -396,6 +422,10 @@ class KafkaAvroSink:
         # debug script, was which. Falls back to the topic names so the id is
         # never the default even when a caller forgets to pass one.
         self.client_id = client_id or f"ledgerline-{'-'.join(sorted(schemas))}"
+        # Random on purpose: Session 6's bad messages were three runs with
+        # identical arguments, and the label has to tell those apart.
+        self.run_id = uuid.uuid4().hex
+        self.headers = provenance_headers(self.client_id, scope, self.run_id)
         self._producer = Producer(
             {
                 "bootstrap.servers": cfg["bootstrap.servers"],
@@ -461,6 +491,7 @@ class KafkaAvroSink:
                     topic=topic,
                     key=encoded_key,
                     value=payload,
+                    headers=self.headers,
                     on_delivery=self._on_delivery,
                 )
                 break

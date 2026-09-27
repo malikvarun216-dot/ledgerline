@@ -332,12 +332,14 @@ class _FakeProducer:
         self.full_for = full_for
         self.drain_per_poll = drain_per_poll
         self.produced: list[tuple] = []
+        self.headers: list = []
         self.polls: list[float] = []
 
-    def produce(self, topic, key, value, on_delivery=None):
+    def produce(self, topic, key, value, headers=None, on_delivery=None):
         if self.full_for > 0:
             raise BufferError("Local: Queue full")
         self.produced.append((topic, key, value))
+        self.headers.append(headers)
 
     def poll(self, timeout=0):
         self.polls.append(timeout)
@@ -366,6 +368,8 @@ def _sink_with(producer):
     sink.error_count = 0
     sink.queue_full_waits = 0
     sink.client_id = "ledgerline-test"
+    sink.run_id = "run-under-test"
+    sink.headers = [("ledgerline.run_id", b"run-under-test")]
     return sink
 
 
@@ -441,6 +445,114 @@ def test_delivery_failures_are_counted_in_full_but_kept_in_sample():
     assert sink.error_count == 1_000
     assert len(sink._errors) == KafkaAvroSink._MAX_KEPT_ERRORS
     assert sink._errors[0] == "failure 0", "the sample must be the first, not the last"
+
+
+# --------------------------------------------------------------------------
+# Provenance  (Drill 1)
+# --------------------------------------------------------------------------
+
+
+def test_provenance_headers_name_the_run_the_program_and_the_scope():
+    """Three labels, as bytes, under fixed names Bronze can query.
+
+    Session 6 could only find the test suite's 159 bad messages by regenerating
+    the whole topic and diffing. These headers are what turns that into one
+    ``GROUP BY`` over Bronze's ``_kafka_headers`` column, so their names are an
+    interface: renaming one silently breaks every query written against it.
+    """
+    from generators._common import provenance_headers
+
+    headers = provenance_headers("ledgerline-order_events", "limit=10", "abc123")
+
+    assert headers == [
+        ("ledgerline.run_id", b"abc123"),
+        ("ledgerline.producer", b"ledgerline-order_events"),
+        ("ledgerline.scope", b"limit=10"),
+    ]
+
+
+def test_run_scope_marks_a_partial_run():
+    from generators._common import run_scope
+
+    assert run_scope(None) == "full"
+    assert run_scope(10) == "limit=10"
+
+
+def _patch_confluent(monkeypatch):
+    """Swap the three confluent_kafka classes the constructor opens for fakes.
+
+    The constructor itself runs, so the test covers the path production takes;
+    only the network-facing objects are replaced.
+    """
+    import confluent_kafka
+    import confluent_kafka.schema_registry
+    import confluent_kafka.schema_registry.avro
+
+    made = []
+
+    def fake_producer(config):
+        made.append(config)
+        return _FakeProducer()
+
+    monkeypatch.setattr(confluent_kafka, "Producer", fake_producer)
+    monkeypatch.setattr(confluent_kafka.schema_registry, "SchemaRegistryClient", lambda conf: None)
+    monkeypatch.setattr(
+        confluent_kafka.schema_registry.avro,
+        "AvroSerializer",
+        lambda registry, schema: (lambda v, ctx: b"encoded"),
+    )
+    return made
+
+
+_FAKE_CONFIG = {
+    "bootstrap.servers": "broker.invalid:9092",
+    "sasl.username": "k",
+    "sasl.password": "s",
+    "schema.registry.url": "https://registry.invalid",
+    "schema.registry.basic.auth.user.info": "k:s",
+}
+
+
+@needs_confluent
+def test_every_message_of_a_run_carries_the_same_run_id(monkeypatch):
+    """Built through the real constructor, sent through the real ``send``.
+
+    The header is only worth anything if it is on *every* message: a run whose
+    messages were partly labelled would be split across two groups by the very
+    query the label exists for.
+    """
+    from generators._common import KafkaAvroSink
+
+    _patch_confluent(monkeypatch)
+    sink = KafkaAvroSink(
+        {"orders": "{}"}, config=_FAKE_CONFIG, client_id="ledgerline-order_events", scope="limit=10"
+    )
+    for n in range(3):
+        sink.send("orders", f"order-{n}", {"event_id": str(n)})
+
+    sent = sink._producer.headers
+    assert len(sent) == 3
+    assert all(h == sent[0] for h in sent), "one run, one label"
+    labels = dict(sent[0])
+    assert labels["ledgerline.run_id"] == sink.run_id.encode()
+    assert labels["ledgerline.producer"] == b"ledgerline-order_events"
+    assert labels["ledgerline.scope"] == b"limit=10"
+
+
+@needs_confluent
+def test_two_runs_with_identical_arguments_get_different_run_ids(monkeypatch):
+    """Session 6's contamination was three runs with the SAME arguments.
+
+    A run id derived from the arguments would give all three one label and the
+    query would see one run of 159 instead of three of 53. It must be random.
+    """
+    from generators._common import KafkaAvroSink
+
+    _patch_confluent(monkeypatch)
+    first = KafkaAvroSink({"orders": "{}"}, config=_FAKE_CONFIG, client_id="c", scope="limit=50")
+    second = KafkaAvroSink({"orders": "{}"}, config=_FAKE_CONFIG, client_id="c", scope="limit=50")
+
+    assert first.run_id != second.run_id
 
 
 def test_progress_ticker_reports_on_boundaries_only(capsys):
