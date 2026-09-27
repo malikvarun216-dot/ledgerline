@@ -515,7 +515,7 @@ class KafkaAvroSink:
         self._producer.poll(0)
         self.counts[topic] = self.counts.get(topic, 0) + 1
 
-    def flush(self, timeout: float = 60.0) -> None:  # pragma: no cover - needs a broker
+    def flush(self, timeout: float = 60.0) -> None:
         """Wait for delivery, but give up rather than block forever.
 
         Session 4: a bare ``flush()`` has no timeout, and librdkafka retries a

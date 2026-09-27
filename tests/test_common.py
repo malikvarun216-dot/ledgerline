@@ -447,6 +447,73 @@ def test_delivery_failures_are_counted_in_full_but_kept_in_sample():
     assert sink._errors[0] == "failure 0", "the sample must be the first, not the last"
 
 
+class _StuckProducer(_FakeProducer):
+    """A producer pointed somewhere that never answers: every message stays queued."""
+
+    def __init__(self, undelivered: int) -> None:
+        super().__init__()
+        self.undelivered = undelivered
+        self.flush_timeouts: list[float] = []
+
+    def flush(self, timeout=None):
+        self.flush_timeouts.append(timeout)
+        return self.undelivered
+
+
+def test_flush_that_cannot_deliver_names_the_port_instead_of_hanging():
+    """Session 4: pointed at the REST port (443), the first live produce sat silent for 180 s.
+
+    The fix — a bounded ``flush`` that raises with the count and the likely cause
+    — was marked ``no cover`` for four sessions: it "needs a broker that fails".
+    It does not; it needs a producer that reports undelivered messages, which is
+    all librdkafka's ``flush(timeout)`` returns. Drill 1 found the guard had no
+    test at all, so nothing would have noticed it being removed.
+    """
+    producer = _StuckProducer(undelivered=3)
+    sink = _sink_with(producer)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sink.flush(timeout=0.5)
+
+    message = str(excinfo.value)
+    assert producer.flush_timeouts == [0.5], "flush must pass a timeout, never block unbounded"
+    assert "3 message(s) still undelivered" in message
+    assert "9092" in message and "443" in message, "the error must name the likely misconfiguration"
+
+
+def test_flush_reports_delivery_failures_after_everything_left_the_queue():
+    sink = _sink_with(_StuckProducer(undelivered=0))
+    sink._on_delivery("broker said no", None)
+
+    with pytest.raises(RuntimeError, match="1 delivery failures; first: broker said no"):
+        sink.flush()
+
+
+def test_no_test_can_see_a_live_credential(monkeypatch, tmp_path):
+    """The Session 6 fixture, tested itself: live values in, none visible after.
+
+    On a laptop where the variables are not exported, weakening the fixture
+    changes nothing any other test can see — it only matters on the day a key
+    *is* in the environment. So this plants every credential first, runs the
+    same function the autouse fixture runs, and asserts nothing survived.
+    """
+    from generators import _common
+    from tests.conftest import _LIVE_CREDENTIALS, block_live_services
+
+    for name in _LIVE_CREDENTIALS:
+        monkeypatch.setenv(name, "live-canary")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-looks-real")
+    monkeypatch.setattr(_common, "_env_loaded", False)
+
+    block_live_services(monkeypatch, tmp_path)
+
+    assert [n for n in _LIVE_CREDENTIALS if n in os.environ] == []
+    assert _common._env_loaded is True, ".env must look already loaded, so it is never read"
+    assert os.environ["AWS_ACCESS_KEY_ID"] == "testing-not-a-real-key"
+    with pytest.raises(RuntimeError, match="KAFKA_BOOTSTRAP_SERVERS"):
+        _common._kafka_config_from_env()
+
+
 # --------------------------------------------------------------------------
 # Provenance  (Drill 1)
 # --------------------------------------------------------------------------

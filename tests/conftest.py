@@ -52,6 +52,11 @@ _LIVE_CREDENTIALS = (
 
 @pytest.fixture(autouse=True)
 def no_live_services(monkeypatch, tmp_path):
+    """Applies :func:`block_live_services` to every test. See there for why."""
+    block_live_services(monkeypatch, tmp_path)
+
+
+def block_live_services(monkeypatch, tmp_path):
     """No test may reach a real broker, registry or bucket — ever.
 
     Session 6 found the suite producing to the live Confluent topic. A test ran

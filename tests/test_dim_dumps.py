@@ -355,3 +355,27 @@ def test_partition_layout_is_hive_style_for_auto_loader(olist_frames, sink):
     assert f"dims/customer/dump_date={START.isoformat()}/customer.csv" in keys
     assert len(keys) == 2 * 3, "2 nights x 3 dimensions"
     assert all("dump_date=" in k for k in keys)
+
+
+def test_dump_bytes_are_the_same_on_every_machine(olist_frames, sink, monkeypatch):
+    """No carriage return in any dump, even where the platform's line ending is CRLF.
+
+    Session 2 found `to_csv()` defaulting to `os.linesep` when it returns a
+    string, so a dump generated on Windows had CRLF and the same dump from Linux
+    had LF. `write_night` pins `lineterminator="\n"`. Until Drill 1 nothing
+    tested that pin: the sink comparison test hands both sinks the *same*
+    string, so a CRLF string stored twice still compares equal. Drill 1 removed
+    the pin on purpose and the suite stayed green.
+
+    `os.linesep` is forced to Windows' value, so this fails on a Linux CI
+    runner too — the bug is platform-dependent; the test must not be.
+    """
+    import os
+
+    monkeypatch.setattr(os, "linesep", "\r\n")
+    run(olist_frames, sink, start=START, nights=2, stride_days=STRIDE)
+
+    keys = sink.list_keys("dims/")
+    assert keys
+    for key in keys:
+        assert "\r" not in sink.get_text(key), f"{key} contains a carriage return"
