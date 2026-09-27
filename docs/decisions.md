@@ -1285,3 +1285,44 @@ an array of records).
 - Observed and not yet explained: **1 min 25 s** for the 15-record probe
   (two Kafka reads plus one registry call). The time is overhead per query,
   not per record — consistent with Session 6's 3 min 43 s for the whole topic.
+
+## Predictive Optimization stays on; tables set their own time-travel window (Session 7)
+
+**In plain words:** Databricks turned out to be maintaining our tables on its
+own — merging small files, and (on a timer) permanently deleting data files
+the table no longer uses. It stays on. But deleting old files is what ends
+*time travel* — reading a table as it was at an earlier version — so every
+table we might need to look back into now says how long its old files must
+be kept, instead of silently inheriting 7 days.
+
+- Found: `bronze.orders` version 9 was an `OPTIMIZE` nobody ran — user
+  `e58e5c14-…` (a service principal, not a person), 80 minutes after the load,
+  24 files (~42 MB, 8 batches × 3 partitions) rewritten as ~1. `DESCRIBE TABLE
+  EXTENDED` → `Predictive Optimization: ENABLE (inherited from METASTORE
+  metastore_aws_us_east_2)` — so every managed table here has it, including
+  every future Silver table.
+- Why it matters: Predictive Optimization also runs `VACUUM`, which deletes
+  unreferenced data files older than `delta.deletedFileRetentionDuration`
+  (default **7 days**). The Delta log keeps entries for
+  `delta.logRetentionDuration` (default 30 days), but time travel needs the
+  data files too, so the effective window was 7 days — never chosen, never
+  written down. Session 10's repair-by-time-travel and the GDPR work both rely
+  on it; `CLAUDE.md` names "VACUUM breaking time travel" as a danger zone.
+- Chosen (by the human): **keep Predictive Optimization on, and set
+  `delta.deletedFileRetentionDuration = 'interval 30 days'` on every Bronze
+  table**, in code, from the notebook that creates it — so a rebuilt table
+  gets it too. 30 days matches the default log retention, so data files and
+  log entries now run out together; a longer file window would buy nothing
+  while the log still expires at 30. Silver tables choose their own window
+  when Session 8 creates them.
+- Rejected: **turn it off for our schemas and run OPTIMIZE / VACUUM by hand.**
+  The most hands-on, and it would let us trigger the VACUUM danger ourselves.
+  Rejected because it is not how a team on Unity Catalog runs — Databricks
+  recommends it on — and small files pile up the first time someone forgets.
+  Manual `OPTIMIZE` / `VACUUM` / `RESTORE` stay available for experiments.
+- Rejected: **decide in Session 8.** Nothing reads Bronze history yet — but the
+  7-day clock on `bronze.orders`' replaced files started at 07:27 today, so
+  waiting *is* choosing 7 days, by default.
+- Trade-off: files replaced by OPTIMIZE or overwritten by `replaceWhere` are
+  kept 30 days instead of 7 — a few tens of MB here, on storage Free Edition
+  does not bill.

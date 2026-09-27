@@ -67,6 +67,24 @@ def write_batch(batch_df, batch_id, dim):
     print(f"{dim}: batch {batch_id} replaced dump_date {dates}")
 
 
+# Time travel (reading a table as it was at an older version) needs the old data files. Delta's
+# log keeps entries 30 days by default, but data files only 7 — and Predictive Optimization, on
+# for every table here, runs VACUUM that deletes them after that. 30 days lines the two up.
+# decisions.md, "Predictive Optimization stays on" (Session 7).
+FILE_RETENTION = "interval 30 days"
+
+
+def ensure_retention(table):
+    """Set the time-travel window once. Checked first, because every ALTER is a new commit."""
+    props = {r.key: r.value for r in spark.sql(f"SHOW TBLPROPERTIES {table}").collect()}
+    if props.get("delta.deletedFileRetentionDuration") != FILE_RETENTION:
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES "
+            f"('delta.deletedFileRetentionDuration' = '{FILE_RETENTION}')"
+        )
+        print(f"{table}: old data files now kept {FILE_RETENTION}")
+
+
 def ingest(dim):
     stream = (
         spark.readStream.format("cloudFiles")
@@ -91,6 +109,7 @@ def ingest(dim):
     if not spark.catalog.tableExists(table):
         empty = spark.createDataFrame([], stream.drop("_path_dump_date").schema)
         empty.write.format("delta").saveAsTable(table)
+    ensure_retention(table)
 
     query = (
         stream.writeStream

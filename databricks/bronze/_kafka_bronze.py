@@ -229,6 +229,25 @@ def create_tables(decoded, table, quarantine_table):
         if not spark.catalog.tableExists(name):
             spark.createDataFrame([], rows.schema).write.format("delta").saveAsTable(name)
             print(f"created {name}")
+        ensure_retention(name)
+
+
+# Time travel (reading a table as it was at an older version) needs the old data files. Delta's
+# log keeps entries 30 days by default, but data files only 7 — and Predictive Optimization, on
+# for every table here, runs VACUUM that deletes them after that. 30 days lines the two up.
+# decisions.md, "Predictive Optimization stays on" (Session 7).
+FILE_RETENTION = "interval 30 days"
+
+
+def ensure_retention(table):
+    """Set the time-travel window once. Checked first, because every ALTER is a new commit."""
+    props = {r.key: r.value for r in spark.sql(f"SHOW TBLPROPERTIES {table}").collect()}
+    if props.get("delta.deletedFileRetentionDuration") != FILE_RETENTION:
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES "
+            f"('delta.deletedFileRetentionDuration' = '{FILE_RETENTION}')"
+        )
+        print(f"{table}: old data files now kept {FILE_RETENTION}")
 
 
 def run_stream(
@@ -269,13 +288,17 @@ def run_stream(
         seconds = (datetime.now(UTC) - started).total_seconds()
         try:
             rows = record_progress(query, stream=stream, app_id=app_id)
-            read = sum(r["num_input_rows"] for r in rows)
-            # With nothing new, Spark still files one report for the *next* batch id, with 0
-            # rows — a report, not a batch that ran.
-            with_data = sum(1 for r in rows if r["num_input_rows"] > 0)
+            # Counted from offsets, NOT from Spark's numInputRows: on serverless that is 0 for
+            # every foreachBatch batch, even one that wrote 50,000 rows (incidents.md,
+            # 2026-09-27). With nothing new, Spark still files one report for the *next* batch
+            # id whose start and end offsets are equal — a report, not a batch that ran.
+            with_data = [r for r in rows if r["start_offsets"] != r["end_offsets"]]
+            known = sum(r["rows_by_offsets"] for r in with_data if r["rows_by_offsets"] is not None)
+            unknown = sum(1 for r in with_data if r["rows_by_offsets"] is None)
+            note = f" (+ {unknown} first batch: Spark reports no start offset for it)" if unknown else ""
             print(
-                f"{stream}: {len(rows)} progress report(s), {with_data} batch(es) with data, "
-                f"{read:,} rows, {seconds:.0f}s"
+                f"{stream}: {len(rows)} progress report(s), {len(with_data)} batch(es) with data, "
+                f"{known:,} rows by offsets{note}, {seconds:.0f}s"
             )
         except Exception:
             # Bookkeeping must not hide the real failure — and must not hide its own either:
@@ -359,8 +382,13 @@ def record_progress(query, *, stream, app_id):
                 "query_run_id": progress.get("runId"),
                 "batch_id": int(progress["batchId"]),
                 "batch_started_at": progress.get("timestamp"),
+                # Kept because it is what Spark reports — but on serverless foreachBatch it is 0
+                # for every batch. Use rows_by_offsets.
                 "num_input_rows": int(progress.get("numInputRows", 0)),
                 "processed_rows_per_second": float(progress.get("processedRowsPerSecond") or 0.0),
+                # NOT wall-clock time on this platform: bronze.inventory_cdc's 4 batches report
+                # 93 + 166 + 162 + 99 = 520 s inside a run that took ~270 s. Unexplained; for
+                # timing, use the Delta commit timestamps in DESCRIBE HISTORY.
                 "duration_ms": int(progress.get("durationMs", {}).get("triggerExecution", 0)),
                 # Independent of numInputRows: what the offsets say this batch covered.
                 "rows_by_offsets": (sum(end[k] - start[k] for k in end) if start is not None else None),

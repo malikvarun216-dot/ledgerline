@@ -751,4 +751,84 @@ and it came back "decoded OK".
   have, never by "is the record null".** And **a self-test asserts its expected
   outcomes** — a test that only prints relies on someone reading it.
 
+### Confirmed by the next run (2026-09-27, same session)
+
+The fixed self-test passed every assertion, and printed `event_id` per case:
+real message → decoded OK, `event_id=515e2866…`; **truncated payload → avro
+decode failed, `event_id=None`** (the blank-record behaviour, now caught);
+wrong magic byte → not Confluent wire format; null value → tombstone; missing
+key → missing key (its body decoded fine, `event_id=515e2866…`, and was still
+routed to quarantine).
+
+**The open question is closed:** unknown schema id → **avro decode failed,
+`event_id=None`**. The body was a valid `orders` record, so a decoder that
+ignored the id would have returned the real `event_id`. It returned blanks —
+so `from_avro` with the registry **looks up the schema id carried in each
+message** and decodes with that exact writer schema. Consequence for schema
+evolution: a future version-2 message will be read with version 2's schema,
+and a message whose id the registry does not know is quarantined, not
+misread.
+
+## [2026-09-27] — Spark's monitoring said "0 rows" for a load that wrote 158,625
+
+**In plain words:** the first run that recorded progress properly — Bronze
+`inventory.cdc` — printed `4 progress report(s), 0 batch(es) with data, 0
+rows, 270s`. The table beside it held all 158,625 rows, checked offset by
+offset. The data was right; the monitoring number was wrong. On this platform,
+Spark's own "input rows" figure is 0 for every batch whose work happens inside
+`foreachBatch`.
+
+- What happened: 4 batches wrote 49,999 / 49,998 / 49,999 / 8,629 rows
+  (coordinate check OK in every partition), yet every progress report carried
+  `numInputRows = 0`. My run summary counted batches and rows from that field,
+  so it reported nothing.
+- What is certain: `numInputRows` is 0 for batches that demonstrably read and
+  wrote tens of thousands of rows. The diagnostic earlier today showed 0 too,
+  which I explained then as "the batch function did nothing" — true, but it was
+  also this.
+- Likely mechanism (not verified): on serverless the `foreachBatch` function
+  runs in a separate, cloned session, so the reads it triggers are separate
+  queries whose row counts are not credited back to the streaming query's
+  progress.
+- Why nothing caught it: the first `orders` run lost its progress to the parser
+  bug, and every later run had no new data — where 0 is the *correct* answer.
+  A metric that is always 0 looks healthy on idle runs. This is the Session 5
+  rule from the other side: a health check must be able to return True on good
+  data — and a metric must be checked against ground truth once before it is
+  trusted.
+- Fix: the summary now counts from **offsets** (`end − start` per partition,
+  the `rows_by_offsets` column recorded since the first version), and a batch
+  "has data" when its start and end offsets differ. `numInputRows` stays in the
+  table, labelled as unreliable here. The one gap: a brand-new stream's first
+  batch has no start offset in the report, so its rows are shown as unknown
+  rather than guessed.
+- Prevention rule: **validate every monitoring number against the data once,
+  on a run that moved data, before relying on it.** Here that is one query:
+  `rows_by_offsets` per batch against rows per `_batch_id` in the table.
+
+### Validated the same hour — rows and backlog hold, durations do not
+
+The prevention rule above, applied at once: every monitoring column for
+`bronze.inventory_cdc` put next to the table itself.
+
+| batch | rows in table | rows_by_offsets | numInputRows | reported s | backlog after |
+|---|---|---|---|---|---|
+| 0 | 49,999 | *(no start offset)* | 0 | 93 | 108,626 |
+| 1 | 49,998 | 49,998 | 0 | 166 | 58,628 |
+| 2 | 49,999 | 49,999 | 0 | 162 | 8,629 |
+| 3 | 8,629 | 8,629 | 0 | 99 | 0 |
+
+- **`rows_by_offsets` is exact** for every batch that has a start offset.
+- **Backlog is exact**: 158,625 minus the running total after each batch
+  (108,626 → 58,628 → 8,629 → 0).
+- **`numInputRows` is 0 throughout** — the finding, confirmed.
+- **Durations do not reconcile.** The four batches report 520 s in total, but
+  the run took ~270 s: the run's own stopwatch said 270 s, and the table's
+  commits run from 07:38:51 (create) to 07:43:24 (last batch). Micro-batches
+  run one after another, so 520 s of batches cannot fit into 270 s. Each
+  reported figure is roughly double the gap between that batch's commit and
+  the one before it. **Not explained**; recorded rather than guessed. Until it
+  is, per-batch timing comes from Delta commit timestamps, and no check reads
+  `duration_ms`. Carried to Drill 1.
+
 <!-- Append further entries below this line. -->
