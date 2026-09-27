@@ -1339,3 +1339,59 @@ be kept, instead of silently inheriting 7 days.
 - Trade-off: files replaced by OPTIMIZE or overwritten by `replaceWhere` are
   kept 30 days instead of 7 — a few tens of MB here, on storage Free Edition
   does not bill.
+
+## Schema Registry contract: `BACKWARD_TRANSITIVE` on both subjects, chosen by asking who updates first (Session 7)
+
+**In plain words:** a compatibility mode is the rule for which schema changes
+the registry accepts. Until today both topics silently used Confluent's
+default, `BACKWARD`, checked against the latest version only. We now set
+**`BACKWARD_TRANSITIVE`** on purpose: a new schema must be readable by a
+reader on it against **every** old version, because our reader always has the
+newest schema and sometimes re-reads the whole topic.
+
+- The question that decides a mode: **when the schema changes, who has the
+  newer version, the writer or the reader?** BACKWARD = the reader updates
+  first (new reader, old messages). FORWARD = the writer updates first (old
+  reader, new messages). FULL = no order promised, both must hold.
+- Our answer, from how the code works: Bronze's `from_avro` fetches the
+  subject's newest schema at the start of every run, so **our reader is never
+  older than the writer** — the BACKWARD case, every time. And a Bronze
+  rebuild re-reads the topic from `earliest`, meeting messages of every past
+  version — so the check must be **TRANSITIVE**, not only against the latest.
+- Measured first, registering nothing (`scripts/check_schema_compat.py`, the
+  registry's test endpoint), against both subjects under today's `BACKWARD`:
+  add a field **with** a default → accepted; add a field **without** one →
+  refused (`READER_FIELD_MISSING_DEFAULT_VALUE`); **remove a required field**
+  (`order_status`, `stock_qty`) → **accepted**. That last one is the gap
+  BACKWARD knowingly leaves.
+- Verified on a real write: registering the "no default" version of
+  `orders-value` returned **409** (`40901 … incompatible with an earlier
+  schema`), versions `[1]` before and after. The contract refuses writes, not
+  just tests.
+- Rejected: **`FULL_TRANSITIVE`** — Claude's first recommendation, withdrawn
+  the same session when the human asked why. It protects against an *older*
+  reader meeting newer messages, which this setup does not have, and it costs
+  real flexibility: FULL refuses even `int → long`, the widening that BACKWARD
+  allows. Revisit if a reader ever pins an old schema (another team, a
+  long-running stream that does not restart).
+- Rejected: **plain `BACKWARD`** (the implicit default) — identical today with
+  one version per subject, but after three versions it would check only
+  v3-against-v2 while a rebuild reads v1 messages too.
+- Rejected: **`FORWARD`** — the writer-first model; it would let a producer add
+  a required field that a rebuild cannot fill in for old messages.
+  **`NONE`** — no contract at all.
+- The gap, and where it is guarded: under BACKWARD a producer may *remove* a
+  field; Bronze would then land blanks for it. The field's meaning belongs to
+  Silver, so the guard lives there — `order_status` must never be blank — as a
+  DLT expectation in Session 11. A field removal is otherwise done in two
+  steps (give it a default, move readers off, then remove).
+- Found on the way: our registry key holds `DeveloperWrite` — it may register
+  schemas — but setting the mode returned **403, `denied operation
+  WriteCompatibility`**. A key that publishes schemas cannot loosen the rules
+  it is checked against; that separation is correct and stays. The mode is set
+  by the human in the Confluent console.
+- **Verified set** (same session), with the read-only probe after the human
+  changed it in the console: `orders-value` and `inventory.cdc-value` both
+  report subject mode `BACKWARD_TRANSITIVE` (global stays `BACKWARD`);
+  verdicts unchanged — with one version per subject, BACKWARD and
+  BACKWARD_TRANSITIVE check the same thing. They diverge from version 3.

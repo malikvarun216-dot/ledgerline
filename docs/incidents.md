@@ -871,4 +871,45 @@ ran.
   failure, find out what the platform does with it: here, a notebook fails any
   command in which a stream died, caught or not.
 
+## [2026-09-27] — DELIBERATE (exp_01): a crash after the Delta write re-runs the batch; without txnAppId it lands twice, with it Delta skips it
+
+**In plain words:** the first of the project's six planned deliberate
+failures. A Kafka → Delta stream was made to "crash" at the worst possible
+moment — after a batch's rows were saved, before Spark recorded the batch as
+finished. On restart Spark re-ran that batch. With a plain append the
+44,099 rows went into the table a second time and **the job reported
+success**. With `txnAppId` / `txnVersion` set, Delta recognised the batch as
+already written and skipped it. Same code, same data, same crash; the only
+difference was two write options.
+
+- How the crash was made: load the whole `orders` topic cleanly (8 batches),
+  then delete the checkpoint's last `commits/7` file — leaving batch 7's rows
+  in Delta and `offsets/7` in the checkpoint but no "done" marker, exactly
+  what a real crash in that window leaves — and restart
+  (`experiments/exp_01_exactly_once_replay.py`, scratch tables only).
+- Result, **bug** (plain append): restart re-ran batch **[7]**, 44,099 rows by
+  offsets → table **438,189 rows** for 394,090 distinct offsets = **44,099
+  duplicates**; batch 7 = 88,198 rows for 44,099 offsets. History: v2–v9 the
+  eight batches, then **v10, a second `WRITE` of 44,099 rows**. No error
+  anywhere.
+- Result, **fix** (`txnAppId = exp01.fix.<run>`, `txnVersion = batch_id`):
+  restart re-ran batch **[7]**, 44,099 rows by offsets → table **394,090 rows,
+  0 duplicates**. History stops at v9: the replay made **no commit**.
+- The replay took **66 s** without the options and **8 s** with them. Delta
+  checks "has app X already written version 7?" against its own log *before*
+  running the write — and the batch's rows are only read from Kafka when the
+  write runs — so the skipped replay never touched Kafka. The guarantee is a
+  metadata lookup, not a data comparison.
+- Why the bug is dangerous, stated plainly: nothing fails. The duplicate
+  batch is a normal, successful append. Only a count against the source —
+  here, rows vs distinct `(partition, offset)` — shows it.
+- Same pattern, first attempt: staging the crash as an exception inside the
+  batch gave the identical doubling (batch 2, 49,999 duplicates) but made the
+  notebook fail the cell — see the entry above.
+- Prevention rule: **every streaming write that is not itself idempotent
+  (MERGE, `replaceWhere`) carries `txnAppId` + `txnVersion = batch_id`**, and
+  the app id changes whenever the checkpoint does (Drill 1 shows what happens
+  when it does not). Proven by `exp_01`, which must be re-run after any change
+  to the Bronze writer.
+
 <!-- Append further entries below this line. -->

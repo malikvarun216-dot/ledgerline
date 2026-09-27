@@ -1311,3 +1311,172 @@ Added (decision entry "Drill sessions between build phases"):
 a provenance header, a dev-only Kafka credential, and a verifier that reports
 duplicates and genuine `seq` conflicts separately. **Remove "clean the topic"
 from any list — the topic stays as it is, by decision.**
+
+---
+
+## Session 7 — Kafka Bronze, exactly-once proven by a deliberate crash
+Date: 2026-09-27
+
+**In plain words:** both Kafka topics now land in Bronze — every message
+exactly once, checked offset by offset against the topic itself. The
+exactly-once setting was then proven the hard way: an experiment made a
+stream "crash" at the worst moment, twice — without the setting the batch
+landed twice (44,099 duplicates, job reported success), with it Delta skipped
+the repeat (0 duplicates). Along the way the session found things nobody had
+checked: the topics would have deleted themselves within a week, Databricks
+was maintaining our tables on its own, and three pieces of our own monitoring
+and quarantine code were wrong in ways a green run could not show.
+
+### Scope, as it actually ran
+Planned: Kafka Bronze for both topics with `txnAppId`/`txnVersion`, Avro
+decode, quarantine, compatibility mode + a refused change, stream monitoring,
+D4. Done: all except **D4**, which moves to Drill 1. Added on the way:
+retention, Predictive Optimization, and `exp_01` (the first of the six
+deliberate-failure experiments).
+
+### Start-of-session re-check
+Read-only from the laptop: `orders` 394,090 and `inventory.cdc` 158,625
+records, every partition's lowest offset still 0; Schema Registry global
+`BACKWARD`, no subject-level mode, one version each (ids 100001 / 100002).
+**New:** the project key cannot read topic settings (`TOPIC_AUTHORIZATION_FAILED`),
+so retention had never been seen. Read in the console: **1 week** on both.
+
+### Built
+- `databricks/bronze/_kafka_bronze.py` (shared, loaded with `%run`): Kafka
+  `readStream` → `from_avro` with Schema Registry (`PERMISSIVE`) → split good /
+  quarantine → Delta append with `txnAppId` + `txnVersion = batch_id`,
+  `AvailableNow`, `maxOffsetsPerTrigger = 50,000`, `failOnDataLoss = true`,
+  headers kept, raw Avro bytes kept (`_raw_value`). Tables, the progress table
+  and a 30-day file retention are set up before any stream starts. Checks:
+  per-partition rows = distinct offsets = span; per-batch rows = distinct
+  offsets; backlog; a quarantine self-test that drives six broken messages.
+- `databricks/bronze/stream_orders.py`, `stream_cdc.py`: thin notebooks with
+  the expected counts. CDC is ingested **unfiltered**; the notebook proves the
+  denylist against Bronze.
+- `experiments/exp_01_exactly_once_replay.py`: load, delete the last
+  `commits/N` from the checkpoint (the exact state a crash leaves), restart;
+  plain append vs txn options, on scratch tables.
+- `scripts/check_schema_compat.py`: asks the live registry which changes it
+  would accept; registers nothing.
+- `autoload_dims.py` also sets the 30-day retention (see Not verified).
+- Tables: `workspace.bronze.{orders, orders_quarantine, inventory_cdc,
+  inventory_cdc_quarantine, stream_progress}`; scratch `exp01_{bug,fix}` (+ quarantine).
+
+### Verified
+- **Bronze `orders`:** 394,090 rows; per partition 131,458 / 132,187 /
+  130,445 with rows = distinct offsets = span (no duplicates, no gaps); 394,090
+  distinct `event_id`; 99,441 `created`; 112,650 units; 1 schema id; 0
+  quarantined; 8 batches (49,999 ×5, 49,998 ×2, 44,099), each written once.
+- **Bronze `inventory_cdc`:** 158,625 rows; 52,838 / 53,699 / 52,088, all
+  contiguous; 158,399 distinct `event_id`; 34,448 SKUs; inserts 34,577 (=
+  34,448 + 3 × 43), updates 124,048 (= 123,898 + 3 × 50), **deletes 0**; 4
+  batches. **Contamination reproduced exactly by a second engine:** 159
+  denylisted rows, 53 ids; units sold raw **112,806**, after denylist and one
+  row per `event_id` **112,650**, the laptop's Session 6 numbers.
+- **Plain re-runs write nothing**, both topics, repeatedly (history unchanged).
+- **Quarantine routes every broken case correctly** (asserted): truncated
+  payload → decode failed; wrong magic byte → not Confluent format; unknown
+  schema id → decode failed; null value → tombstone; missing key → missing
+  key; real message → decoded.
+- **`from_avro` looks up the schema id in each message** (unknown id 999,999
+  → blanks), so a future version-2 message is read with version 2's schema.
+- **Spark's Kafka reader needs no consumer-group ACL** (probe under a group
+  prefix with no ACL; confirmed by every streaming run since).
+- **`exp_01` (deliberate failure #1):** bug: restart re-ran batch 7, table
+  438,189 rows, **44,099 duplicates**, extra `WRITE` v10, no error. Fix:
+  restart re-ran batch 7, **394,090 rows, 0 duplicates**, no extra commit.
+  Replay 66 s vs **8 s** (Delta skips from its log before reading Kafka).
+- **Retention:** both topics 1 week → **3 months** (human, console); data
+  untouched after the change (re-counted).
+- **Predictive Optimization** is on for every table (inherited from the
+  metastore); it ran `OPTIMIZE` on `bronze.orders` (24 files → 1). All four
+  Kafka Bronze tables now carry `delta.deletedFileRetentionDuration = 30 days`
+  (`SET TBLPROPERTIES` in history).
+- **Monitoring columns checked against the table:** `rows_by_offsets` exact,
+  backlog exact (108,626 → 58,628 → 8,629 → 0); `numInputRows` **0 for every
+  batch** on serverless `foreachBatch`; per-batch durations **do not reconcile**
+  (520 s reported inside a ~270 s run).
+- **Schema Registry:** probes: add with default accepted, add without default
+  refused, remove a required field accepted (the BACKWARD gap). One real
+  registration of a breaking change → **409**, versions `[1]` before and
+  after. Registry key refused changing the mode (**403 WriteCompatibility**).
+  Mode set to **`BACKWARD_TRANSITIVE`** by the human and read back on both
+  subjects.
+- `ruff` clean, `pytest` green locally after every change.
+
+### Built but NOT verified
+- **30-day retention on the three dimension tables:** code in
+  `autoload_dims.py`, not yet run.
+- **`check_backlog` can fail:** it compares end-of-run backlogs, which are 0
+  on fixed topics; it has never been given a growing backlog.
+- **The two Bronze writes per batch** were assumed to read Kafka twice. The
+  exp_01 stack trace shows Spark Connect wrapping the batch in
+  `dataFrameCachingWrapper`, so probably not. Not measured.
+
+### Not done
+- **D4** (reviews CSV with 3,852 embedded newlines through Auto Loader):
+  carried twice; re-bound to Drill 1.
+- A read-only Kafka identity for Bronze (recommended; not decided). The
+  Databricks secret still holds the one key that can also write both topics.
+
+### Incidents (5 new entries, one deliberate)
+1. Progress log crashed: the first batch's start offset arrives as the *text*
+   `"null"`. My source-reading guess (PySpark 4.0.1) was wrong; a diagnostic
+   on the platform (PySpark 4.3.0.dev0) found it.
+2. Quarantine could never fire: `PERMISSIVE` returns a record of blanks, not
+   NULL. Found by the self-test before any bad message existed.
+3. Monitoring said "0 rows" for a 158,625-row load: `numInputRows` is 0 on
+   serverless `foreachBatch`; durations also unreliable.
+4. exp_01's staged crash made Databricks fail the cell (any stream that dies
+   during a command fails it, caught or not), so exp_01 now recreates the
+   crash *state* instead.
+5. **DELIBERATE, exp_01**, both results above.
+
+Retention (found by the re-check) and Predictive Optimization (found by
+reading table history) are recorded as decisions, not incidents.
+
+### Decisions
+Seven new: Kafka Bronze design (raw bytes kept, separate quarantine table,
+50,000-offset batches, checkpoint and app id share a generation, the crash
+proof) plus its correction; retention 1 week → 3 months; no consumer-group
+ACL; `from_avro` + registry; Predictive Optimization stays on with 30-day
+file retention; `BACKWARD_TRANSITIVE` (FULL_TRANSITIVE withdrawn when
+questioned).
+
+### Unexplained, recorded rather than guessed
+- Per-batch `duration_ms` is about 2× the real gap between commits.
+- `statsOnLoad: true` on `inventory_cdc` writes, `false` on `orders`.
+- About 65–70 s per batch whatever its size (8,629 rows took ~49 s); the
+  diagnostic showed 11.9 s for a batch that read nothing, 2.9 s of it asking
+  Kafka for the latest offsets.
+
+### Cost
+Databricks $0. Confluent: roughly 0.5 GB of reads across the loads and
+experiments, a few cents. AWS: nothing new.
+
+### Next
+**Drill 1: attack Bronze on purpose, and re-trigger every past incident**
+(plan in the Session 6 addendum above). Added by Session 7:
+- **The `txnAppId` trap:** delete a checkpoint but keep the app id, and assert
+  Delta silently skips batches (data loss, no error), on scratch tables. Then
+  build the guard the Kafka Bronze decision deliberately left out.
+- "Crash mid-load" is now `exp_01`; re-run it after any change to the Bronze
+  writer.
+- **D4** (bound here), and the unexplained durations.
+- Before the "run the order generator twice" attack: decide the **provenance
+  header** (a per-run id on every message). Bronze already stores headers.
+- Run `autoload_dims` once (Run all *above* the forced-replay cells) to apply
+  the 30-day retention.
+
+**Carried, each a claim to re-check:**
+- **Topics delete themselves around 2026-12-25** (3-month retention); Bronze's
+  raw bytes are then the only copy of the contamination.
+- **Silver (S9): the topic has no `D` events** (generator default
+  `--delist-count 0`), so the MERGE's delete branch must be driven on purpose,
+  like today's quarantine.
+- **Silver (S11):** a DLT expectation that `order_status` is never blank, the
+  guard for the gap `BACKWARD_TRANSITIVE` leaves.
+- Read-only Kafka identity for Bronze; dev-only Kafka credential; verifier
+  reporting duplicates vs genuine `seq` conflicts separately.
+- Scratch leftover: checkpoint `checkpoints/scratch/s7_progress_probe`.
+- GitHub token for the Git folder expires 2026-12-25.
