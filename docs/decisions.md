@@ -1136,3 +1136,152 @@ teams call these **game days** and **incident regression**.
 - Consistent with the Session 6 principle "treat live systems as production":
   drills run against the live topics and tables, with before/after counts,
   not against copies.
+
+## Kafka Bronze: decoded record + raw bytes + Kafka coordinates, one shared writer, 50,000-offset batches (Session 7)
+
+**In plain words:** each Kafka message becomes one Bronze row holding three
+things — the decoded fields, the original bytes exactly as they arrived, and
+the message's address on the topic (partition + offset). Messages that will
+not decode go to a separate quarantine table instead of stopping the load. Both
+topics use the same code; only the names and expected counts differ.
+
+- Chosen: `databricks/bronze/_kafka_bronze.py` (loaded with `%run`) holds read →
+  decode → write → monitor → verify; `stream_orders.py` and `stream_cdc.py` are
+  thin notebooks that call it. Writes are Delta **appends** with
+  `txnAppId` + `txnVersion = batch_id`, `Trigger.AvailableNow`.
+- Chosen: **keep the raw Avro bytes (`_raw_value`) next to the decoded columns.**
+  Decoding is an interpretation that can be wrong — for example a reader schema
+  that silently drops a field a newer producer added — and Kafka does not keep
+  the original forever. With the bytes in Bronze, a wrong decode is redone from
+  Bronze, not from a topic that may have expired. Cost: Bronze roughly doubles
+  in size, ~0.1 GB → ~0.2 GB, on storage that costs nothing here.
+- Rejected: **decoded columns only.** Smaller, and the common tutorial shape.
+  Once the topic's retention passes, a decoding mistake becomes permanent.
+- Rejected: **raw bytes only, decode in Silver.** The purist "Bronze = exactly
+  what arrived" answer. Rejected because the Session 6 decision puts quarantine
+  at Bronze, and quarantine needs a decode attempt to know what failed.
+- Chosen: **quarantine is a separate table**, not a flag column on the Bronze
+  table. With a flag, every downstream reader must remember
+  `WHERE _quarantine_reason IS NULL`, and one that forgets feeds null keys into
+  Silver's MERGE. A separate table cannot leak by omission. Trade-off: two
+  writes per micro-batch, so each batch is read from Kafka twice (caching on
+  serverless is not relied on). Measured on the first run, not assumed.
+- Chosen: **`maxOffsetsPerTrigger = 50,000`**, so one `AvailableNow` run is
+  ~8 batches for `orders` and ~4 for `inventory.cdc` instead of one. Several
+  batches give `txnVersion` something to count and give the crash experiment a
+  batch to kill in the middle of a run.
+- Chosen: **the checkpoint path and the app id carry one shared generation
+  (`v1`), and a checkpoint is never deleted in place.** Delete the checkpoint
+  but keep the app id, and the new stream numbers batches from 0 while Delta
+  remembers the app id at ~7 — it silently skips batches 0–7 as "already
+  written". Bumping the generation starts a new stream from `earliest`, which
+  re-reads the whole topic: a rebuild, never a quiet restart. **No guard is
+  built for this yet, on purpose:** Drill 1 must first show the silent skip
+  happening (assert the bug present), then add the guard.
+- Chosen: **the exactly-once proof is a crash between the Delta commit and the
+  checkpoint commit** (`exp_01`), not a checkpoint deletion. Deleting the
+  checkpoint with the same app id would *also* show zero duplicates — because
+  Delta skips everything, which is the trap above, not the guarantee. The crash
+  is the one situation `txnVersion` exists for: Spark re-runs batch N with
+  identical offsets, and Delta must skip it. `exp_01` runs the crash twice on
+  scratch tables — plain append (asserts batch N doubled), then with the txn
+  options (asserts zero duplicates) — so the bug is shown present before the fix.
+- Chosen: **no deduplication in Bronze**, for either topic. Duplicate *events*
+  (same `event_id`) are real history — the producer sent them twice — and stay.
+  Bronze guarantees each *message* (partition, offset) exactly once; Silver
+  guarantees each *event* exactly once.
+
+## Topic retention raised from 1 week to 3 months, on both topics (Session 7)
+
+**In plain words:** Kafka deletes messages after a set time — its *retention*.
+Both topics were on Confluent's default of **1 week**, which nobody had
+checked in six sessions. Every message was written on 2026-09-26, so both
+topics would have started emptying around **2026-10-03** — before Drill 1,
+which replays from them. Retention is now **3 months**, which keeps the data
+until about **2026-12-25**.
+
+- Found by the Session 7 start-of-session re-check, not by a failure. The
+  project's own key **cannot read topic settings**:
+  `describe_configs` → `TOPIC_AUTHORIZATION_FAILED` (it holds READ/WRITE, not
+  DESCRIBE_CONFIGS). The value was read in the console: `retention.ms = 1 week`,
+  `retention.bytes = Infinite`, `cleanup.policy = delete`, on both topics.
+- Why it was invisible: every check so far counted what is *on* the topic, and
+  every count was right. Nothing asked how long it would stay. The Session 5
+  cost note ("~$0.01/month at rest") quietly assumed the data stays forever.
+- Chosen (by the human, in the console): **`retention.ms` = 3 months** on
+  `orders` and `inventory.cdc`. Verified afterwards with the read-only
+  watermark check: 394,090 and 158,625 messages, lowest offset still 0,
+  oldest message still 2026-09-26 — the change touched no data.
+- Rejected: **keep 1 week and treat Bronze as the only long-term copy.** The
+  usual production arrangement — Kafka is a buffer, the lake is the history —
+  and the reason Bronze keeps raw bytes. Rejected *for now* because the rule
+  production actually sizes retention by is "longer than the longest time a
+  reader can be down, plus any planned replay". Here the reader is a job run
+  by hand in sessions days apart, and Drill 1, `exp_01` and Session 10 all
+  replay from the topic.
+- Rejected: **infinite retention** — Claude's recommendation, at ~$0.01/month.
+  The human chose 3 months instead; the reason is recorded below once given,
+  not guessed here. What 3 months does cover: Drill 1, Silver (S8–S10) and the
+  Session 10 experiments, with weeks to spare.
+- Consequence to carry: **after ~2026-12-25 the topics empty themselves**, and
+  Bronze (raw bytes kept) becomes the only copy of the 159 contaminated
+  records. The clean events stay reproducible from the generators; the
+  contamination is reproducible too (`inventory_cdc.py --limit 50
+  --allow-partial`, three runs), only with different `produced_at` values.
+- Guard already in place for the day it matters: Bronze reads with
+  `failOnDataLoss = true`, so if retention ever deletes messages Bronze had
+  not read yet, the stream stops with an error instead of skipping them.
+
+## Bronze gets no consumer-group ACL — tested by being allowed, not assumed (Session 7)
+
+**In plain words:** the plan was to give Bronze's Kafka reader a new
+permission on its consumer-group name before its first run. A probe read the
+`orders` topic under that name **without** the permission, and was not
+refused. So the permission is not granted. The laptop verifier needed one in
+Session 5 for what looks like the same job; the difference is the client
+library, not the job.
+
+- Evidence: a Free Edition serverless batch read of 15 records from `orders`
+  with `groupIdPrefix = "ledgerline-bronze-"`. The service account's only
+  consumer-group ACL is READ on prefix `ledgerline-verifier-`, which does not
+  match. 15 rows came back, decoded (next entry).
+- Why the two readers differ: the Session 5 verifier uses **librdkafka**
+  (`confluent_kafka`), which looks up a group coordinator eagerly for any
+  configured `group.id` — and that lookup is authorized against the group.
+  Spark uses the **Java** client: offsets are fetched on the driver with an
+  AdminClient, and executors `assign()` partitions and never commit. Spark's
+  own docs say so (3.1+: "executors never done group based authorization");
+  the probe is what made it a fact rather than a quotation.
+- Rejected: **grant the READ ACL on `ledgerline-bronze-` anyway**, as planned.
+  It costs one console click and would make the first run certain. Rejected
+  because a grant shown to be unnecessary is exactly what least privilege
+  removes — and granting it would have hidden this finding.
+- Not yet proven: the probe was a batch read (`spark.read`); Bronze is a
+  stream (`readStream`). Both use the same offset reader, so the result is
+  expected to carry over. **Confirmed or refuted by the first `stream_orders`
+  run** — recorded in `progress.md` either way.
+- Consequence: Session 5's prevention rule ("a permission set derived by
+  reading code is a hypothesis until a credential refuses something") applies
+  in both directions — here the test showed a grant was *not* needed.
+
+## Avro is decoded with `from_avro` + Schema Registry on Free Edition (Session 7)
+
+**In plain words:** each Kafka message starts with the ID of the schema it was
+written with. Spark's `from_avro`, given the registry address and a read-only
+use of the registry key, looks that schema up and decodes the message. This
+was listed as unverified on Free Edition; the probe decoded 15 `orders`
+messages correctly (`schema_id` 100001, `event_ts` as a timestamp, `items` as
+an array of records).
+
+- Chosen: `from_avro(data, subject=..., schemaRegistryAddress=..., options)`
+  with `mode = PERMISSIVE`, so an undecodable payload becomes NULL (then
+  quarantined) instead of failing the batch.
+- Rejected: **strip the 5-byte header and decode against a schema pinned in
+  the notebook** — the open-source workaround, and the fallback had the
+  registry been unreachable. It decodes every message with one fixed schema,
+  so a producer's new schema version would be read wrongly without an error.
+- Rejected: **decode on the laptop with `confluent_kafka`** before landing —
+  it moves ingestion out of Databricks, the platform this layer exists to use.
+- Observed and not yet explained: **1 min 25 s** for the 15-record probe
+  (two Kafka reads plus one registry call). The time is overhead per query,
+  not per record — consistent with Session 6's 3 min 43 s for the whole topic.

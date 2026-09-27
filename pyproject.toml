@@ -37,6 +37,9 @@ select = [
 "tests/*" = ["B011"]
 # Databricks notebooks: the runtime injects spark, dbutils and display as globals.
 "databricks/*" = ["F821"]
+# Experiments that run as Databricks notebooks, named one by one so a plain-Python
+# experiment added later still gets undefined-name checking.
+"experiments/exp_01_exactly_once_replay.py" = ["F821"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
