@@ -191,12 +191,10 @@ def _bad(df):
 # COMMAND ----------
 
 
-def make_batch_writer(table, quarantine_table, app_id, *, idempotent=True, crash_after_batch=None):
+def make_batch_writer(table, quarantine_table, app_id, *, idempotent=True):
     """Return the foreachBatch function.
 
     `idempotent=False` exists ONLY so exp_01 can show the bug first. Bronze never passes it.
-    `crash_after_batch=N` raises right after batch N is committed to Delta and before Spark can
-    record the batch as done — the one window where a restart re-runs a batch that already landed.
 
     One write path, no catalog lookups: on serverless this function runs in a cloned session,
     where `tableExists()` once answered False for a table that existed (incidents.md, 2026-09-26).
@@ -213,11 +211,6 @@ def make_batch_writer(table, quarantine_table, app_id, *, idempotent=True, crash
             if idempotent:
                 writer = writer.option("txnAppId", app_id).option("txnVersion", batch_id)
             writer.saveAsTable(target)
-        if crash_after_batch is not None and batch_id == crash_after_batch:
-            raise RuntimeError(
-                f"SIMULATED CRASH after batch {batch_id} was committed to {table}, "
-                "before Spark could mark the batch done in the checkpoint"
-            )
 
     return write_batch
 
@@ -260,10 +253,9 @@ def run_stream(
     checkpoint,
     app_id,
     idempotent=True,
-    crash_after_batch=None,
 ):
     """Run one AvailableNow pass: read everything new, write it, stop. Progress is recorded
-    even when the run fails, and the failure is re-raised."""
+    even when the run fails, and the failure is re-raised. Returns the progress rows."""
     decoded = decode(read_kafka(topic), subject)
     create_tables(decoded, table, quarantine_table)
     ensure_progress_table()
@@ -274,7 +266,6 @@ def run_stream(
                 quarantine_table,
                 app_id,
                 idempotent=idempotent,
-                crash_after_batch=crash_after_batch,
             )
         )
         .option("checkpointLocation", checkpoint)
@@ -282,6 +273,7 @@ def run_stream(
         .start()
     )
     started = datetime.now(UTC)
+    rows = []
     try:
         query.awaitTermination()
     finally:
@@ -305,6 +297,7 @@ def run_stream(
             # the full traceback, not just the message (incidents.md, 2026-09-27).
             print(f"{stream}: could not record progress:")
             traceback.print_exc()
+    return rows
 
 
 # COMMAND ----------

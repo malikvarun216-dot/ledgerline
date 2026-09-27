@@ -831,4 +831,44 @@ The prevention rule above, applied at once: every monitoring column for
   is, per-batch timing comes from Delta commit timestamps, and no check reads
   `duration_ms`. Carried to Drill 1.
 
+## [2026-09-27] — exp_01 proved the bug, then Databricks failed the cell anyway, and "Run all" never reached the fix
+
+**In plain words:** exp_01's first half crashed a stream on purpose, caught
+the crash, restarted, and showed exactly the predicted damage — the crashed
+batch in the table twice. All of its checks passed and it printed
+`BUG PRESENT`. Then Databricks added its own line — *"ERROR: Some streams
+terminated before this command could finish!"* — and marked the whole cell as
+failed. "Run all" stops at a failed cell, so the second half, the fix, never
+ran.
+
+- The evidence that did land (deliberate failure, bug half):
+  crash raised right after batch 2 reached Delta; restart re-ran batches 2–7
+  (294,092 rows by offsets = 49,999 × 3 + 49,998 × 2 + 44,099); final table
+  **444,089 rows, 394,090 distinct offsets, 49,999 duplicates**; batch 2 =
+  99,998 rows for 49,999 offsets; rows present before the restart = 149,997 =
+  batches 0–2, proving the crash fell after the commit. The job itself
+  reported success.
+- Root cause: a Databricks notebook watches every stream a command starts.
+  If any of them ends with an error while the command runs, the notebook
+  fails the command at the end — **whether or not the code caught the error**.
+  From the notebook's point of view a caught stream failure is still a stream
+  failure. Our `try/except` handled it in Python; the platform reported it
+  anyway.
+- Why nothing caught it before: this was the first time any code here failed
+  a stream on purpose. Every earlier failure path was driven in batch code
+  (the quarantine self-test) or not at all.
+- Fix: exp_01 no longer stages the crash. It loads cleanly, then deletes the
+  last `commits/N` file from the checkpoint — leaving exactly what a crash
+  between the Delta write and the checkpoint commit leaves (rows in Delta,
+  `offsets/N` present, `commits/N` missing) — and restarts. No stream fails,
+  the replay is deterministic, and both variants assert that batch N really
+  was re-run, so "0 duplicates" cannot mean "nothing ran". The crash hook
+  (`crash_after_batch`) was removed from the shared Bronze writer: production
+  code should not carry an off-switch built for one experiment.
+- Prevention rule: **to test recovery, recreate the state a failure leaves
+  behind, not the failure event itself** — the state is deterministic, and the
+  platform does not treat it as a real failure. And before injecting a
+  failure, find out what the platform does with it: here, a notebook fails any
+  command in which a stream died, caught or not.
+
 <!-- Append further entries below this line. -->

@@ -1191,6 +1191,19 @@ topics use the same code; only the names and expected counts differ.
   Bronze guarantees each *message* (partition, offset) exactly once; Silver
   guarantees each *event* exactly once.
 
+### Correction (2026-09-27, same session) — the crash is now recreated from the checkpoint, not staged
+
+The entry above says `exp_01` proves exactly-once with "a crash between the
+Delta commit and the checkpoint commit", raised inside the batch. That was
+built and run: the bug half worked (49,999 duplicates, job reported success),
+but Databricks fails any notebook command in which a stream died, even when
+the code caught it, so "Run all" never reached the fix (incidents.md,
+2026-09-27). `exp_01` now **loads cleanly, deletes the last `commits/N` file,
+and restarts** — the exact on-disk state such a crash leaves. The reasoning
+in the entry stands: this is still the one situation `txnVersion` exists
+for, and still the reason a checkpoint deletion would be the wrong proof. The
+replayed batch is now the last one (7) instead of batch 2.
+
 ## Topic retention raised from 1 week to 3 months, on both topics (Session 7)
 
 **In plain words:** Kafka deletes messages after a set time — its *retention*.
