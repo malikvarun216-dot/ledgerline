@@ -699,4 +699,56 @@ nothing — the crash.
   source.** When a library's behaviour is in question, print what the running
   system actually returns before writing or fixing code against it.
 
+## [2026-09-27] — a corrupt Kafka message would have landed in Bronze as a row of blanks instead of going to quarantine; the self-test caught it before any arrived
+
+**In plain words:** Bronze is meant to send any message it cannot decode to a
+separate quarantine table. The check for "could not decode" asked *"is the
+decoded record empty (NULL)?"*. But when Spark's Avro decoder fails in the
+forgiving mode we use, it does not hand back NULL — it hands back a record
+with **every field blank**. That record is not NULL, so the check said
+"decoded fine", and a corrupt message would have been written into
+`bronze.orders` as a row of blanks. A deliberate test fed it a broken message
+and it came back "decoded OK".
+
+- What happened: `quarantine_self_test` feeds `decode()` one real `orders`
+  message and five broken copies. Result: real → decoded OK; **truncated
+  payload → decoded OK** (should be quarantined); wrong magic byte → not
+  Confluent wire format; **unknown schema id → decoded OK** (open — see below);
+  null value → tombstone; missing key → missing key.
+- Root cause: `from_avro(..., mode="PERMISSIVE")` returns, for a record-shaped
+  schema, a record whose fields are all NULL when decoding fails — not a NULL
+  record. That is also why `printSchema` in the probe showed **every** field
+  `nullable = true`, including fields the Avro schema declares required: the
+  decoder forces the whole schema nullable so it can hand back blanks.
+  `decode()` tested `_record IS NULL`, which can therefore never be true for a
+  failed decode. The field-level behaviour is confirmed by the next run, which
+  prints `event_id` per case.
+- Why nothing caught it:
+  - The live topics hold **zero** corrupt messages, so the real load never
+    reached this branch. Its green result said nothing about it — the Session 6
+    lesson again: a passing run only covers the code it actually ran.
+  - The docs phrase it as "corrupt records are processed as null result".
+    "A null result" and "a result whose fields are null" read the same in a
+    sentence and behave differently in a `WHERE`.
+  - The self-test that found it **printed its results but asserted nothing**,
+    so the notebook carried on. It was caught because a human read the output.
+- Impact on data: **none.** `bronze.orders` has 394,090 rows and 394,090
+  distinct `event_id`s. `count(DISTINCT …)` ignores NULLs, so a single blank
+  row would have made the two numbers differ. No corrupt message has ever
+  been on the topic.
+- Fix: "decode failed" now means `_record.event_id IS NULL`. `event_id` is a
+  required, non-nullable string in both schemas, so a valid message always has
+  one. The self-test now **asserts** the expected route for each case and stops
+  the notebook if any is wrong.
+- Open question, deliberately not assumed: the **unknown schema id** case
+  (id 999,999, which does not exist in the registry, in front of a valid
+  body). Either the decoder looked the id up, failed, and returned blanks —
+  then the new check quarantines it — or it ignored the id and decoded the body
+  with the subject's own schema, which would matter the day a second schema
+  version exists. The next run prints the decoded `event_id` for that case,
+  which tells the two apart.
+- Prevention rule: **detect a failed decode by a field every valid record must
+  have, never by "is the record null".** And **a self-test asserts its expected
+  outcomes** — a test that only prints relies on someone reading it.
+
 <!-- Append further entries below this line. -->

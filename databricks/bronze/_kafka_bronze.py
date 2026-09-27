@@ -159,7 +159,11 @@ def decode(raw, subject):
         "_quarantine_reason",
         F.when(F.col("_raw_value").isNull(), F.lit("null value (tombstone)"))
         .when(~F.col("_framed"), F.lit("not Confluent wire format"))
-        .when(F.col("_record").isNull(), F.lit("avro decode failed"))
+        # NOT `_record IS NULL`: in PERMISSIVE mode a payload that fails to decode comes back as
+        # a record whose fields are all NULL, not as NULL (the self-test showed a truncated
+        # message passing as "decoded OK" — incidents.md, 2026-09-27). `event_id` is a required,
+        # non-nullable field in both schemas, so a NULL there means the decode failed.
+        .when(F.col("_record.event_id").isNull(), F.lit("avro decode failed"))
         .when(F.col("_kafka_key").isNull(), F.lit("missing key")),
     )
     return df.drop("_framed")
@@ -266,7 +270,13 @@ def run_stream(
         try:
             rows = record_progress(query, stream=stream, app_id=app_id)
             read = sum(r["num_input_rows"] for r in rows)
-            print(f"{stream}: {len(rows)} batch(es) completed, {read:,} rows, {seconds:.0f}s")
+            # With nothing new, Spark still files one report for the *next* batch id, with 0
+            # rows — a report, not a batch that ran.
+            with_data = sum(1 for r in rows if r["num_input_rows"] > 0)
+            print(
+                f"{stream}: {len(rows)} progress report(s), {with_data} batch(es) with data, "
+                f"{read:,} rows, {seconds:.0f}s"
+            )
         except Exception:
             # Bookkeeping must not hide the real failure — and must not hide its own either:
             # the full traceback, not just the message (incidents.md, 2026-09-27).
@@ -516,13 +526,31 @@ def quarantine_self_test(table, subject):
             ),
         ]
     )
+    # What each case must become. "unknown schema id" is left open on purpose: whether the
+    # decoder looks the id up (and fails) or ignores it is exactly what is being found out.
+    expected = {
+        "real message": "decoded OK",
+        "truncated payload": "avro decode failed",
+        "wrong magic byte": "not Confluent wire format",
+        "null value": "null value (tombstone)",
+        "missing key": "missing key",
+    }
     results = {}
     for name, (key, value) in cases.items():
         row = (key.encode() if key else None, value, "self-test", 0, 0, datetime.now(UTC), 0, [])
         try:
             out = decode(spark.createDataFrame([row], kafka_shape), subject).collect()[0]
             results[name] = out._quarantine_reason or "decoded OK"
+            event_id = out._record.event_id if out._record is not None else None
         except Exception as e:  # the finding, if any case stops the batch instead of quarantining
             results[name] = f"RAISED {type(e).__name__}: {str(e)[:160]}"
-        print(f"{name:20} -> {results[name]}")
+            event_id = None
+        want = expected.get(name)
+        if want is None:
+            verdict = "(open question)"
+        else:
+            verdict = "OK" if results[name] == want else f"EXPECTED {want}"
+        print(f"{name:20} -> {results[name]:28} event_id={event_id}  {verdict}")
+    wrong = {n: r for n, r in results.items() if n in expected and r != expected[n]}
+    assert not wrong, f"quarantine routing is wrong for: {wrong}"
     return results
