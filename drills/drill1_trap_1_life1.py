@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Drill 1 — checkpoint-reset trap, part 1 of 2: life 1
 # MAGIC

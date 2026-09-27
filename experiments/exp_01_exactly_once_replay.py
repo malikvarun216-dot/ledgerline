@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # exp_01 — exactly-once replay: a crash after Delta commits, before Spark records it
 # MAGIC

@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Drill 1 — a corrected re-delivery, part 2 of 2 (scratch)
 # MAGIC

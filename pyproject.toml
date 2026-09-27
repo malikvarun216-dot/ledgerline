@@ -36,13 +36,15 @@ select = [
 # Tests assert on literal fixture values; magic numbers are the point.
 "tests/*" = ["B011"]
 # Databricks notebooks: the runtime injects spark, dbutils and display as globals.
-"databricks/*" = ["F821"]
+# W292 (no final newline) because Databricks saves every notebook without one; matching
+# it byte for byte is what keeps a Git-folder Pull from conflicting (decisions.md, Drill 1).
+"databricks/*" = ["F821", "W292"]
 # Experiments that run as Databricks notebooks, named one by one so a plain-Python
 # experiment added later still gets undefined-name checking.
-"experiments/exp_01_exactly_once_replay.py" = ["F821"]
+"experiments/exp_01_exactly_once_replay.py" = ["F821", "W292"]
 # Drill 1 notebooks (Databricks): same reason, plus the names they get from `%run`.
-"drills/drill1_*.py" = ["F821"]
-"drills/_drill1_*.py" = ["F821"]
+"drills/drill1_*.py" = ["F821", "W292"]
+"drills/_drill1_*.py" = ["F821", "W292"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
