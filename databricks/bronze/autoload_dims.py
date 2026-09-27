@@ -2,24 +2,21 @@
 # MAGIC %md
 # MAGIC # Bronze — nightly dimension dumps (customer, product, seller)
 # MAGIC
-# MAGIC **Pattern:** Auto Loader + `Trigger.AvailableNow` + `replaceWhere` on `dump_date`.
+# MAGIC **Pattern:** Auto Loader + `Trigger.AvailableNow` + `replaceWhere` on `dump_date` — the code is in
+# MAGIC `_autoload_dims`. Source is read-only (`ledgerline_landing` external location); state lives in a
+# MAGIC UC volume.
 # MAGIC
-# MAGIC - **Auto Loader** remembers which files it has already read (in the checkpoint), so a normal
-# MAGIC   re-run picks up only new nightly dumps.
-# MAGIC - **`replaceWhere dump_date IN (...)`** makes the write itself idempotent: if a dump is ever
-# MAGIC   processed again (checkpoint reset, backfill), its rows *replace* that night's rows instead of
-# MAGIC   being appended a second time. The checkpoint prevents re-reads; `replaceWhere` makes a
-# MAGIC   re-read harmless. Two independent guarantees.
-# MAGIC - **`AvailableNow`**: process everything new, then stop. Serverless allows nothing else.
-# MAGIC
-# MAGIC Bronze is faithful: every column stays a string, exactly as the file had it, plus lineage.
-# MAGIC Source is read-only (`ledgerline_landing` external location); state lives in a UC volume.
+# MAGIC **Safe to "Run all" at any time.** Session 6's version also held the forced-replay proof
+# MAGIC (delete every checkpoint, re-read every file), so "Run all" on the production notebook deleted
+# MAGIC production state. That proof now lives in `drills/drill1_dims_1`.
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
+# MAGIC %run ./_autoload_dims
 
-LANDING ="s3://ledgerline-landing-dev-fffc8b65/ledgerline/dims"
+# COMMAND ----------
+
+LANDING = "s3://ledgerline-landing-dev-fffc8b65/ledgerline/dims"
 CATALOG = "workspace"
 SCHEMA = "bronze"
 STATE = f"/Volumes/{CATALOG}/{SCHEMA}/checkpoints/dims"
@@ -28,126 +25,57 @@ DIMS = ["customer", "product", "seller"]
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.checkpoints")
 
-# COMMAND ----------
 
-PATH_DATE = r"dump_date=(\d{4}-\d{2}-\d{2})"
-
-
-def write_batch(batch_df, batch_id, dim):
-    table = f"{CATALOG}.{SCHEMA}.{dim}"
-
-    # The file carries dump_date as a column AND the folder is named dump_date=...
-    # They must agree, or replaceWhere would replace the wrong night.
-    mismatched = batch_df.where(F.col("dump_date") != F.col("_path_dump_date")).limit(1)
-    if not mismatched.isEmpty():
-        raise ValueError(f"{dim}: dump_date column disagrees with its folder name")
-
-    dates = sorted(r.dump_date for r in batch_df.select("dump_date").distinct().collect())
-    if not dates:
-        return
-    rows = batch_df.drop("_path_dump_date")
-
-    # replaceWhere is a predicate, not a partition operation: the table is not
-    # partitioned (~100K rows would be thousands of tiny files). Delta also
-    # checks every written row matches the predicate, so a stray date fails loudly.
-    #
-    # Safe only because one night = one file = one batch. If a night's dump ever
-    # arrived as several files across two batches, the second batch would
-    # replace the first one's rows. The replace unit must equal the arrival unit.
-    #
-    # One path only: the table is created before the stream starts (see ingest),
-    # so every batch, including the first ever, goes through replaceWhere.
-    in_list = ", ".join(f"'{d}'" for d in dates)
-    (
-        rows.write.format("delta")
-        .mode("overwrite")
-        .option("replaceWhere", f"dump_date IN ({in_list})")
-        .saveAsTable(table)
-    )
-    print(f"{dim}: batch {batch_id} replaced dump_date {dates}")
+def run_all():
+    for dim in DIMS:
+        # Paths unchanged since Session 6 ({STATE}/{dim}/schema and /checkpoint): moving them
+        # would start a new stream that re-reads every file.
+        ingest(f"{LANDING}/{dim}/", f"{CATALOG}.{SCHEMA}.{dim}", f"{STATE}/{dim}")
 
 
-# Time travel (reading a table as it was at an older version) needs the old data files. Delta's
-# log keeps entries 30 days by default, but data files only 7 — and Predictive Optimization, on
-# for every table here, runs VACUUM that deletes them after that. 30 days lines the two up.
-# decisions.md, "Predictive Optimization stays on" (Session 7).
-FILE_RETENTION = "interval 30 days"
-
-
-def ensure_retention(table):
-    """Set the time-travel window once. Checked first, because every ALTER is a new commit."""
-    props = {r.key: r.value for r in spark.sql(f"SHOW TBLPROPERTIES {table}").collect()}
-    if props.get("delta.deletedFileRetentionDuration") != FILE_RETENTION:
-        spark.sql(
-            f"ALTER TABLE {table} SET TBLPROPERTIES "
-            f"('delta.deletedFileRetentionDuration' = '{FILE_RETENTION}')"
-        )
-        print(f"{table}: old data files now kept {FILE_RETENTION}")
-
-
-def ingest(dim):
-    stream = (
-        spark.readStream.format("cloudFiles")
-        .option("cloudFiles.format", "csv")
-        .option("header", "true")
-        # Bronze keeps strings; typing is Silver's job.
-        .option("cloudFiles.inferColumnTypes", "false")
-        # Don't turn the dump_date=... folder into a column: the file already has one.
-        .option("cloudFiles.partitionColumns", "")
-        .option("cloudFiles.schemaLocation", f"{STATE}/{dim}/schema")
-        .load(f"{LANDING}/{dim}/")
-        .withColumn("_source_file", F.col("_metadata.file_path"))
-        .withColumn("_source_modified_at", F.col("_metadata.file_modification_time"))
-        .withColumn("_ingested_at", F.current_timestamp())
-        .withColumn("_path_dump_date", F.regexp_extract("_source_file", PATH_DATE, 1))
-    )
-
-    # Create the empty table here, in the notebook's own session. Inside
-    # foreachBatch (a cloned session on serverless) tableExists() returned False
-    # for a table that existed — see incidents.md, 2026-09-26.
-    table = f"{CATALOG}.{SCHEMA}.{dim}"
-    if not spark.catalog.tableExists(table):
-        empty = spark.createDataFrame([], stream.drop("_path_dump_date").schema)
-        empty.write.format("delta").saveAsTable(table)
-    ensure_retention(table)
-
-    query = (
-        stream.writeStream
-        .foreachBatch(lambda df, bid: write_batch(df, bid, dim))
-        .option("checkpointLocation", f"{STATE}/{dim}/checkpoint")
-        .trigger(availableNow=True)
-        .start()
-    )
-    query.awaitTermination()
-
-
-for dim in DIMS:
-    ingest(dim)
+run_all()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Verify — counts must equal the files, parsed independently on a laptop
+# MAGIC ## Verify — every night in the table equals its file in the landing zone
+# MAGIC
+# MAGIC Two checks, for two different mistakes:
+# MAGIC
+# MAGIC 1. **Against the landing zone, per night:** a plain batch read of the same files, grouped by
+# MAGIC    `dump_date`, must equal the table exactly — no night doubled, none missing, none extra. The
+# MAGIC    landing zone is the source of truth, the way the broker is for Kafka; no count is written
+# MAGIC    into this notebook, so a new night is not a false failure.
+# MAGIC 2. **Golden nights, counted on a laptop by a different parser** (pandas): a landed file never
+# MAGIC    changes, so its count may be pinned. Catches a parsing mistake both Spark reads would share.
 
 # COMMAND ----------
 
-EXPECTED = {
-    "customer": {"2016-09-04": 1, "2017-01-02": 326, "2017-05-02": 8068},
-    "product": {"2016-09-04": 32951, "2017-01-02": 32951, "2017-05-02": 32951},
-    "seller": {"2016-09-04": 3095, "2017-01-02": 3095, "2017-05-02": 3095},
+GOLDEN = {
+    "customer": {"2016-09-04": 1, "2017-01-02": 326, "2017-05-02": 8_068, "2017-08-30": 22_497},
+    "product": {"2016-09-04": 32_951, "2017-01-02": 32_951, "2017-05-02": 32_951, "2017-08-30": 32_951},
+    "seller": {"2016-09-04": 3_095, "2017-01-02": 3_095, "2017-05-02": 3_095, "2017-08-30": 3_095},
 }
 
 
+def landing_counts(source):
+    # recursiveFileLookup turns off folder-name inference, so dump_date=... does not become a
+    # second dump_date column next to the file's own.
+    files = spark.read.option("header", "true").option("recursiveFileLookup", "true").csv(source)
+    return {r.dump_date: r.n for r in files.groupBy("dump_date").agg(F.count("*").alias("n")).collect()}
+
+
 def check_counts():
-    for dim, want in EXPECTED.items():
-        got = {
-            r.dump_date: r.n
-            for r in spark.table(f"{CATALOG}.{SCHEMA}.{dim}")
-            .groupBy("dump_date").agg(F.count("*").alias("n")).collect()
-        }
-        status = "OK" if got == want else "MISMATCH"
-        print(f"{dim:9} {status}  got={dict(sorted(got.items()))}")
-        assert got == want, f"{dim}: expected {want}"
+    for dim in DIMS:
+        table = f"{CATALOG}.{SCHEMA}.{dim}"
+        got, landed = night_counts(table), landing_counts(f"{LANDING}/{dim}/")
+        golden = {d: n for d, n in GOLDEN[dim].items() if d in landed}
+        ok = got == landed and all(got.get(d) == n for d, n in golden.items())
+        print(f"{dim:9} {'OK' if ok else 'MISMATCH'}  table={dict(sorted(got.items()))}")
+        if got != landed:
+            print(f"{'':9} landing={dict(sorted(landed.items()))}")
+        assert got == landed, f"{dim}: table and landing zone disagree"
+        assert all(got.get(d) == n for d, n in golden.items()), f"{dim}: a golden night changed"
 
 
 check_counts()
@@ -155,24 +83,16 @@ check_counts()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Prove idempotency — twice, two different ways
-# MAGIC
-# MAGIC 1. **Plain re-run.** No new files, so Auto Loader has nothing to do. Counts unchanged.
-# MAGIC 2. **Forced replay.** Delete the checkpoints, so Auto Loader forgets everything and re-reads
-# MAGIC    all 9 files. Without `replaceWhere` every table would double. With it, counts stay the same.
+# MAGIC ## Plain re-run — no new files, so nothing may be written
 
 # COMMAND ----------
 
-for dim in DIMS:
-    ingest(dim)
+before = {dim: len(replace_commits(f"{CATALOG}.{SCHEMA}.{dim}")) for dim in DIMS}
+run_all()
 check_counts()
-
-# COMMAND ----------
-
-dbutils.fs.rm(STATE, True)
-for dim in DIMS:
-    ingest(dim)
-check_counts()
+after = {dim: len(replace_commits(f"{CATALOG}.{SCHEMA}.{dim}")) for dim in DIMS}
+print(f"WRITE commits before {before}, after {after}")
+assert before == after, "a re-run with no new files wrote something"
 
 # COMMAND ----------
 
@@ -182,6 +102,7 @@ check_counts()
 # COMMAND ----------
 
 display(
-    spark.sql(f"DESCRIBE HISTORY {CATALOG}.{SCHEMA}.customer")
-    .select("version", "timestamp", "operation", "operationParameters", "operationMetrics")
+    spark.sql(f"DESCRIBE HISTORY {CATALOG}.{SCHEMA}.customer").select(
+        "version", "timestamp", "operation", "operationParameters", "operationMetrics"
+    )
 )
