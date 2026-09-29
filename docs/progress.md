@@ -1635,6 +1635,17 @@ Databricks $0. Confluent: ~1 GB of reads (full `orders` loads for the trap and
 exp_01) — a few cents; 74 messages produced. AWS: 3 new dims objects + 9
 byte-identical rewrites + 3 scratch objects (~15 MB), cents.
 
+### Hands-on checks after the drill
+- Done: `DESCRIBE HISTORY` on `exp01_bug` (v2–v10, v10 = batch 7 again) vs
+  `exp01_fix` (stops at v9); `bronze.customer` (v4 = `2017-08-30` only, v5 =
+  all 4 nights after the checkpoint reset); `cloud_files_state` from the **SQL
+  Editor** too — 4 files, sizes equal to S3, `create_time` = the 19:00 rewrite,
+  so Auto Loader keys its memory on path + modification time.
+- **Skipped at the human's request:** the Confluent message-detail view of the
+  headers (the laptop read-back already showed all 74 carry them) and the
+  GitHub Actions log — so **CI running the producer tests stays unverified**
+  (carried in `### Next`).
+
 ### Learning check
 Five questions, discussed, after a plain-words summary of the drill (asked
 for by the human). ◐ reset trap (outcome ✓, batch-number mechanism missed);
