@@ -31,7 +31,9 @@ def _notebooks() -> list[Path]:
     tracked = subprocess.run(
         ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout.split()
-    return [ROOT / f for f in tracked if (ROOT / f).read_bytes().startswith(MARKER)]
+    # A tracked file deleted in the working tree (not yet committed) is not a notebook to check.
+    present = [ROOT / f for f in tracked if (ROOT / f).exists()]
+    return [p for p in present if p.read_bytes().startswith(MARKER)]
 
 
 def test_there_are_notebooks_to_check():
