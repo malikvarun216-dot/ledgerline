@@ -1072,3 +1072,40 @@ nothing anywhere reported the difference.
   produces it.** "A backfill is harmless" must be tested with a backfill (same
   path, new content, checkpoint intact), not with a checkpoint reset that
   happens to share its outcome.
+
+## [2026-09-30] — zip codes lost their leading zero between Olist and the landing zone, and every check passed
+
+**In plain words:** Brazilian zip prefixes are five digits, and about a quarter
+of them start with 0 (`09790`). The dims generator reads them as numbers, and a
+number has no leading zero — so every landed dump says `9790`. Bronze stored
+that faithfully. Found at the start of Session 8 while looking at real values
+before designing Silver's typing; nothing had flagged it in eight sessions.
+
+- What happened: raw Olist has **99,441 / 99,441** customer zips and **3,095 /
+  3,095** seller zips at exactly five digits. The landed dumps have short zips
+  on every night: customers 0 / 1, 57 / 326, 1,599 / 8,068, **4,783 / 22,497**
+  (2017-08-30); sellers **1,027 / 3,095** on every night.
+- What I thought was wrong: nothing — the check was a look at real values
+  before writing casts, not a bug hunt.
+- Root cause: the Olist contract in `generators/olist.py` (Session 1) types
+  `customer_zip_code_prefix`, `seller_zip_code_prefix` and
+  `geolocation_zip_code_prefix` as `Int64`. `to_csv` then writes the integer.
+  A zip is an identifier that happens to use digits, not a quantity.
+- Why nothing caught it: every test and every check compares **counts and
+  keys** — rows per night, distinct ids, offsets. None looks at the *format* of
+  a value. The test fixtures build their frames with the same `Int64` cast
+  (`tests/conftest.py`), so the tests agree with the bug by construction.
+  Bronze keeps strings exactly as the file had them, which is right, and which
+  means the defect arrived in Bronze intact.
+- Fix: in Silver, not in the generator — `lpad(zip, 5, '0')`, lossless because
+  every original is five digits, plus a check that every zip is five digits
+  after padding. Fixing the generator mid-stream would make night 5 disagree
+  with night 4 on thousands of rows and open fake SCD2 versions in Gold
+  (decisions.md, Session 8). The landed files stay as delivered.
+- Prevention rule: **an identifier made of digits is text — never let a reader
+  cast or infer it as a number** (zip, phone, account number, any code with a
+  meaningful leading zero). Silver asserts the five-digit format; a generator
+  test pins the current four-digit behaviour so that "just fixing" the
+  generator fails loudly and points at the decision that explains why not.
+- Lesson: "rows match" is not "values match". A pipeline can be exactly-once,
+  gap-free and faithfully wrong.

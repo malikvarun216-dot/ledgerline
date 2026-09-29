@@ -40,10 +40,21 @@ Products and sellers are **static** in Olist, so their changes are synthetic and
 deterministic (seeded). This asymmetry is deliberate and worth knowing: the
 customer SCD2 evidence is real, the product/seller SCD2 evidence is fabricated.
 
+Landing is write-once
+---------------------
+Every night is worked out in memory first. A night already in the sink is left
+alone when its bytes are identical, and if any landed night *would change*, the
+run writes nothing and names the night — unless that night is passed to
+``--redeliver`` (a deliberate correction). Bronze re-reads a rewritten file
+(``allowOverwrites``), so a run with different arguments would otherwise
+rewrite history all the way into Bronze, silently.
+
 Usage
 -----
     python generators/dim_dumps.py --nights 6 --stride-days 120
     python generators/dim_dumps.py --sink s3 --bucket my-bucket --prefix ledgerline
+    # deletions only from night 5 on; nights 1-4 stay byte-identical
+    python generators/dim_dumps.py --nights 5 --delete-per-night 100 --delete-from 2017-12-28
 """
 
 from __future__ import annotations
@@ -51,6 +62,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -218,11 +230,17 @@ def deleted_keys(
     per_night: int,
     seed: int,
     max_fraction: float = MAX_DELETED_FRACTION,
+    first_night: int = 1,
 ) -> set[str]:
     """Keys removed from the dump by night ``night``, cumulative.
 
     Computed from (spec, night, seed) rather than stored, so the generator has
     no hidden state to drift: rerunning night 4 always removes the same rows.
+
+    ``first_night`` is the first night that deletes anything (night 0, the
+    baseline, never does). Nights before it get an empty set, so switching
+    deletions on later leaves every earlier night byte-identical — which is what
+    lets a new night with deletions land beside nights already delivered.
 
     A key removed here is simply **absent from the file**. That absence is the
     only signal a deletion happened, which is exactly the condition
@@ -249,7 +267,7 @@ def deleted_keys(
         return set()
 
     removed: set[str] = set()
-    for n in range(1, night + 1):
+    for n in range(max(1, first_night), night + 1):
         if len(removed) >= ceiling:
             break
         rng = random.Random(f"{seed}:delete:{spec.name}:{n}")
@@ -426,6 +444,67 @@ def write_night(
     return stats
 
 
+class LandedNightChanged(Exception):
+    """This run would rewrite a night that has already been delivered."""
+
+
+class PlannedSink:
+    """Writes stay in memory; reads see this run's planned writes first, then the sink.
+
+    Lets a whole run be generated — including each night's comparison with the
+    night before — before anything is written, so a run that would change
+    landed history can be refused with the landing zone untouched.
+    """
+
+    def __init__(self, base: BlobSink) -> None:
+        self.base = base
+        self.planned: dict[str, str] = {}
+
+    def put_text(self, key: str, text: str) -> None:
+        self.planned[key] = text
+
+    def get_text(self, key: str) -> str:
+        return self.planned[key] if key in self.planned else self.base.get_text(key)
+
+    def list_keys(self, prefix: str) -> list[str]:
+        mine = {k for k in self.planned if k.startswith(prefix)}
+        return sorted(set(self.base.list_keys(prefix)) | mine)
+
+
+def _night_of(key: str) -> date:
+    return date.fromisoformat(key.split(f"{DUMP_DATE}=", 1)[1].split("/", 1)[0])
+
+
+def land(sink: BlobSink, planned: dict[str, str], redeliver: Iterable[date] = ()) -> dict[str, str]:
+    """Write the planned dumps write-once. Returns {key: new | identical | redelivered}.
+
+    Checks every key before writing any: one refused night means nothing lands.
+    """
+    allowed = set(redeliver)
+    landed = set(sink.list_keys(f"{ROOT_PREFIX}/"))
+    status: dict[str, str] = {}
+    changed: list[str] = []
+    for key, text in sorted(planned.items()):
+        if key not in landed:
+            status[key] = "new"
+        elif sink.get_text(key) == text:
+            status[key] = "identical"
+        elif _night_of(key) in allowed:
+            status[key] = "redelivered"
+        else:
+            changed.append(key)
+    if changed:
+        raise LandedNightChanged(
+            "these nights are already delivered and this run would change them: "
+            + ", ".join(changed)
+            + ". Nothing was written. If a night really needs correcting, name it with --redeliver."
+        )
+    for key, text in sorted(planned.items()):
+        if status[key] != "identical":
+            sink.put_text(key, text)
+    return status
+
+
 def run(
     frames: dict[str, pd.DataFrame],
     sink: BlobSink,
@@ -435,10 +514,22 @@ def run(
     change_rate: int = 25,
     delete_per_night: int = 0,
     seed: int = 20260919,
+    delete_from: date | None = None,
+    redeliver: Iterable[date] = (),
 ) -> list[dict[str, Any]]:
-    """Generate ``nights`` consecutive dumps, ``stride_days`` apart."""
+    """Generate ``nights`` consecutive dumps, ``stride_days`` apart, and land them write-once.
+
+    ``delete_from``: deletions begin on the first night on or after this date
+    (default: the second night). ``redeliver``: landed nights this run may rewrite.
+    """
     timeline = customer_timeline(frames["customers"], frames["orders"])
     report: list[dict[str, Any]] = []
+    plan = PlannedSink(sink)
+
+    dates = [start + timedelta(days=night * stride_days) for night in range(nights)]
+    first_delete_night = 1
+    if delete_from is not None:
+        first_delete_night = next((n for n, d in enumerate(dates) if d >= delete_from), nights)
 
     # Every key the dimension will ever hold, fixed before the first night.
     # The customer dimension grows over time, so deriving this per night would
@@ -449,8 +540,7 @@ def run(
         "seller": sorted(set(frames["sellers"][SELLER.key])),
     }
 
-    for night in range(nights):
-        dump_date = start + timedelta(days=night * stride_days)
+    for night, dump_date in enumerate(dates):
         as_of = datetime.combine(dump_date, datetime.max.time())
 
         night_frames = {
@@ -465,7 +555,9 @@ def run(
             # Delete first, then mutate the survivors. The other order lets the
             # generator report a synthetic change on a row it then removes, so
             # its own summary disagrees with the dump it wrote.
-            removed = deleted_keys(spec, universes[name], night, delete_per_night, seed)
+            removed = deleted_keys(
+                spec, universes[name], night, delete_per_night, seed, first_night=first_delete_night
+            )
             if removed:
                 frame = frame[~frame[spec.key].isin(removed)].copy()
 
@@ -473,7 +565,7 @@ def run(
             if name != "customer":
                 frame, changed = apply_synthetic_changes(frame, spec, night, change_rate, seed)
 
-            stats = write_night(sink, spec, frame, dump_date)
+            stats = write_night(plan, spec, frame, dump_date)
             stats.update(
                 {
                     "dimension": name,
@@ -484,6 +576,9 @@ def run(
             )
             report.append(stats)
 
+    status = land(sink, plan.planned, redeliver)
+    for stats in report:
+        stats["landed"] = status[dump_key(stats["dimension"], date.fromisoformat(stats[DUMP_DATE]))]
     return report
 
 
@@ -503,6 +598,19 @@ def main() -> int:
     )
     parser.add_argument(
         "--delete-per-night", type=int, default=0, help="rows dropped from the dump per night"
+    )
+    parser.add_argument(
+        "--delete-from",
+        type=date.fromisoformat,
+        default=None,
+        help="deletions start on the first night on or after this date; earlier nights are untouched",
+    )
+    parser.add_argument(
+        "--redeliver",
+        type=date.fromisoformat,
+        action="append",
+        default=[],
+        help="a landed night this run may rewrite (a correction); repeat for several",
     )
     parser.add_argument("--seed", type=int, default=20260919)
     args = parser.parse_args()
@@ -525,29 +633,37 @@ def main() -> int:
         sink = LocalBlobSink(args.out_dir)
         destination = str(args.out_dir / ROOT_PREFIX)
 
-    report = run(
-        frames,
-        sink,
-        start=start,
-        nights=args.nights,
-        stride_days=args.stride_days,
-        change_rate=args.change_rate,
-        delete_per_night=args.delete_per_night,
-        seed=args.seed,
-    )
+    try:
+        report = run(
+            frames,
+            sink,
+            start=start,
+            nights=args.nights,
+            stride_days=args.stride_days,
+            change_rate=args.change_rate,
+            delete_per_night=args.delete_per_night,
+            seed=args.seed,
+            delete_from=args.delete_from,
+            redeliver=args.redeliver,
+        )
+    except LandedNightChanged as refused:
+        raise SystemExit(f"refused: {refused}") from None
 
     header = (
         f"  {'dump_date':<12} {'dimension':<9} {'rows':>8} {'new':>7} "
-        f"{'changed':>8} {'unchanged':>10} {'gone':>6}"
+        f"{'changed':>8} {'unchanged':>10} {'gone':>6}  {'landed':<11}"
     )
     print(header)
-    print(f"  {'-' * 12} {'-' * 9} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 6}")
+    print(f"  {'-' * 12} {'-' * 9} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 6}  {'-' * 11}")
     for row in report:
         print(
             f"  {row[DUMP_DATE]:<12} {row['dimension']:<9} {row['rows']:>8,} {row['new']:>7,} "
-            f"{row['changed']:>8,} {row['unchanged']:>10,} {row['deleted_vs_previous']:>6,}"
+            f"{row['changed']:>8,} {row['unchanged']:>10,} {row['deleted_vs_previous']:>6,}  "
+            f"{row['landed']:<11}"
         )
-    print(f"\n  written to {destination}")
+    written = sum(row["landed"] != "identical" for row in report)
+    print(f"\n  {written} file(s) written to {destination}")
+    print("  'identical' nights were already delivered with these exact bytes and were left alone.")
     print("  'unchanged' rows keep last night's dim_updated_at — that is what keeps SCD2 honest.")
     return 0
 

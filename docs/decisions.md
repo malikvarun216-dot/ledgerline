@@ -1592,3 +1592,161 @@ replaces the old one; it is never added beside it.
   every earlier night, as it did today) now triggers a harmless re-write of
   those nights. It could be avoided by making landing write-once; not worth a
   generator change while a re-read costs a few seconds.
+
+## Dims landing is write-once, and deletions start on a named night (`--delete-from`) (Session 8)
+
+**In plain words:** the dims generator used to rewrite every earlier night each
+time it ran. With the same arguments that was harmless (identical bytes); with
+different arguments it would quietly rewrite history, and Bronze — which now
+re-reads a rewritten file — would follow. Now the generator works out every
+night in memory first, leaves a night already in the landing zone alone when
+its bytes are identical, and **writes nothing at all** if any landed night would
+change, unless that night is named with `--redeliver <date>`. Deletions can be
+started on a chosen night, so night 5 can drop rows without touching nights 1–4.
+
+- Chosen: `--delete-from YYYY-MM-DD` — deletions begin on the first night on or
+  after that date; earlier nights compute an empty deletion set, so they
+  regenerate byte-identical. Night 5 (2017-12-28) is to be landed with
+  `--nights 5 --delete-per-night 100 --delete-from 2017-12-28`: expected 100
+  products, 100 sellers and 19 customers gone from the dump (of the 100
+  customers sampled, 19 are on night 4; 25 would only have appeared on night 5
+  and now never appear; the rest have not placed an order yet).
+- Chosen: **plan, check, then write.** All nights are generated against an
+  in-memory overlay of the sink; only if every already-landed night is
+  byte-identical (or named in `--redeliver`) are the new nights written. A
+  refused run leaves the landing zone exactly as it was.
+- Rejected: **`--nights 5 --delete-per-night 100` as the generator stood.**
+  Deletions are cumulative from night 2 (`deleted_keys` loops `1..night`), so
+  that command computes different nights 2–4 (rows missing) and rewrites them;
+  with `allowOverwrites` on, Bronze would replace its history to match, and no
+  check would say so — the landing zone is Bronze's source of truth.
+- Rejected: **skip existing nights silently, whatever their content.** Simpler,
+  but it hides the exact mistake the rule exists for: arguments that disagree
+  with what has landed. A refusal names the night that would change.
+- Rejected: **a boolean `--force`.** A correction is for one night; a flag that
+  unlocks every night is the foot-gun this replaces.
+- Property kept: the whole landed history is reproducible from one command
+  (recorded in `progress.md`), which is what "rebuildable from git + S3" needs.
+
+## Silver dims apply one night at a time, oldest first, recorded in a merge log (Session 8)
+
+**In plain words:** Silver holds each customer, product and seller as they are
+now. It gets there by applying the nightly dumps in date order, one `MERGE` per
+night, and writes one line per applied night to a small log table (night,
+rows, inserted / updated / deleted, table version). A night older than the last
+one applied is never applied — it would roll Silver back in time.
+
+- Chosen: `workspace.silver.dims_merge_log`; pending nights = Bronze nights
+  newer than the last logged night, plus the last logged night itself when
+  Bronze holds a newer copy of it (a corrected re-delivery — Drill 1 made Bronze
+  accept those, so Silver must too). A corrected *older* night is reported,
+  not applied.
+- Why the log need not be atomic with the MERGE: applying the same full
+  snapshot twice converges to the same table (second pass: 0 / 0 / 0). A crash
+  between the MERGE and the log line only means that night is applied again,
+  harmlessly. Contrast Kafka Bronze, where an append is not idempotent and
+  needed `txnAppId`.
+- Rejected: **apply only the newest night.** The current state comes out
+  right, but every step in between is squashed: a customer who moved twice
+  between runs shows one move, and Silver's commit history — what Change Data
+  Feed exports to Gold — loses the intermediate versions.
+- Rejected: **stream from Bronze.** Bronze dims are written with
+  `replaceWhere` overwrites, so a plain Delta stream over them fails on the
+  first rewrite; a night is a batch, and an orchestrator's `{{ ds }}` (Airflow,
+  later) maps onto "apply night D" directly.
+
+## Silver dims `MERGE`: update only real changes, delete by absence, change feed on (Session 8)
+
+**In plain words:** a row is updated only when one of its values actually
+differs, a key missing from tonight's full dump is deleted
+(`WHEN NOT MATCHED BY SOURCE DELETE`), and Delta's Change Data Feed records
+exactly which rows each night changed.
+
+- Chosen: `WHEN MATCHED AND NOT (t.a <=> s.a AND …) THEN UPDATE` over every
+  business column plus `dim_updated_at` (`<=>` is equality that treats two
+  NULLs as equal). Silver mirrors what the file says; it does not trust the
+  source's timestamp to announce every change.
+- Chosen: `delta.enableChangeDataFeed = true` **at creation** — the feed only
+  records changes made after it is switched on, so enabling it later loses
+  the first nights for good. Plus `delta.deletedFileRetentionDuration = 30 days`
+  (Session 7's rule; change files are vacuumed on the same clock, so any CDF
+  consumer must read within 30 days).
+- Chosen: lineage columns only a MERGE can keep — `_first_seen_dump_date`
+  (set on insert, never updated), `_last_changed_dump_date`, `_source_file`.
+  This is the reason given in Session 0 for MERGE over overwrite.
+- Rejected: **unconditional `WHEN MATCHED THEN UPDATE SET *`.** Correct final
+  state, but every matched row is rewritten every night: products would report
+  32,951 updates instead of 50, the change feed would carry 32,951 update
+  pairs, and `_last_changed_dump_date` would mean nothing.
+- Rejected: **compare `dim_updated_at` only** (like the CDC `seq` guard).
+  Cheaper, but a value changed without a timestamp bump would be silently
+  ignored — the source's contract would be trusted, not checked.
+- Noted for the Gold window: CDF now emits `delete` rows. The Session 6 plan
+  to export only `insert` / `update_postimage` would drop every deletion on
+  the way to Snowflake.
+
+## A bad value fails the whole night; a snapshot source is never filtered (Session 8)
+
+**In plain words:** Silver types every column (text → number, timestamp). If
+any value will not convert, the whole night is refused — the row is not set
+aside. In this MERGE a row missing from tonight's file *means* "delete", so
+setting one bad row aside would delete that customer from Silver.
+
+- Chosen: before each MERGE, assert per night: 0 NULL keys, 0 duplicate keys,
+  0 values that were present as text but failed `try_cast`. Any failure stops
+  that dimension before its MERGE; Silver keeps the previous night.
+- Rejected: **a quarantine table, as Kafka Bronze has (Session 7).** Right
+  there, because a missing Kafka row means nothing; wrong here, because
+  `NOT MATCHED BY SOURCE DELETE` turns every filtered row into a delete. The
+  same rule covers any `WHERE` on the MERGE source, and DLT's
+  `expect_or_drop` (Session 11) on a snapshot path.
+- Rejected: **dedup duplicate keys with `row_number()`**, as the CDC path does
+  (Session 9). In CDC several rows per key are expected; in a full snapshot a
+  duplicate key is a broken file, and picking one silently hides it.
+- Trade-off: one bad value delays the whole dimension a night. Accepted — a
+  day-old dimension is visible and recoverable; a silently deleted customer is
+  neither.
+
+## Delete circuit breaker: a night may delete at most 5% of a Silver dimension (Session 8)
+
+**In plain words:** `WHEN NOT MATCHED BY SOURCE DELETE` trusts the file to be
+complete. A truncated dump — half a file, a failed export — would delete half of
+Silver in one green run. So before each MERGE, Silver counts how many of its
+rows tonight's file would delete, and refuses if that is more than 5% of the
+table, unless that night is explicitly allowed.
+
+- Chosen: `MAX_DELETE_FRACTION = 0.05`, checked with one anti-join before the
+  MERGE; override per dimension and night, never global. Night 5 is expected
+  to delete 100 / 3,095 sellers (3.2%), 100 / 32,951 products and 19 / 22,497
+  customers — all under it.
+- The shape it guards is already in this repo's history: the 2026-09-19
+  incident (dumps drained to zero rows) is exactly a snapshot that shrank for
+  a reason unrelated to real deletions; the generator's `MAX_DELETED_FRACTION`
+  exists for the same reason one layer up.
+- Rejected: **no guard, trust the file.** Bronze checks the table against the
+  landing zone, so a truncated *file* passes every Bronze check.
+- Rejected: **a fixed row count** (e.g. "never more than 500"). Wrong as soon as
+  the table grows or a small table (sellers) meets a legitimate batch.
+- Trade-off: a genuine mass delisting stops the pipeline until a person allows
+  that night. Accepted — that is a decision a person should see.
+
+## Zip prefixes are restored to five digits in Silver, not fixed in the generator (Session 8)
+
+**In plain words:** the landed dumps lost the leading zero of every zip that
+starts with 0 (`09790` → `9790`; incident 2026-09-30). Silver puts it back with
+`lpad(zip, 5, '0')` and checks every zip is then five digits. The generator is
+left as it is.
+
+- Chosen: normalise in Silver, the layer whose job is "typed and standard".
+  Lossless here: all 99,441 raw customer zips and all 3,095 seller zips are
+  exactly five digits, so padding restores the original exactly.
+- Rejected: **fix the generator and carry on.** Night 5 would carry `09790`
+  where night 4 has `9790`; the generator's carry-forward would see a change and
+  stamp a new `dim_updated_at` for every such customer (thousands), and Gold's
+  SCD2 would open a version for each move that never happened. In production
+  the source is not ours to fix anyway; the fix belongs upstream, and the
+  defence belongs here.
+- Rejected: **fix the generator and regenerate every night.** Rewrites landed
+  history — refused by the write-once rule above, deliberately.
+- Consequence: a source-side format fix is itself a change event. If the source
+  ever starts sending five digits, Silver's padding makes it a non-event.

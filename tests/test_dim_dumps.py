@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from generators import olist
 from generators._common import LocalBlobSink
 from generators.dim_dumps import (
     CUSTOMER,
@@ -25,6 +26,7 @@ from generators.dim_dumps import (
     PRODUCT,
     SELLER,
     UPDATED_AT,
+    LandedNightChanged,
     apply_synthetic_changes,
     attribute_hash,
     customer_snapshot,
@@ -379,3 +381,171 @@ def test_dump_bytes_are_the_same_on_every_machine(olist_frames, sink, monkeypatc
     assert keys
     for key in keys:
         assert "\r" not in sink.get_text(key), f"{key} contains a carriage return"
+
+
+# --------------------------------------------------------------------------
+# Write-once landing (Session 8)
+# --------------------------------------------------------------------------
+
+
+class CountingSink(LocalBlobSink):
+    """A local sink that remembers every key written to it."""
+
+    def __init__(self, root) -> None:
+        super().__init__(root)
+        self.puts: list[str] = []
+
+    def put_text(self, key: str, text: str) -> None:
+        self.puts.append(key)
+        super().put_text(key, text)
+
+
+def snapshot_of(sink: LocalBlobSink) -> dict[str, str]:
+    return {key: sink.get_text(key) for key in sink.list_keys("dims/")}
+
+
+@pytest.fixture
+def counting(tmp_path) -> CountingSink:
+    return CountingSink(tmp_path / "landing")
+
+
+def test_a_second_identical_run_writes_nothing(olist_frames, counting):
+    """Before Session 8 every run rewrote every night: new modification times,
+    and Bronze (allowOverwrites) re-read all of them."""
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE)
+    counting.puts.clear()
+
+    report = run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE)
+
+    assert counting.puts == []
+    assert {row["landed"] for row in report} == {"identical"}
+
+
+def test_extending_by_one_night_writes_only_that_night(olist_frames, counting):
+    run(olist_frames, counting, start=START, nights=2, stride_days=STRIDE)
+    counting.puts.clear()
+
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE)
+
+    third = nights(3)[2]
+    assert sorted(counting.puts) == sorted(dump_key(d, third) for d in ("customer", "product", "seller"))
+
+
+def test_a_run_that_would_change_a_landed_night_writes_nothing(olist_frames, counting):
+    """The mistake this rule exists for: new arguments, old nights.
+
+    Deletions are cumulative from the second night, so turning them on without
+    --delete-from recomputes nights that are already delivered. Before Session 8
+    those nights were silently rewritten, and Bronze would have followed.
+    """
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE, change_rate=0)
+    before = snapshot_of(counting)
+    counting.puts.clear()
+
+    with pytest.raises(LandedNightChanged) as refused:
+        run(
+            olist_frames, counting, start=START, nights=4, stride_days=STRIDE,
+            change_rate=0, delete_per_night=1,
+        )
+
+    assert counting.puts == [], "a refused run must write nothing, not even the new night"
+    assert snapshot_of(counting) == before
+    assert dump_key("product", nights(3)[1]) in str(refused.value), "the refusal names the night"
+
+
+def test_delete_from_leaves_earlier_nights_byte_identical(olist_frames, counting, tmp_path):
+    """Night 5 on the live landing zone gets deletions; nights 1-4 must not move."""
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE)
+    before = snapshot_of(counting)
+    counting.puts.clear()
+
+    fourth = nights(4)[3]
+    report = run(
+        olist_frames, counting, start=START, nights=4, stride_days=STRIDE,
+        delete_per_night=1, delete_from=fourth,
+    )
+
+    assert sorted(counting.puts) == sorted(dump_key(d, fourth) for d in ("customer", "product", "seller"))
+    assert {k: v for k, v in snapshot_of(counting).items() if k in before} == before
+    night4 = {r["dimension"]: r for r in report if r[DUMP_DATE] == fourth.isoformat()}
+    assert night4["product"]["deleted_vs_previous"] == 1
+    assert night4["seller"]["deleted_vs_previous"] == 0, "2 sellers: the 25% cap rounds to 0"
+
+    # The whole landed history is reproducible from ONE command, from nothing.
+    fresh = LocalBlobSink(tmp_path / "from_scratch")
+    run(
+        olist_frames, fresh, start=START, nights=4, stride_days=STRIDE,
+        delete_per_night=1, delete_from=fourth,
+    )
+    assert snapshot_of(fresh) == snapshot_of(counting)
+
+
+def test_redeliver_rewrites_only_the_named_night(olist_frames, counting):
+    """A correction is for one named night; every other landed night stays refused."""
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE, change_rate=0)
+    before = snapshot_of(counting)
+    second, third = nights(3)[1], nights(3)[2]
+
+    # change_rate=1 alters products/sellers on nights 2 and 3; naming only night 2 is not enough
+    with pytest.raises(LandedNightChanged):
+        run(
+            olist_frames, counting, start=START, nights=3, stride_days=STRIDE,
+            change_rate=1, redeliver=[second],
+        )
+    assert snapshot_of(counting) == before
+
+    counting.puts.clear()
+    report = run(
+        olist_frames, counting, start=START, nights=3, stride_days=STRIDE,
+        change_rate=1, redeliver=[second, third],
+    )
+    expected = sorted(dump_key(d, n) for d in ("product", "seller") for n in (second, third))
+    assert sorted(counting.puts) == expected
+    first_night = nights(3)[0].isoformat()
+    assert {r["landed"] for r in report if r[DUMP_DATE] == first_night} == {"identical"}
+
+
+def test_first_night_holds_deletions_back_until_it():
+    keys = [f"k{i}" for i in range(40)]
+    assert deleted_keys(SELLER, keys, night=2, per_night=2, seed=7, first_night=3) == set()
+    only_third = deleted_keys(SELLER, keys, night=3, per_night=2, seed=7, first_night=3)
+    assert len(only_third) == 2, "one night's worth, not three nights' cumulative"
+    assert deleted_keys(SELLER, keys, night=4, per_night=2, seed=7, first_night=3) > only_third
+
+
+# --------------------------------------------------------------------------
+# Known source defect, pinned on purpose (incidents.md 2026-09-30)
+# --------------------------------------------------------------------------
+
+
+def test_zip_prefix_is_dumped_without_its_leading_zero(tmp_path, customers, sink):
+    """Olist's `01409` lands as `1409`: the contract reads zips as numbers.
+
+    This pins the defect rather than fixing it. Silver restores the five digits;
+    changing the generator mid-stream would make every leading-zero customer
+    look "changed" on the next night and open fake SCD2 versions in Gold
+    (decisions.md, Session 8, "Zip prefixes are restored ... in Silver"). If
+    this test fails because someone fixed the generator, read that entry first.
+    """
+    raw = tmp_path / "raw_zip"
+    raw.mkdir()
+    frame = customers.astype({"customer_zip_code_prefix": "string"})
+    frame["customer_zip_code_prefix"] = "01409"
+    frame.to_csv(raw / olist.TABLES["customers"].filename, index=False)
+
+    loaded = olist.load("customers", raw)
+    snapshot = customer_snapshot(customer_timeline(loaded, olist_orders_for(loaded)), datetime(2017, 12, 31))
+    write_night(sink, CUSTOMER, snapshot, date(2017, 12, 31))
+
+    dumped = pd.read_csv(io.StringIO(sink.get_text(dump_key("customer", date(2017, 12, 31)))), dtype=str)
+    assert set(dumped["customer_zip_code_prefix"]) == {"1409"}
+
+
+def olist_orders_for(customers: pd.DataFrame) -> pd.DataFrame:
+    """One order per customer_id, all on the same day — enough for a snapshot."""
+    return pd.DataFrame(
+        {
+            "customer_id": customers["customer_id"],
+            "order_purchase_timestamp": pd.Timestamp("2017-06-01 10:00:00"),
+        }
+    )
