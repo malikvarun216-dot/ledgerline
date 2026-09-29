@@ -1011,6 +1011,22 @@ partitioned, and every column stays text exactly as the file had it.
   several files split across batches, the later batch would replace the
   earlier one's rows. The replace unit must equal the arrival unit.
 
+### Correction (2026-09-28, Drill 1) — a backfilled night was never re-read, so `replaceWhere` never got the chance to make it harmless
+
+The entry above says `replaceWhere` makes a re-read harmless "if the
+checkpoint is ever lost **or a night is backfilled**". The checkpoint half is
+true, proven twice (Session 6 and Drill 1: every file re-read, no count
+moved). The backfill half was never true with these settings: Auto Loader
+tracks files **by path**, and with its default (`cloudFiles.allowOverwrites =
+false`) a corrected night re-delivered at the same path is skipped without a
+word. Drill 1 showed it on scratch — five corrected seller cities, 0 landed,
+no write, no error — and production had the same setting. Fixed by turning
+`allowOverwrites` on (decision entry, Drill 1). Also measured: the "no
+partitions" choice means a one-night replace **rewrites every file shared with
+other nights**, copying their rows (a 3,095-row night replaced as a 6,190-row
+write, values unchanged). Negligible at this size; it is the cost that choice
+named.
+
 ## Databricks runs notebooks from a Git folder, not from hand-imported copies (Session 6)
 
 **In plain words:** the Databricks workspace now holds a clone of the GitHub
@@ -1395,3 +1411,184 @@ newest schema and sometimes re-reads the whole topic.
   report subject mode `BACKWARD_TRANSITIVE` (global stays `BACKWARD`);
   verdicts unchanged — with one version per subject, BACKWARD and
   BACKWARD_TRANSITIVE check the same thing. They diverge from version 3.
+
+## Every produced message carries a provenance header: run id, producer, scope (Drill 1)
+
+**In plain words:** from now on, every message a generator puts on Kafka
+carries a small label saying *which run* sent it (a random id, new every
+time the generator starts), *which program* sent it, and whether the run was
+*full or partial*. The label rides in the message's headers, not in its data.
+In Session 6, finding the test suite's 159 bad messages took a full
+regeneration of the topic and a diff. With this label, a bad run is found
+with one query: `GROUP BY run_id`.
+
+- Chosen: three Kafka headers, set by `KafkaAvroSink` on every `produce()`:
+  - `ledgerline.run_id`: a `uuid4`, one per sink (one per generator run),
+    printed in the run summary so it can be written down in `progress.md`.
+  - `ledgerline.producer`: the client id, e.g. `ledgerline-order_events`.
+  - `ledgerline.scope`: `full`, or `limit=N` for a partial run.
+- Why now: Drill 1 puts deliberate duplicates on `orders` (two 10-order
+  partial runs). Without a label they would be indistinguishable from each
+  other and from the originals except by `produced_at`, and that is exactly
+  the situation Session 6 had to reconstruct by hand.
+- Bronze needs no change: it has read headers into `_kafka_headers` since
+  Session 7 (`includeHeaders = true`). The 394,090 + 158,625 messages already
+  on the topics have no headers, and that stays true of them.
+- Rejected: **provenance as Avro fields** (a `run_id` field in the envelope,
+  with a default). Allowed under `BACKWARD_TRANSITIVE`, but it is a schema
+  version on both subjects for data that describes the *delivery*, not the
+  *event*. The same order event sent twice is still one business fact. Every
+  decoded record, Silver's included, would carry transport metadata.
+- Rejected: **a deterministic run id** (a hash of the arguments). Session 6's
+  contamination was three runs with *identical* arguments; a hash would give
+  all three the same id. The label has to tell two identical runs apart, so it
+  is random.
+- Rejected: **inferring runs from `produced_at`** (each run is a narrow time
+  window). It is what Session 6 had, and it only works while runs are far
+  apart in time. Two runs a minute apart would merge.
+- Trade-off, recorded: headers are **outside the schema contract**. The
+  registry checks nothing about them, and a producer that forgets them breaks
+  no compatibility rule. The guard is in code instead: the sink sets them
+  itself, and a test asserts that every `produce()` passes them.
+
+## A stream with no history may only write into empty tables — the checkpoint-reset guard (Drill 1)
+
+**In plain words:** a Kafka Bronze stream remembers its position in two places —
+Spark's checkpoint folder, and Delta's note inside the table ("app X has
+written up to batch N"). Reset one without the other and data is silently lost
+or silently doubled. The guard is one rule, checked before any stream starts:
+**if the checkpoint has never planned a batch, every table the stream writes to
+must be empty.** Otherwise the run is refused with an error that names both
+mistakes and the one safe fix.
+
+- Chosen: `refuse_unsafe_reset()` in `_kafka_bronze.py`, called by
+  `run_stream()` after the tables are created and before `.start()`. "No
+  history" means no `offsets/N` file — not "no `commits/N`", because a crash
+  inside the very first batch leaves `offsets/0` without `commits/0`, and that
+  restart is safe (txnVersion covers it).
+- What it refuses, both silent without it:
+  - **checkpoint deleted, same app id** → batch ids restart at 0 while Delta
+    remembers the app at ~7, so batches 0–7 are skipped as "already written",
+    including any new messages they now contain (Drill 1 part 2 shows it);
+  - **new generation, old table** → nothing is skipped and the whole topic is
+    appended again.
+- What it lets through: a first-ever run (new checkpoint, table just created
+  empty), every normal restart, and `exp_01`'s crash replay (checkpoint has
+  history). The only safe reset is a rebuild: new `GENERATION` (checkpoint and
+  app id together) into an empty table.
+- `guard_reset=False` exists only so the drill can show the trap first, the
+  same shape as `idempotent=False` for `exp_01`. Bronze never passes it.
+- Rejected: **use the streaming query id as `txnAppId`** — Databricks' own
+  suggestion. The query id lives in the checkpoint's `metadata` file, so
+  deleting the checkpoint changes the app id automatically. That turns silent
+  *loss* into silent *duplication* (the second case above); the empty-table
+  rule is still needed. It is also circular on a first run — the id exists only
+  once the query has started, after the writer function was built.
+- Rejected: **read the app's last `txnVersion` from the Delta log and compare
+  it with the checkpoint.** The precise check, but `txn` actions are not in
+  `DESCRIBE HISTORY`, and the log of a Unity Catalog *managed* table is not
+  readable by path from a notebook. The empty-table rule needs neither, and it
+  catches the new-app-id case too, which a txn comparison would not.
+- Rejected: **no guard, rely on the rule "never delete a checkpoint in place"**
+  (the Session 7 position). A rule in a docstring is prose; Session 3 already
+  showed prose does not execute. Session 7 deliberately left the guard out so
+  the drill could show the bug present first.
+- Cost: one `dbutils.fs.ls` and, only on a fresh checkpoint, one
+  `LIMIT 1` count per table — before a run that takes minutes.
+
+## Bronze checks compare against the broker's end offsets, not numbers written into the notebook (Drill 1)
+
+**In plain words:** Session 7's Bronze notebooks asserted "the table has
+394,090 rows" — a number counted on the laptop that day and typed in. That is
+right only while the topic never changes. Drill 1 adds 74 legitimate messages,
+and every one of those checks (plus `exp_01`'s) would have failed on correct
+data. The checks now ask the broker where each partition ends in this run and
+require every offset from 0 to that end exactly once.
+
+- Chosen: `topic_end(progress_rows)` — the `latestOffset` Spark fetched from
+  Kafka when the run started, per partition. `check_coordinates` is unchanged:
+  rows = distinct offsets = span = that end. Offsets start at 0 here, so the
+  end is also the count.
+- Facts about the **dataset** stay pinned, because the dataset is closed:
+  394,090 distinct `event_id`s, 99,441 `created`, 112,650 units (counted one row
+  per `event_id`). A new rule ties the two: **rows − distinct events = rows
+  carrying a provenance header** — every duplicate is labelled, every labelled
+  row is a duplicate.
+- Rejected: **update the frozen numbers after each produce.** Cheap, and it
+  makes every legitimate change look like a failure until someone edits a
+  notebook. That trains people to edit the expectation instead of reading the
+  failure.
+- Trade-off: the expected count now comes through Spark rather than an
+  independent engine. The broker is still the source (Spark only relays its
+  offsets), and the laptop verifier stays the independent cross-check, run by
+  hand in drills.
+
+## Notebooks pin the serverless environment version in source, and are committed exactly as Databricks saves them (Drill 1)
+
+**In plain words:** Databricks quietly rewrites a notebook whenever it is
+opened or run: it adds a four-line header naming the **serverless
+environment version** (the bundle of Python, PySpark and library versions the
+notebook runs on — here version 6), and it drops the file's final newline. Our
+git copies had neither, so every run left the Git folder "modified", and the
+first Pull that touched the same lines stopped on a merge conflict. Every
+notebook now carries that header in git and ends the way Databricks ends it,
+so running a notebook changes nothing and a Pull cannot conflict on it.
+
+- Chosen (by the human): the header
+  `# /// script` / `# [tool.databricks.environment]` /
+  `# environment_version = "6"` / `# ///` directly after
+  `# Databricks notebook source`, in all 11 notebooks; no final newline;
+  ruff's W292 ("no newline at end of file") ignored for notebook paths only.
+  `tests/test_notebooks.py` fails if any notebook — including every future
+  Silver one — lacks the header, pins a different version, or ends with a
+  newline.
+- The more important half: **the platform version is now part of the code.**
+  Session 7 lost time to PySpark on the platform (4.3.0.dev0) behaving
+  differently from the version read on the laptop. Until now nothing recorded
+  which environment the code expects; had Databricks moved the workspace
+  default, every notebook would have silently changed runtime. Moving to 7 is
+  now a reviewed commit, with the tests saying where.
+- Rejected: **discard local changes before every Pull** (what Drill 1 did to
+  get unstuck). Free, but it is a manual step before every deploy, and a merge
+  editor in the middle of a drill is exactly where the wrong side gets kept.
+- Rejected: **pin the environment in a job definition or an Asset Bundle
+  instead.** The production answer once jobs exist, but there are no jobs yet,
+  and Bundles deployed from CI are still unverified on Free Edition. Revisit
+  when Airflow or Bundles run these notebooks — the pin then moves there and
+  the tests follow it.
+- Not verified yet: that Databricks leaves a notebook untouched when the
+  header is already there. The first run after the next Pull shows it: the
+  Git dialog must say "No changed files".
+
+## Bronze dims re-read a night that is re-delivered at the same path (`allowOverwrites`) (Drill 1)
+
+**In plain words:** when a nightly dump is sent again with corrections, under
+the same file name, Bronze now picks it up. Before, Auto Loader remembered the
+file name and skipped it, so Bronze kept the old values while the landing
+zone held the new ones, and nothing said they disagreed. Re-reading is safe
+because each night is written with `replaceWhere`: the corrected night
+replaces the old one; it is never added beside it.
+
+- Chosen (by the human): `ingest(..., allow_overwrites=True)` in production
+  `autoload_dims`. Auto Loader then re-processes a file whose modification
+  time changed.
+- Evidence (`drills/drill1_dims_2`, scratch): default → corrected rows 0,
+  WRITE commits 1 → 1; `allowOverwrites` → one write, `dump_date IN
+  ('2017-05-02')` only, 5 corrected rows, counts unchanged, the other night's
+  values unchanged; a plain re-run after it wrote nothing.
+- The two settings only work as a pair: `allowOverwrites` on a plain append
+  would *add* the corrected night beside the old one. That is why Databricks
+  warns the option can duplicate data, and why it is safe here.
+- Rejected: **keep the default and make backfill a procedure** (reset the dims
+  checkpoint, which re-reads everything harmlessly). Correct, and proven today,
+  but it depends on someone knowing a correction arrived — which is exactly the
+  signal that is missing. Until then Bronze and the landing zone disagree
+  silently.
+- Rejected: **deliver corrections under a new file name** in the same night's
+  folder. Auto Loader would read it, but the night would then be two files,
+  possibly in two batches, and the second `replaceWhere` would wipe the first
+  batch's rows — the "one night = one file = one batch" rule above.
+- Cost, accepted: a byte-identical re-put (the generator's `--nights N` rewrites
+  every earlier night, as it did today) now triggers a harmless re-write of
+  those nights. It could be avoided by making landing write-once; not worth a
+  generator change while a re-read costs a few seconds.

@@ -1480,3 +1480,202 @@ experiments, a few cents. AWS: nothing new.
   reporting duplicates vs genuine `seq` conflicts separately.
 - Scratch leftover: checkpoint `checkpoints/scratch/s7_progress_probe`.
 - GitHub token for the Git folder expires 2026-12-25.
+
+---
+
+## Drill 1 — attacking Bronze on purpose, and re-breaking every past incident
+Date: 2026-09-27 / 28 (named, not numbered — Session 8 is still Silver dims)
+
+**In plain words:** nothing new was built for the pipeline's own sake. Every
+guarantee Bronze claims was attacked on purpose, and every past incident was
+put back to see whether its guard still fires. The headline: deleting a Kafka
+stream's checkpoint while keeping its app id **silently lost 74 new
+messages** — the job succeeded, and even a restart could not bring them back;
+a guard now refuses that reset before any stream starts. Three more things
+nobody had checked turned out wrong: a corrected nightly dump re-delivered
+under the same name was **ignored** by Bronze; three incident guards had **no
+test that could fail**; and CI had **never run** the producer tests.
+
+### Scope, as it actually ran
+Planned (Session 6 addendum + Session 7 `### Next`): Part 1 attacks, Part 2
+incident regression, Part 3 revision, provenance header first, D4, dims
+retention. All done, plus two things found on the way: the Git-folder conflict
+(and the environment pin that fixes it) and the corrected-re-delivery bug.
+
+### Start-of-drill re-check (read-only)
+`orders` 394,090 (131,458 / 132,187 / 130,445), `inventory.cdc` 158,625,
+lowest offset 0, oldest message 2026-09-26 — unchanged since Session 7. 125
+tests pass, ruff clean.
+
+### Built
+- **Provenance header** (`generators/_common.py`): every produced message
+  carries `ledgerline.run_id` (uuid4 per run, printed in the summary),
+  `ledgerline.producer`, `ledgerline.scope` (`full` / `limit=N`).
+- **Checkpoint-reset guard** (`_kafka_bronze.refuse_unsafe_reset`): a
+  checkpoint with no `offsets/` may only write into empty tables.
+- **Bronze checks against the broker** (`topic_end`, `header_sql`):
+  `stream_orders`, `stream_cdc`, `exp_01` no longer hardcode 394,090 /
+  158,625; `stream_orders` asserts rows − distinct events = labelled rows, and
+  shows who sent the extras in one query.
+- **Dims:** `_autoload_dims` (library) split from `autoload_dims`
+  (production). Production checks every night against a fresh read of the
+  landing zone plus pinned golden nights; the checkpoint-deleting cell moved
+  to the drill; **`allowOverwrites` on**.
+- **Drill notebooks** (`drills/`): the trap (`_drill1_trap_common`,
+  `drill1_trap_1_life1`, `drill1_trap_2_reset`), dims + D4 (`drill1_dims_1`,
+  `drill1_dims_2`), and the laptop script `land_drill1_scratch.py` (writes
+  only under `ledgerline/drill1/`).
+- **Guards for incidents that had none:** platform-independent CRLF test;
+  two `flush` tests (the S4 hang); a test of the live-service fixture itself
+  (`block_live_services` split out); `scripts/check_uc_role_policy.py` (S6
+  IAM, via the policy simulator); `tests/test_headline_numbers.py` (S5:
+  394,090 / 158,346 = 34,448 + 102,425 + 21,473 + 0 / 112,650 units; needs the
+  real CSVs, so it skips in CI — the same totals are asserted in Databricks
+  against the topics).
+- **CI** installs `confluent-kafka` and asserts it imports.
+- **Every notebook pins `environment_version = "6"`** and is committed in
+  Databricks' own save format; `tests/test_notebooks.py` keeps it so.
+- Tests: 125 → **139**. Ruff clean.
+
+### Verified
+- **The trap, bug first** (scratch): life 1 → 394,090 rows, Delta at app v1
+  batch 7. Two labelled partial runs → **74** new messages (16 / 30 / 28 per
+  partition; laptop read-back: all 74 carry all three headers, 37 per run, the
+  same 37 `event_id`s twice). Checkpoint deleted, same app id, guard off →
+  life 2 planned batches 0–7 to the new end, **table 394,090 → 394,090, data
+  commits 8 → 8, no error**; **17 s** for 8 batches against life 1's **531 s**
+  (skipped from the log, Kafka never read). The 74 named by a batch read of
+  exactly those offsets: 0 in the table, all 74 duplicates of events already
+  present — harmless here by luck. A normal restart afterwards: 0 batches.
+- **The guard:** both unsafe resets refused, no stream started (`v2/offsets`
+  empty). **Safe reset** (new generation, empty table): 131,474 / 132,217 /
+  130,473 = **394,164**, every offset once, all 74 present. The rebuild's
+  batches were 49,998 ×6, 49,999, 44,177 against life 1's 49,999 ×5, 49,998
+  ×2, 44,099 — a batch number does not mean the same messages twice.
+- **Real Bronze `orders`:** one batch of **74** (17 s); 394,164 rows,
+  394,090 distinct events, **74 labelled**, 99,441 created, 112,650 units;
+  provenance query: 394,090 unlabelled + 37 + 37. Quarantine self-test still
+  routes all six cases. Plain re-run writes nothing.
+- **4th dims night on the live path:** the generator's rewrite of nights 1–3
+  was byte-identical (all 9 ETags unchanged, only LastModified moved); the 4th
+  night's 3 files equal a local generation too. Production `autoload_dims`
+  wrote **one commit per table, `dump_date IN ('2017-08-30')` only**
+  (customer 22,497); old nights still carry their 2026-09-20 file times —
+  the rewrites were not re-read. `cloud_files_state` lists 4 files per table.
+- **30-day retention on the dims tables** (Session 7's unverified item):
+  `SET TBLPROPERTIES` in history.
+- **Dims checkpoint lost** (live): every file re-read, one write per table
+  replacing all 4 nights (30,892 / 131,804 / 12,380), **counts unchanged**.
+- **Corrected re-delivery** (scratch): default → **0 corrected rows, no
+  write, no error** (the bug); `allowOverwrites` → one write for 2017-05-02
+  only, 5 corrected rows, counts unchanged. The write reported 6,190 rows for a
+  3,095-row night: the unpartitioned table rewrote the file it shared with the
+  other night, copying those rows unchanged. Production then ran with
+  `allowOverwrites` on and wrote nothing (4 WRITE commits before and after).
+- **D4:** default options **104,162 rows** = the file's non-blank physical
+  lines; 4,938 fragment rows (5,495 embedded line breaks − 557 blank lines;
+  `bad_scores` exactly 4,938); **`_rescued_data` caught 0**; no error.
+  `multiLine` alone: 99,249 (still wrong). `multiLine` + `escape='"'`:
+  **99,224, matches pandas on all six checks**.
+- **Incident regression (put the bug back, run the guard):** S3 fires, S5
+  fires; **S2 was silent** (fixed: now fires); S4 and S6 had no test (now
+  fire). S6 live-publish: after six suite runs `inventory.cdc` still 158,625
+  and `orders` 394,090 + exactly the 74 labelled. **S6 IAM:** 10 request
+  shapes as expected, and the Session 6 policy shape reproduces
+  `implicitDeny` for prefix `ledgerline`. S5 headline numbers: all three
+  tests pass on the real data.
+- **Environment pin:** after the pin, running `drill1_dims_2` left the Git
+  folder at "No changed files".
+- **`exp_01` re-run after the writer change** (topic now 394,164): bug — restart re-ran
+  batch [7], **438,341 rows, 44,177 duplicates**, extra `WRITE` v10, job reported success;
+  fix — batch [7] re-ran, **394,164 rows, 0 duplicates**, no extra commit. Replay **63 s vs
+  7 s**. The guard let both fresh loads and both crash replays through.
+
+### Built but NOT verified
+- **CI with `confluent-kafka`:** pushed; the Actions log should now show the
+  producer tests run, none skipped. Not seen.
+- `check_backlog` still never given a growing backlog.
+
+### Not done
+- The unexplained S7 items (per-batch durations ≈ 2× real; `statsOnLoad`) —
+  one new data point only (below).
+- The read-only Kafka identity for Bronze and a dev-only credential — still
+  candidates.
+
+### Incidents (4 new entries, one deliberate)
+1. **DELIBERATE:** checkpoint deleted, app id kept → 74 messages lost, no error.
+2. Three incident guards had no test that could fail; CI skipped the producer
+   tests; the S6 IAM prefix had no automated guard.
+3. A Git-folder Pull stopped on a conflict in files nobody had edited
+   (Databricks re-saves notebooks: environment header + no final newline).
+4. A corrected nightly dump re-delivered under the same name was ignored by
+   Bronze (Auto Loader tracks files by path).
+
+### Decisions
+Six new: provenance header; checkpoint-reset guard; Bronze checks against the
+broker's offsets; notebooks pin `environment_version = "6"`; dims read
+re-delivered nights (`allowOverwrites`); plus a **correction** under the
+Session 6 dims entry (the "backfill is harmless" claim was never true).
+
+### Unexplained, recorded rather than guessed
+- D4: default and `multiLine` both count 3,838 messages containing a line
+  break, 14 short of the true 3,852.
+- `statsOnLoad: true` on `bronze.orders` v11 (the 74-row batch), `false` on
+  v1–v8. v11 is the first write after Predictive Optimization's `OPTIMIZE`
+  (v9) and the retention change (v10). And in `exp_01`: every write of the
+  fix table (txn options) `true`, of the bug table (plain append) `false`,
+  minutes apart — but Session 7's `bronze.orders`, also txn, was `false`.
+- Predictive Optimization ran `OPTIMIZE` (`auto: true`) on the scratch seller
+  table two seconds after the one-night rewrite.
+- `print` inside `foreachBatch` never reaches the notebook on serverless (the
+  batch function runs in a separate process); table history is the evidence.
+
+### Cost
+Databricks $0. Confluent: ~1 GB of reads (full `orders` loads for the trap and
+exp_01) — a few cents; 74 messages produced. AWS: 3 new dims objects + 9
+byte-identical rewrites + 3 scratch objects (~15 MB), cents.
+
+### Learning check
+Five questions, discussed, after a plain-words summary of the drill (asked
+for by the human). ◐ reset trap (outcome ✓, batch-number mechanism missed);
+❌ no-duplicates/no-gaps SQL (second miss — re-explained from the notebooks'
+own output, plus how production runs a broker comparison); ❌ CSV line breaks
+(a three-part question did not land; the one-example version was answered
+"1 row", it is 2); ❌ why a checkpoint reset was harmless for dims; ◐ / ✓
+producer idempotence and why Bronze keeps duplicates. Full log in
+`learning.md` Part B; bank updated (B4 now 1 of 2; B16 missed ×2; new B18,
+B19).
+
+### Next
+**Session 8 — Silver dims: `MERGE` + `WHEN NOT MATCHED BY SOURCE DELETE`**
+
+Decide first, before touching the generator:
+- **The dims generator rewrites every earlier night on each run, and
+  production now re-reads rewritten files (`allowOverwrites`).** Identical
+  bytes were harmless today; a run with *different arguments* (for example
+  `--delete-per-night`) would rewrite nights 1–4 with different content, and
+  Bronze would silently replace its history to match. Make landing write-once
+  (skip nights already in S3) before any argument changes.
+- **All 4 nights have 0 deleted rows** (`--delete-per-night 0`), so the
+  `NOT MATCHED BY SOURCE DELETE` branch Session 8 exists to teach never fires
+  on real data. Drive it on purpose — a 5th night with deletions, landed
+  write-once — the same way the quarantine was driven in S7.
+- Silver tables choose their own time-travel window (S7 decision).
+- `exp_03` (the MERGE gap: a stale row survives a plain MERGE) belongs here.
+
+**Carried, each a claim to re-check:**
+- **CI:** the Actions log for the pushes since `09d0e0b` should show the
+  producer tests running (not skipped). Not yet seen.
+- **Scheduled completeness check** (table vs broker watermarks, alert on
+  missing) — the production form of today's in-notebook check; arrives with
+  a scheduler (Airflow, in scope since S6).
+- Question-bank re-tests fitted to S8's SQL: **B16** (write it from memory),
+  B19, B18.
+- Topics delete their oldest messages from ~**2026-12-25**; the GitHub token
+  for the Git folder expires the same day.
+- Read-only Kafka identity for Bronze; dev-only Kafka credential; verifier
+  reporting duplicates vs genuine `seq` conflicts separately.
+- Scratch leftovers (harmless, kept as evidence): tables
+  `bronze.drill1_trap*`, `drill1_seller`, `drill1_reviews_*`, `exp01_*`;
+  checkpoints under `checkpoints/drill1/`; S3 `ledgerline/drill1/`; S7's
+  `checkpoints/scratch/s7_progress_probe`.

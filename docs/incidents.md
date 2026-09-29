@@ -913,3 +913,162 @@ difference was two write options.
   to the Bronze writer.
 
 <!-- Append further entries below this line. -->
+
+## [2026-09-28] — DELIBERATE (Drill 1): checkpoint deleted, app id kept — 74 new messages lost, no error, and a restart could not bring them back
+
+**In plain words:** a stream remembers where it is in two places: Spark's
+checkpoint folder, and Delta's note inside the table ("app v1 has written up
+to batch 7"). Drill 1 deleted the first and kept the second. The restarted
+stream counted batches from 0 again, Delta saw numbers it had already
+recorded, and skipped every batch — including the one that now held 74 new
+messages. The job succeeded, the table did not change, and a normal restart
+afterwards wrote nothing, because the new checkpoint now said those offsets
+were done.
+
+- How it was made (`drills/drill1_trap_1_life1`, `drill1_trap_2_reset`,
+  scratch tables only): life 1 loaded `orders` (394,090) into
+  `bronze.drill1_trap` with app id `drill1.trap.v1` — batches 0–7. Then two
+  labelled 10-order partial runs put **74** messages on the topic (run ids
+  `ea7bb387…` and `370891cc…`, 37 each). Then the checkpoint was deleted and
+  the stream restarted with the same app id and the new guard switched off.
+- Result, bug: life 2 planned batches **0–7** and reached the topic's new end
+  (131,458 / 132,187 / 130,445 → 131,474 / 132,217 / 130,473). Table **394,090
+  rows before and after**; data commits **8 before, 8 after** — Delta wrote
+  nothing. Life 2 took **17 s** for 8 batches against life 1's **531 s**:
+  every skip was decided from the log, before any Kafka data was read.
+- The lost messages, named: a batch read of exactly the offsets past life 1's
+  end returned 74 messages, all labelled, from 2 runs, **0 in the table**.
+  All 74 were duplicates of events already present — so here the loss cost
+  nothing, **by luck**. Had they been new orders they would be gone.
+- A normal restart (guard on) afterwards: 0 batches with data, 6 s. The loss is
+  permanent from the stream's point of view; only a rebuild recovers it.
+- Why it is invisible: batch 7 held 44,099 messages in life 1 and more in life
+  2, but Delta compares only the number. The rebuild's own batches came out
+  49,998 ×6, 49,999, 44,177 against life 1's 49,999 ×5, 49,998 ×2, 44,099 —
+  Spark sizes each batch in proportion to what each partition holds, so a
+  batch number does not mean the same messages twice.
+- Fix: `refuse_unsafe_reset()` in `_kafka_bronze.py` (decisions.md, Drill 1):
+  a checkpoint with no `offsets/` may only write into empty tables. With it on,
+  both unsafe resets were **refused before any stream started** — "checkpoint
+  deleted, same app id" and "new generation, old table" (`v2/offsets` stayed
+  empty). The safe reset — new generation into an empty table — gave **394,164
+  rows, every offset once, all 74 present**.
+- Prevention rule: **a stream's two memories are reset together or not at
+  all, and the code refuses anything else.** A reset is a rebuild: new
+  checkpoint, new app id, empty table. More generally: when two systems each
+  keep half of a guarantee's state, check that the halves agree before
+  trusting either.
+
+## [2026-09-28] — Drill 1: three incident guards had no test that could fail, and CI skipped the producer tests
+
+**In plain words:** Drill 1 put five old bugs back on purpose, one at a time,
+and ran the tests meant to guard against each. Two of the guards were never
+tested at all. For the third, the test existed but was aimed at the wrong
+half of the fix, so the bug went back in and the suite stayed green. Separately, CI had
+never run five of the producer tests, because the library they need was not
+installed there.
+
+- Method: a script replaced one line of guard code with the old bug, ran that
+  guard's test, restored the file byte for byte, and reported whether the
+  test failed.
+- Fired as designed: **S3** (S3 sink falls back to the ambient admin key) and
+  **S5** (partial CDC run produced to Kafka).
+- **S2, silent.** With `lineterminator="\n"` removed from the dims generator,
+  every test passed on Windows, where the bug lives. The guard test compares
+  the local sink with the S3 sink; both are handed the *same* string, so a CRLF
+  string stored twice still compares equal. It tests the sink half of the
+  Session 2 fix, never the generator half. Confirmed that pandas 2.2.3 on this
+  machine emits `\r\n` without the pin.
+- **S4, no test.** The bounded `flush()` that turns the Session 4 wrong-port
+  hang into an error was `# pragma: no cover` "because it needs a broker that
+  fails". It does not: `flush(timeout)` just returns how many messages are
+  still queued, and a fake producer can return 3.
+- **S6, the fixture itself untested.** On a laptop where no credential is
+  exported, weakening `no_live_services` changes nothing any test can observe;
+  it only matters on the day a key *is* in the environment.
+- **CI:** `confluent_kafka` is in neither the CI install list nor its "must be
+  present" check, so every `@needs_confluent` test (queue-full backpressure
+  since Session 5; provenance headers since today) was skipped there. `-ra`
+  lists the skips; the run is still green.
+- Why nothing caught it: each guard was written in the session that hit the
+  bug, and tested against that session's reproduction. Nothing ever asked
+  whether its test would fail *if the guard were removed*.
+- Fix: `test_dump_bytes_are_the_same_on_every_machine` (forces `os.linesep` to
+  `\r\n`, so it fails on Linux CI too); two `flush` tests on a stuck fake
+  producer; `test_no_test_can_see_a_live_credential`, which plants every
+  credential and runs the fixture's function (`block_live_services`, split out
+  of the fixture for this); CI installs `confluent-kafka` and asserts it
+  imports. Re-run with the bugs put back: **all five now fail when they should.**
+- Also found without a guard: the **S6 IAM prefix** — its prevention rule said
+  "run `simulate-principal-policy`" and nothing did. Now
+  `scripts/check_uc_role_policy.py`, which also replays the Session 6 policy
+  shape to show it would have caught it.
+- Prevention rule: **a guard is proven by breaking it, not by its test
+  passing.** For every incident guard, put the bug back once and watch the test
+  fail. A test that stays green with the bug present is decoration.
+
+## [2026-09-28] — a Git-folder Pull stopped on a merge conflict in files nobody had edited
+
+**In plain words:** pulling Drill 1's second commit into Databricks stopped
+with "resolve conflicts before merge" in `autoload_dims.py`. Nobody had edited
+any notebook in the workspace. Databricks itself had: every notebook that had
+been opened or run was re-saved with a new header and without its final
+newline, so six files counted as locally modified, and the one whose last
+lines had also changed upstream could not be merged automatically.
+
+- What happened: Pull stashed the six "modified" files, applied the two new
+  commits, and could not re-apply the stash to `autoload_dims.py`: both sides
+  had changed its last lines. The dialog offered "Resolve with Genie" and a
+  merge editor showing old and new code side by side.
+- What I thought was wrong: an accidental edit in the workspace. The diff of
+  `stream_orders.py` said otherwise — two hunks, no code: a four-line
+  `[tool.databricks.environment]` / `environment_version = "6"` header after
+  line 1, and "No newline at end of file".
+- Root cause: Databricks' notebook save format differs from the files in git
+  in exactly those two ways. Every notebook that is run drifts from git, and it
+  stays invisible until a Pull touches the same lines.
+- Why nothing caught it earlier: Sessions 6 and 7 pulled only before running,
+  or pulled changes that did not touch the lines Databricks rewrites. The
+  "M" markers were there; nothing looked at them.
+- Fix: aborted the merge, read one diff to confirm nothing real would be lost,
+  discarded all six local changes, pulled cleanly (`0a9ccfd`). Then, as a
+  decision, committed every notebook in Databricks' own save format.
+- Prevention rule: **never resolve a Git-folder conflict by merging —
+  the workspace is a consumer of git, so its side is discarded after one look
+  at the diff.** And **keep committed notebooks byte-identical to what the
+  platform saves** (`tests/test_notebooks.py`), so a run leaves nothing to
+  merge.
+
+## [2026-09-28] — Drill 1: a corrected nightly dump, re-delivered under the same name, was silently ignored by Bronze
+
+**In plain words:** Session 6 claimed that re-loading a night is harmless
+"if the checkpoint is ever lost or a night is backfilled". Drill 1 tested the
+second half for the first time: a seller dump was re-delivered with five
+corrected cities, same file name. Bronze did not pick it up. No error, no
+write — Bronze kept the old cities, the landing zone held the new ones, and
+nothing anywhere reported the difference.
+
+- How it was made (scratch only, `drills/land_drill1_scratch.py` +
+  `drills/drill1_dims_2`): two real seller nights copied to
+  `ledgerline/drill1/redelivery/`, loaded; then night 2017-05-02 rewritten in
+  place with five `(corrected)` cities — 231,780 → 231,840 bytes, new ETag,
+  same path — and the stream re-run with production settings.
+- Result: counts unchanged, **0 corrected rows, WRITE commits 1 → 1**.
+- Root cause: Auto Loader remembers files **by path**. With
+  `cloudFiles.allowOverwrites = false` (the default, and production's
+  setting), a path already in its checkpoint is skipped even when the file's
+  content and modification time have changed. `replaceWhere` would have made
+  the re-read safe; the re-read never happened.
+- Why nothing caught it: the Session 6 proof of "re-reading is harmless"
+  deleted the **checkpoint**, which makes Auto Loader forget every path. That
+  proves the checkpoint-loss case and says nothing about a re-delivery with the
+  checkpoint intact — the case a vendor's correction actually produces. The
+  same shape as Session 6's own lesson: a green run can execute none of the
+  code you care about.
+- Fix: `allowOverwrites` on in production `autoload_dims` (decisions.md,
+  Drill 1). Proven on scratch first: one write, `dump_date IN ('2017-05-02')`
+  only, 5 corrected rows, counts and the other night unchanged.
+- Prevention rule: **test each recovery claim through the path that really
+  produces it.** "A backfill is harmless" must be tested with a backfill (same
+  path, new content, checkpoint intact), not with a checkpoint reset that
+  happens to share its outcome.
