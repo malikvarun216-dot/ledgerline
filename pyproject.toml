@@ -42,6 +42,7 @@ select = [
 # Experiments that run as Databricks notebooks, named one by one so a plain-Python
 # experiment added later still gets undefined-name checking.
 "experiments/exp_01_exactly_once_replay.py" = ["F821", "W292"]
+"experiments/exp_02_partition_overwrite_deletes.py" = ["F821", "W292"]
 "experiments/exp_03_merge_gap_stale_row.py" = ["F821", "W292"]
 # Drill 1 notebooks (Databricks): same reason, plus the names they get from `%run`.
 "drills/drill1_*.py" = ["F821", "W292"]
