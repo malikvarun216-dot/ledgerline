@@ -32,5 +32,15 @@ cdc_behind AS (
               > (SELECT coalesce(sum(bronze_rows), 0) FROM workspace.silver.inventory_cdc_log)
            THEN 1 ELSE 0
          END AS n
+),
+orders_behind AS (
+  -- Same test for the orders stream (Session 10).
+  SELECT CASE
+           WHEN (SELECT count(*) FROM workspace.bronze.orders
+                 WHERE _ingested_at < current_timestamp() - INTERVAL 26 HOURS)
+              > (SELECT coalesce(sum(bronze_rows), 0) FROM workspace.silver.orders_log)
+           THEN 1 ELSE 0
+         END AS n
 )
-SELECT (SELECT n FROM dims_behind) + (SELECT n FROM cdc_behind) AS sources_behind
+SELECT (SELECT n FROM dims_behind) + (SELECT n FROM cdc_behind) + (SELECT n FROM orders_behind)
+       AS sources_behind
