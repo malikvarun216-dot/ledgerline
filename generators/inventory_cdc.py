@@ -33,6 +33,15 @@ for a reason that has nothing to do with the pipeline under test.
 from the event timestamp rather than counted, so there is no counter to persist
 and nothing to reset. See :func:`assign_seq`.
 
+**Not held — a known defect, kept on purpose:** the before/after images follow
+*generation* order, ``seq`` follows *time* order. A restock is stamped one hour
+after the sale that triggers it but applied to the running stock at once, so a
+sale inside that hour gets an earlier ``seq`` and a ``prev_stock_qty`` that
+already includes the restock: 1,423 broken links on 237 SKUs of the full run.
+Deltas are unaffected, so the tie-out holds. Not fixed here because the live
+topic already carries these events (incidents.md 2026-10-01; decisions.md,
+Session 9); Silver counts the breaks.
+
 What "units sold" counts
 ------------------------
 Units **ordered**, including orders later canceled. A cancellation would restock
@@ -370,6 +379,11 @@ def units_sold_from_cdc(events: list[dict[str, Any]]) -> dict[str, int]:
     return sold
 
 
+def deletes_only(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The op=D events, in the order given. ``--delists-only`` sends these and nothing else."""
+    return [e for e in events if e["op"] == OP_DELETE]
+
+
 def shuffle_out_of_order(
     events: list[dict[str, Any]], percent: float, seed: int = 20260919
 ) -> list[dict[str, Any]]:
@@ -439,6 +453,11 @@ def main() -> int:
     parser.add_argument("--restock-every", type=int, default=3, help="0 disables restocks")
     parser.add_argument("--restock-qty", type=int, default=25)
     parser.add_argument("--delist-count", type=int, default=0)
+    parser.add_argument(
+        "--delists-only",
+        action="store_true",
+        help="build every event, send only the op=D ones (needs --delist-count)",
+    )
     parser.add_argument("--out-of-order-pct", type=float, default=0.0, help="Session 10 experiment")
     parser.add_argument("--speedup", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=20260919)
@@ -453,6 +472,9 @@ def main() -> int:
     if args.print_schema:
         print(json.dumps(AVRO_SCHEMA, indent=2))
         return 0
+
+    if args.delists_only and args.delist_count <= 0:
+        raise SystemExit("--delists-only sends the op=D events, and --delist-count 0 builds none")
 
     # Checked before any data is loaded: it depends only on the arguments, so
     # refusing should not first cost a full Olist load -- and a test of the
@@ -510,6 +532,11 @@ def main() -> int:
 
     reconstructed = sum(units_sold_from_cdc(events).values())
     ordering = shuffle_out_of_order(events, args.out_of_order_pct, args.seed)
+    if args.delists_only:
+        # Every other event is built too, and is byte-identical to the full run already on the
+        # topic; only the delists are new. Sent after Silver has built its stock, so the DELETE
+        # clause meets rows that exist (decisions.md, Session 9).
+        ordering = deletes_only(ordering)
 
     if args.sink == "kafka":
         from generators._common import KafkaAvroSink, run_scope
@@ -517,7 +544,7 @@ def main() -> int:
         sink: MessageSink = KafkaAvroSink(
             {args.topic: json.dumps(AVRO_SCHEMA)},
             client_id=f"ledgerline-{SOURCE}",
-            scope=run_scope(args.limit),
+            scope=run_scope(args.limit, only=OP_DELETE if args.delists_only else None),
         )
     else:
         sink = JsonlSink(args.out_dir)
@@ -539,6 +566,8 @@ def main() -> int:
     print(f"  restocks       op=U      {stats['restocks']:>9,}")
     print(f"  delists        op=D      {stats['delists']:>9,}")
     print(f"  events emitted           {sent:>9,}  -> topic {args.topic!r}")
+    if args.delists_only:
+        print(f"  (built {len(events):,}; sent only op=D)")
     if getattr(sink, "run_id", None):
         # Every message of this run carries it as header ledgerline.run_id.
         print(f"  run id                   {sink.run_id}")

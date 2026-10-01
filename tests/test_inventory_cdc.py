@@ -20,6 +20,7 @@ from generators.inventory_cdc import (
     REASON_SALE,
     assign_seq,
     build_cdc_events,
+    deletes_only,
     emit,
     shuffle_out_of_order,
     sku_key,
@@ -421,3 +422,91 @@ def test_order_events_has_no_partial_guard_and_that_is_deliberate():
 
     assert "allow_partial" in inspect.getsource(inventory_cdc.main)
     assert "allow_partial" not in inspect.getsource(order_events.main)
+
+
+# --------------------------------------------------------------------------
+# Session 9: the delist run that drives Silver's DELETE clause
+# --------------------------------------------------------------------------
+
+
+def test_deletes_only_keeps_the_delists_and_nothing_else(order_items, orders):
+    events, stats = build_cdc_events(order_items, orders, delist_count=2, seed=1)
+
+    sent = deletes_only(events)
+
+    assert len(sent) == stats["delists"] == 2
+    assert {e["op"] for e in sent} == {OP_DELETE}
+
+
+def test_delists_only_leaves_every_other_event_identical(order_items, orders):
+    """The delist run rebuilds the whole log and sends only the D's. That is safe only because
+    adding delists changes no other event: same ids, same seq as the run already on the topic."""
+    without, _ = build_cdc_events(order_items, orders, delist_count=0)
+    with_delists, _ = build_cdc_events(order_items, orders, delist_count=2, seed=1)
+
+    others = [(e["event_id"], e["seq"]) for e in with_delists if e["op"] != OP_DELETE]
+    assert others == [(e["event_id"], e["seq"]) for e in without]
+
+
+def test_delists_only_cli_writes_only_the_deletes(raw_dir, tmp_path):
+    import json
+
+    out = tmp_path / "streams"
+    code, message = _run_cdc(
+        ["--raw-dir", str(raw_dir), "--out-dir", str(out), "--delist-count", "1", "--delists-only"]
+    )
+
+    assert code == 0, message
+    lines = (out / f"{DEFAULT_TOPIC}.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["value"]["op"] for line in lines] == [OP_DELETE]
+
+
+def test_delists_only_without_a_delist_count_is_refused():
+    code, message = _run_cdc(["--delists-only"])
+
+    assert code == 1
+    assert "--delist-count" in message
+
+
+def test_run_scope_names_a_delists_only_run():
+    from generators._common import run_scope
+
+    assert run_scope(None, only=OP_DELETE) == "full;only=D"
+
+
+# --------------------------------------------------------------------------
+# Known source defect, pinned on purpose (incidents.md 2026-10-01)
+# --------------------------------------------------------------------------
+
+
+def test_a_sale_inside_the_restock_hour_breaks_the_chain():
+    """Images follow generation order; seq follows time order. They disagree here.
+
+    One SKU, four sales; the restock after the third is stamped one hour later, but the fourth
+    sale comes 30 minutes after the third. By seq: sale 3, sale 4, restock. Sale 4's
+    prev_stock_qty already includes the restock, which has the LATER seq; and the highest-seq
+    after-image (the restock's) is 1 unit above where the deltas end.
+
+    This pins the defect rather than fixing it: the live topic carries 1,423 such links on 237
+    SKUs, and a fixed generator would regenerate different stock values and event ids for them
+    (decisions.md, Session 9, "Silver inventory mirrors the source's after-images"). If this
+    fails because someone fixed the generator, read that entry first.
+    """
+    times = ["2017-01-01 10:00", "2017-01-02 10:00", "2017-01-03 10:00", "2017-01-03 10:30"]
+    orders = pd.DataFrame(
+        {
+            "order_id": [f"O{i}" for i in range(4)],
+            "order_purchase_timestamp": [pd.Timestamp(t) for t in times],
+        }
+    )
+    items = pd.DataFrame({"order_id": orders["order_id"], "product_id": "P", "seller_id": "S"})
+
+    events, _ = build_cdc_events(items, orders, restock_every=3, restock_qty=25)
+    by_seq = sorted(events, key=lambda e: e["seq"])
+
+    assert [e["change_reason"] for e in by_seq] == ["seed", "sale", "sale", "sale", "sale", REASON_RESTOCK]
+    third, fourth, restock = by_seq[3], by_seq[4], by_seq[5]
+    assert fourth["prev_stock_qty"] == third["stock_qty"] + 25, "the 4th sale already sees the restock"
+    assert restock["prev_stock_qty"] == third["stock_qty"], "the restock does not see the 4th sale"
+    deltas = sum(e["stock_qty"] - (e["prev_stock_qty"] or 0) for e in events)
+    assert by_seq[-1]["stock_qty"] == deltas + 1, "highest-seq after-image is 1 unit off the deltas"

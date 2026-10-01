@@ -364,9 +364,14 @@ def provenance_headers(producer: str, scope: str, run_id: str) -> list[tuple[str
     ]
 
 
-def run_scope(limit: int | None) -> str:
-    """``full`` for a whole-dataset run, ``limit=N`` for a partial one."""
-    return f"limit={limit}" if limit else "full"
+def run_scope(limit: int | None, only: str | None = None) -> str:
+    """``full`` for a whole-dataset run, ``limit=N`` for a partial one.
+
+    ``only`` marks a run that built everything but sent one kind of event —
+    ``full;only=D`` for the Session 9 delist run.
+    """
+    scope = f"limit={limit}" if limit else "full"
+    return f"{scope};only={only}" if only else scope
 
 
 class KafkaAvroSink:
