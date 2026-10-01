@@ -22,8 +22,9 @@
 # MAGIC | D. filter trap | one seller "set aside as bad" before the MERGE | that seller **deleted** |
 # MAGIC | E. truncated file | half of the new night | refused; with the breaker off, ~half deleted |
 # MAGIC | F. no change test | `WHEN MATCHED THEN UPDATE` for every match | 2,995 updates instead of 50 |
+# MAGIC | G. bad night | three planted problems, then corrected | refused before its MERGE; then applied |
 # MAGIC
-# MAGIC Parts A and B are the deliberate failure: the bug is asserted **present** first. C to F test the
+# MAGIC Parts A and B are the deliberate failure: the bug is asserted **present** first. C to G test the
 # MAGIC decisions that follow from the fix (decisions.md, Session 8). Uses the production code
 # MAGIC (`databricks/silver/_merge_dims`); the only differences are the switches each part names.
 # MAGIC **Scratch tables only** (`workspace.silver.exp03_*`), rebuilt every run.
@@ -188,6 +189,72 @@ print(f"   with the change test (B): {b}  feed update_postimage {feed_fix.get('u
 assert f["updated"] == new.count(), "every seller still in the file was 'updated'"
 assert feed_fix.get("update_postimage", 0) == 50
 assert compare_to_night(everything, new, DIM) == (0, 0), "same final table — the cost is invisible there"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## G. A bad night is refused before its MERGE — and applied once it is corrected
+# MAGIC
+# MAGIC The production function `apply_dim`, pointed at two scratch schemas with their own merge log.
+# MAGIC Night 2017-08-30 is clean. Night 2017-12-28 has three planted problems: a zip that is not a
+# MAGIC number, a date that is not a date, one seller delivered twice. Expected: the clean night is
+# MAGIC applied; the bad one is **refused before its MERGE**, naming all three; Silver still shows the
+# MAGIC clean night; nothing is logged for the bad one. Then the corrected night arrives and the next
+# MAGIC run applies it — the "it stays pending" claim, seen.
+# MAGIC
+# MAGIC Session 9 changes the rule for a *few bad values* to "hold the row, apply the rest"
+# MAGIC (decisions.md, revision of 2026-10-01); a duplicate key still refuses the whole night.
+
+# COMMAND ----------
+
+G_BRONZE, G_SILVER = "workspace.exp03_bronze", "workspace.exp03_silver"
+G_LOG = f"{G_SILVER}.dims_merge_log"
+for schema in (G_BRONZE, G_SILVER):
+    spark.sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    spark.sql(f"CREATE SCHEMA {schema}")
+create_merge_log(G_LOG)
+
+real = spark.table(f"{BRONZE}.{DIM}").where(F.col("dump_date").isin(OLD, NEW))
+bad_zip, bad_date, twice = sorted(keys(new))[:3]
+
+
+def planted(key, column, value):
+    on_new = (F.col("dump_date") == NEW) & (F.col(KEY) == key)
+    return F.when(on_new, F.lit(value)).otherwise(F.col(column))
+
+
+broken = (
+    real.withColumn("seller_zip_code_prefix", planted(bad_zip, "seller_zip_code_prefix", "ABCDE"))
+    .withColumn("dim_updated_at", planted(bad_date, "dim_updated_at", "not a date"))
+    .unionByName(real.where((F.col("dump_date") == NEW) & (F.col(KEY) == twice)))
+)
+broken.write.format("delta").saveAsTable(f"{G_BRONZE}.{DIM}")
+
+try:
+    apply_dim(DIM, bronze=G_BRONZE, silver=G_SILVER, log=G_LOG)
+    refused = None
+except NightRefused as e:
+    refused = str(e)
+print(f"G (bad night): {refused}")
+
+g_table = f"{G_SILVER}.{DIM}"
+assert refused is not None and NEW in refused, "the bad night was not refused"
+for problem in ("bad__seller_zip_code_prefix", "bad__dim_updated_at", "duplicate_keys"):
+    assert problem in refused, f"{problem} not named"
+assert [str(r.dump_date) for r in spark.table(G_LOG).collect()] == [OLD], "only the clean night logged"
+assert spark.sql(f"DESCRIBE HISTORY {g_table}").where("operation = 'MERGE'").count() == 1, "bad MERGE ran"
+assert compare_to_night(g_table, old, DIM) == (0, 0), "Silver still shows the clean night"
+
+# The corrected night is delivered (Bronze replaces that night), and the next run picks it up.
+(
+    real.where(F.col("dump_date") == NEW).write.format("delta").mode("overwrite")
+    .option("replaceWhere", f"dump_date = '{NEW}'").saveAsTable(f"{G_BRONZE}.{DIM}")
+)
+apply_dim(DIM, bronze=G_BRONZE, silver=G_SILVER, log=G_LOG)
+assert [str(r.dump_date) for r in spark.table(G_LOG).orderBy("dump_date").collect()] == [OLD, NEW]
+assert compare_to_night(g_table, new, DIM) == (0, 0), "the corrected night is applied in full"
+print("GUARD SEEN: the bad night was refused before its MERGE, Silver kept the clean night, "
+      "and the corrected night was applied by the next run")
 
 # COMMAND ----------
 

@@ -207,9 +207,9 @@ def create_silver(table, dim):
     ensure_properties(table)
 
 
-def create_merge_log():
+def create_merge_log(log=MERGE_LOG):
     spark.sql(
-        f"""CREATE TABLE IF NOT EXISTS {MERGE_LOG} (
+        f"""CREATE TABLE IF NOT EXISTS {log} (
             dimension STRING, dump_date DATE, bronze_modified_at TIMESTAMP, source_rows BIGINT,
             inserted BIGINT, updated BIGINT, deleted BIGINT, rows_after BIGINT,
             silver_version BIGINT, padded_zips BIGINT, applied_at TIMESTAMP)"""
@@ -304,7 +304,7 @@ def merge_night(table, typed, dim, **switches):
 # COMMAND ----------
 
 
-def plan_nights(dim, bronze=BRONZE):
+def plan_nights(dim, bronze=BRONZE, log=MERGE_LOG):
     """(nights to apply in order, nights to report and leave alone).
 
     Applied: every Bronze night newer than the last one in the merge log, plus that last night
@@ -320,7 +320,7 @@ def plan_nights(dim, bronze=BRONZE):
     }
     logged = {
         r.night: r.modified
-        for r in spark.table(MERGE_LOG)
+        for r in spark.table(log)
         .where(F.col("dimension") == dim)
         .groupBy(F.date_format("dump_date", "yyyy-MM-dd").alias("night"))
         .agg(F.max("bronze_modified_at").alias("modified"))
@@ -339,11 +339,14 @@ def plan_nights(dim, bronze=BRONZE):
     return apply, report
 
 
-def apply_dim(dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER):
-    """Bring silver.<dim> up to Bronze's newest night. Each night: contract, breaker, MERGE, log."""
+def apply_dim(dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER, log=MERGE_LOG):
+    """Bring silver.<dim> up to Bronze's newest night. Each night: contract, breaker, MERGE, log.
+
+    `bronze`, `silver` and `log` exist so exp_03 can run this exact function on scratch tables.
+    """
     table = f"{silver}.{dim}"
     create_silver(table, dim)
-    apply, older = plan_nights(dim, bronze)
+    apply, older = plan_nights(dim, bronze, log)
     for night in older:
         print(f"{dim:9} {night}: changed in Bronze, but older than what Silver shows — NOT applied")
     if not apply:
@@ -378,7 +381,7 @@ def apply_dim(dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER):
             n(result["version"], "silver_version"),
             n(stats["padded_zips"], "padded_zips"),
             F.current_timestamp().alias("applied_at"),
-        ).write.mode("append").saveAsTable(MERGE_LOG)
+        ).write.mode("append").saveAsTable(log)
         share = f"{doomed / current:.2%} of {current:,}" if current else "empty table"
         print(
             f"{dim:9} {night}: {stats['rows']:>6,} rows in file -> +{result['inserted']:,} "
