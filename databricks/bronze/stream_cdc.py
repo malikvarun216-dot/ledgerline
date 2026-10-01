@@ -57,6 +57,10 @@ progress = run_stream(**STREAM_ARGS)
 # MAGIC 2026-09-27 (52,838 / 53,699 / 52,088): 158,346 clean events, 120 exact duplicates of clean
 # MAGIC events, and 159 contaminated records (53 distinct `event_id`s, three test runs each). So Bronze
 # MAGIC must hold 158,346 + 53 = **158,399** distinct `event_id`s.
+# MAGIC
+# MAGIC **Session 9** sends 100 delist events (`op = 'D'`), the first CDC messages with a provenance header
+# MAGIC (scope `full;only=D`). Every labelled message must be a delist and every delist labelled; each is a
+# MAGIC new event, so the distinct count becomes 158,399 + 100.
 
 # COMMAND ----------
 
@@ -70,13 +74,17 @@ facts = spark.sql(
            count(DISTINCT event_id) AS distinct_event_ids,
            count(DISTINCT sku_key) AS skus,
            count_if(op = 'I') AS inserts, count_if(op = 'U') AS updates, count_if(op = 'D') AS deletes,
-           count(DISTINCT _schema_id) AS schema_ids
+           count(DISTINCT _schema_id) AS schema_ids,
+           count_if({header_sql('ledgerline.run_id')} IS NOT NULL) AS labelled_rows,
+           count_if({header_sql('ledgerline.scope')} = 'full;only=D') AS delist_scope_rows
     FROM {TABLE}
     """
 ).collect()[0]
 print(facts)
 assert facts.rows == sum(END.values())
-assert facts.distinct_event_ids == 158_399
+assert facts.deletes in (0, 100), f"{facts.deletes} delete messages; the Session 9 delist run sends 100, once"
+assert facts.labelled_rows == facts.delist_scope_rows == facts.deletes
+assert facts.distinct_event_ids == 158_399 + facts.deletes
 
 check_batches_not_doubled(TABLE)
 check_backlog(STREAM)
@@ -133,8 +141,8 @@ assert len(denylist["event_ids"]) == 53
 assert recon.denied_rows == 159
 assert recon.denied_event_ids == 53
 assert recon.units_sold_raw == 112_806
-assert recon.units_sold_clean == 112_650
-assert recon.clean_events == 158_346
+assert recon.units_sold_clean == 112_650  # a delist moves no stock, so it sells nothing
+assert recon.clean_events == 158_346 + facts.deletes
 
 # COMMAND ----------
 
