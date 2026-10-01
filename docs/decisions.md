@@ -1707,6 +1707,71 @@ setting one bad row aside would delete that customer from Silver.
   day-old dimension is visible and recoverable; a silently deleted customer is
   neither.
 
+### Revision (2026-10-01, same session) — hold the bad row, not the whole night; refuse the night only when the file looks broken
+
+**In plain words:** the human asked whether refusing a whole night for one bad
+row is too much. It is, at real scale: one junk value in 43,690 rows would hold
+back 43,689 good updates, and a feed with one bad row every night would never
+update Silver at all. The danger was never the bad row itself — it was the bad
+row **disappearing from the MERGE's source**, which the delete clause reads as
+"this seller left". So the bad row stays in the source and is simply not
+allowed to change anything.
+
+- Chosen (by the human), to build in **Session 9**: every row of the night
+  stays in the MERGE source with a flag `_ok`. The MERGE becomes
+  `WHEN MATCHED AND s._ok AND <changed> THEN UPDATE`,
+  `WHEN NOT MATCHED AND s._ok THEN INSERT`, `WHEN NOT MATCHED BY SOURCE THEN
+  DELETE` unchanged. A bad row's key is present, so it is never deleted; it is
+  not `_ok`, so it keeps yesterday's values (or, if new, waits). Each held row
+  is copied to a **rejected-rows table** (night, key, column, raw value), the
+  merge log gains a `held` count, and an alarm fires. A corrected re-delivery
+  of the night (Drill 1's `allowOverwrites` + this session's correction path)
+  applies it.
+- The rule in one line: **filter the changes, never the keys.**
+- Still refuses the **whole night**: more than **1%** of rows bad (a shifted
+  column, a wrong delimiter — the file itself is broken), any duplicate or
+  NULL key (which of two S2 rows is true cannot be decided row by row), an
+  empty file. The same shape as Snowflake's `COPY INTO ... ON_ERROR =
+  SKIP_FILE_<n>%`: tolerate a few bad rows, reject the file above a threshold.
+- Rejected: **keep refusing the night on any bad value** (the entry above).
+  Safe, but it turns one bad row into a stopped dimension — the exact argument
+  Session 6 used to reject "fail the batch" for Kafka quarantine, which this
+  entry failed to apply to itself.
+- Rejected: **load the bad value as NULL with a flag.** Keeps the row moving,
+  but Silver would then say "this seller's zip is unknown" — a change that never
+  happened — and Gold's SCD2 would record it, then record it again when fixed.
+- Trade-off, accepted: for a while Silver is mixed — most rows at night 6, a
+  held row at night 5. Visible through `_last_changed_dump_date`, the `held`
+  count and the alarm; without the alarm a held row could stay stale silently,
+  which is why the two are built together.
+- Until Session 9 the strict rule above stays in production: safe, only strict.
+
+## Databricks raises the alarms now (a scheduled Job + a freshness alert); Airflow takes over orchestration later (Session 8)
+
+**In plain words:** today a refused night shows only as a red notebook cell —
+if nobody opens the notebook, nobody knows. Two alarms are needed: one when a
+run **fails** (a refused night), and one when **nothing happens** (no file
+arrived, or the job never ran — a failure alarm cannot fire for a run that did
+not happen). Both are built inside Databricks in Session 9.
+
+- Chosen: `merge_dims` (and `autoload_dims` before it) as a scheduled
+  **Databricks Job** with a failure email; a **Databricks SQL Alert** on
+  `silver.dims_merge_log` — "no night applied in the last 26 hours" — as the
+  freshness alarm. Whether Free Edition sends job-failure emails is
+  **unverified**; checked when built.
+- Rejected: **CloudWatch.** AWS's monitoring watches AWS resources; Silver runs
+  on Databricks compute it cannot see, except through custom metrics pushed by
+  hand. Wrong tool for this layer.
+- Rejected: **wait for Airflow** (Session 6 decision, ~Session 15+). Airflow's
+  real value is stopping everything downstream — no export to Snowflake, no dbt
+  build — when Silver refuses a night, and it will take over orchestration.
+  But seven sessions with no alarm at all is too long.
+- Kept after Airflow arrives: the freshness alert stays, as a second line of
+  defence that does not depend on the orchestrator itself running. It is also
+  the "scheduled completeness check" carried since Drill 1.
+- Adds Databricks surface area (Jobs, SQL Alerts), the project's stated
+  preference.
+
 ## Delete circuit breaker: a night may delete at most 5% of a Silver dimension (Session 8)
 
 **In plain words:** `WHEN NOT MATCHED BY SOURCE DELETE` trusts the file to be

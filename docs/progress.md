@@ -3,6 +3,23 @@
 Chronological session log. Updated at the end of every session with what was
 **actually verified** — not merely what was built.
 
+## Deliberate-failure experiments — tracker (read at every session start)
+
+Added Session 8, after `exp_02` went unscheduled for two sessions (incidents.md
+2026-09-30). Each experiment is due in the session that builds its layer. If a
+session ends without it, `### Next` carries it **by name**. Every drill checks
+its attack list against this table. Status is updated in the session that
+changes it.
+
+| # | Experiment | Layer / pattern | Due | Status |
+|---|---|---|---|---|
+| exp_01 | exactly-once replay (`txnAppId` / `txnVersion`) | Bronze Kafka | S7 | **done** S7; re-run Drill 1 |
+| exp_02 | partition overwrite: append doubles, predicate-less overwrite wipes | Bronze dims (`replaceWhere`) | **S6 — missed**; S8 | **done** S8 (two sessions late) |
+| exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8 |
+| exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination | Silver CDC | S10 | not started |
+| exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | not started |
+| exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | not started |
+
 > **On references to `docs/learning.md` below.** That file is the
 > end-of-session recall check — answers, wrong answers and carried-forward weak
 > spots. It is **deliberately local-only and not in this repository**: it is one
@@ -1690,3 +1707,231 @@ Decide first, before touching the generator:
   `bronze.drill1_trap*`, `drill1_seller`, `drill1_reviews_*`, `exp01_*`;
   checkpoints under `checkpoints/drill1/`; S3 `ledgerline/drill1/`; S7's
   `checkpoints/scratch/s7_progress_probe`.
+
+---
+
+## Session 8 — Silver dimensions: the MERGE that deletes by absence
+Date: 2026-09-30
+
+**In plain words:** Silver now holds every customer, product and seller as
+they are *now*, built by applying the nightly dumps one at a time with a
+`MERGE` that inserts new rows, updates changed ones, and **deletes rows missing
+from the night's full file**. To give that delete something real to do, a 5th
+night was landed with 219 rows removed — without touching the four nights
+already delivered, which the generator can no longer rewrite by accident. The
+deliberate experiment `exp_03` showed the gap the delete clause closes (100
+deleted sellers left in Silver by a plain MERGE, job green) and then broke the
+fix's own assumptions on purpose. On the way: every zip code starting with 0
+had lost that zero somewhere between Olist and the landing zone, in every
+night, unnoticed for eight sessions. And near the end the human asked about
+`exp_02` — the Bronze half of the same story, due in Session 6 and never
+scheduled by anyone. It was built and run the same day (a plain append doubled
+a re-delivered night; an overwrite without a predicate deleted the other
+night), and all six experiments are now bound to sessions in a tracker.
+
+### Scope, as it actually ran
+Planned (Drill 1's `### Next`): decide write-once landing first, drive the
+delete branch with a 5th night, Silver dims with `NOT MATCHED BY SOURCE`,
+Silver retention, `exp_03`. All done. Added: the zip defect (found before
+writing a single cast), the delete circuit breaker, the merge log, Change Data
+Feed from the first commit. Then, at the human's question, `exp_02` and the
+experiment tracker.
+
+### Start-of-session re-check (read-only)
+The four landed nights regenerated on the laptop; the generator's own report
+became the answer key for Silver's MERGE (inserts / updates / deletes per
+night). **0 deletions on every night** — the clause this session exists for had
+nothing to delete. Raw Olist zips: 99,441 / 99,441 customers and 3,095 / 3,095
+sellers have five digits; the landed dumps do not (incident).
+
+### Built
+- **Generator** (`generators/dim_dumps.py`): `--delete-from DATE` (deletions
+  start on a named night; earlier nights regenerate byte-identical);
+  **write-once landing** — all nights planned in memory against an overlay of
+  the sink, a landed night left alone when identical, **the whole run refused,
+  nothing written** if a landed night would change, unless named in
+  `--redeliver DATE`; a `landed` column in the summary.
+- **Night 5 landed**, 2017-12-28, by one command that reproduces the whole
+  landed history from nothing:
+  `python generators/dim_dumps.py --sink s3 --bucket ledgerline-landing-dev-fffc8b65 --prefix ledgerline --nights 5 --stride-days 120 --delete-per-night 100 --delete-from 2017-12-28`
+- `autoload_dims`: pinned golden counts for night 5 (43,690 / 32,851 / 2,995).
+- **Silver** (`databricks/silver/_merge_dims` library, `merge_dims`
+  production): typing from Bronze strings (zip padded to five digits, ints,
+  timestamps, session time zone pinned to UTC); a per-night contract (no NULL
+  or duplicate keys, no value that fails its cast, nothing ever filtered out);
+  the **5% delete circuit breaker**; the MERGE with `WHEN MATCHED AND NOT (all
+  columns <=>)`, `WHEN NOT MATCHED`, `WHEN NOT MATCHED BY SOURCE DELETE`;
+  lineage columns (`_first_seen_dump_date`, `_last_changed_dump_date`,
+  `_source_file`); `silver.dims_merge_log` (one line per applied night); tables
+  created with Change Data Feed on and 30-day file retention. Four checks: MERGE
+  counts vs the generator's pandas report, Silver vs the newest night on every
+  column both ways, the change feed vs the log, a no-op re-run.
+- **`exp_03`** (deliberate failure #2 of six), parts A–F; part **G** (a bad
+  night refused before its MERGE, then applied once corrected) added at the
+  end — `apply_dim` / `plan_nights` / `create_merge_log` take a `log` table so
+  it runs the production function on scratch schemas.
+- **`exp_02`** (deliberate failure #3 of six; due in Session 6 and missed —
+  incident), parts A–E, on scratch Bronze tables with production's `write_batch`.
+- **Experiment tracker** at the top of this file; `CLAUDE.md` start-of-session
+  item 5 reads it.
+- Tests: 139 → **146** (write-once: identical re-run writes nothing, extending
+  by one night writes only it, a history-changing run writes nothing and names
+  the night, `--delete-from` keeps earlier nights byte-identical and the history
+  is reproducible from one command, `--redeliver` is per night; plus the zip
+  defect pinned on purpose). `test_notebooks` skips a tracked file deleted in the
+  working tree. The empty stub `merge_dims_nmbs.py` replaced by `merge_dims.py`.
+
+### Verified
+- **Guards fail when removed:** with write-once taken out in memory, 5 of the
+  new tests go red; with `first_night` ignored, 2 do.
+- **Rehearsal on a byte-identical local copy** (all 12 S3 ETags = local MD5s):
+  the old command (no `--delete-from`) **refused, naming 8 landed files, local
+  checksums unchanged**; the real command wrote 3 files, 12 `identical`.
+- **Live landing:** the same table line for line; afterwards all 12 old objects
+  have the **same ETag and the same LastModified (2026-09-27 19:00)** — not even
+  re-uploaded; 3 new objects byte-identical to the rehearsal. Night 5: customer
+  43,690 (+21,212 new, 33 changed, **19 gone**), product 32,851 (50 changed,
+  **100 gone**), seller 2,995 (50 changed, **100 gone**).
+- **Bronze:** one `WRITE` per table, `dump_date IN ('2017-12-28')` only (customer
+  v6); all three tables equal the landing zone and the pinned counts; a re-run
+  wrote nothing (5 → 5 WRITE commits). The 12 old files were not re-read.
+- **Silver, first run:** 15 MERGEs, one per dimension-night; **all 15 equal the
+  generator's report** (e.g. customer 2017-12-28 `(21212, 33, 19)`, seller
+  `(0, 50, 100)`); Silver equals night 5 on every column of every row
+  (`extra=0 missing=0`, 43,690 / 32,851 / 2,995 rows, keys unique); **0 zips
+  not five digits** after padding 9,572 customer and 1,002 seller zips; the
+  change feed equals the log on all 15 versions, every update paired; a re-run
+  wrote nothing (versions and 15 log rows unchanged).
+- **Zip padding is lossless** (laptop, raw files read as text): 43,690 / 43,690
+  and 2,995 / 2,995 padded zips equal the original.
+- **`exp_03`:** A bug present — `+0 ~50 -0`, 3,095 rows, **100 stale sellers**
+  with their old values, no error; B fix — `-100`, Silver = night; C —
+  `0 / 0 / 0`, **version still 2 → 3**; D — one row set aside → deleted, and
+  re-applied as a *new* row (first seen 2017-08-30 → 2017-12-28); E — breaker
+  refused **1,643 of 3,095 (53.1%)**, nothing written; off → 1,643 deleted, no
+  error; F — **2,995 updates** vs 50 for the same final table.
+- **`exp_02`:** A append — night **5,989** rows, **2,994 sellers twice**, the
+  retracted seller still there, no error; B overwrite without a predicate —
+  table = that one night, **3,095 rows of the other night deleted**, recorded as
+  `CREATE OR REPLACE TABLE AS SELECT`; C `replaceWhere` — `{3,095, 2,994}`, the
+  retracted seller gone for free, the other night identical, 2,994 rows
+  written (no copying: separate files); D — the folder check **fired for the
+  first time**; bypassed, the wrong night was replaced and **100 sellers
+  vanished from the table**; E — Delta refused a stray row
+  (`DELTA_REPLACE_WHERE_MISMATCH`), nothing written.
+- **`exp_03` G (2026-10-01):** a night with three planted problems was refused
+  before its MERGE, naming all three (`bad__seller_zip_code_prefix: 1`,
+  `bad__dim_updated_at: 1`, `duplicate_keys: 1`); Silver stayed at the clean
+  night (version 1), nothing logged for the bad night; the corrected night was
+  applied by the next run (`~50 -100`, version 2). **`merge_dims` re-run after
+  the `log` parameter change:** nothing new, all checks pass, versions and the
+  15 log rows unchanged.
+- `ruff` clean, `pytest` 146 passed.
+
+### Built but NOT verified
+- **Deletion vectors** as the reason a MERGE copies no unchanged rows
+  (`numTargetRowsCopied: 0`; exp_03's 50-row update added one 6,118-byte file;
+  the one-row delete added 0 files). Consistent with them, not checked:
+  `SHOW TBLPROPERTIES` for `delta.enableDeletionVectors`.
+- **The correction path** (a re-delivered newest night is re-applied; an older
+  corrected night is reported, not applied) — written, never driven.
+- **The contract check refusing a night** (bad cast, duplicate key) — never
+  given a bad night; the breaker was (exp_03 E).
+
+### Not done
+- `exp_02` was listed here as "never scheduled" — then built and run the same
+  session, after the human asked why it was missed (incident).
+- Silver's `_merged_at` / `applied_at` are run times by design; nothing yet
+  reads them.
+
+### Incidents (4 new entries, two deliberate)
+1. Zip prefixes lost their leading zero in every landed dump (fixed in Silver,
+   verified lossless).
+2. **DELIBERATE, exp_03**, results above.
+3. `exp_02` was never scheduled: the six experiments had no session binding,
+   and Drill 1 attacked `replaceWhere`'s success path only. Tracker added.
+4. **DELIBERATE, exp_02**, results above.
+
+### Decisions (7 new, all Session 8, plus one revision)
+Write-once landing + `--delete-from`; apply nights one at a time with a merge
+log; MERGE updates only real changes, deletes by absence, change feed on; a bad
+value fails the night, a snapshot source is never filtered; the 5% delete
+breaker; zips restored in Silver, not in the generator; alarms in Databricks
+now (Job + freshness alert), Airflow later. **Revised at the human's
+question** ("isn't refusing the whole night too much?" — yes): hold the bad
+row, refuse the night only above 1% or on broken keys — built in Session 9.
+
+### Unexplained, recorded rather than guessed
+- **`silver.seller` v5 is an `OPTIMIZE` with `auto: true`, 2 s after the
+  night-4 MERGE** (21:58:12 → 21:58:14). Product's night 5 is also v6 (its v5
+  not read, presumably the same); customer's is v5 — no extra commit. That
+  timing looks like **auto compaction** (Delta compacting straight after a
+  write), not Predictive Optimization (Session 7: 80 minutes later, run by a
+  service principal). If so, Drill 1's note crediting an `auto: true` OPTIMIZE
+  two seconds after a write to Predictive Optimization was the same thing,
+  misattributed. The row's `userName` would settle it; not read.
+  `merge_night` reads "the MERGE after version N", so the extra commit was
+  harmless — reading "the latest version" would have logged the OPTIMIZE.
+- **`silver.customer` was at version 7 on 2026-10-01** (night 5 was v5;
+  nothing of ours wrote since). Two commits not made by this project —
+  probably Predictive Optimization (an OPTIMIZE, or a VACUUM, which records
+  START and END as two versions). Not read; hands-on list.
+
+### Cost
+Databricks $0. AWS: 3 new objects (~6.7 MB), a few GETs for the write-once
+comparison — cents. Confluent: nothing.
+
+### Learning check
+**Skipped by choice, logged.** The human (2026-10-01): "am skipping the Qs
+for now … will address later … focusing on finishing this project sooner."
+A plain-words summary was given twice (the second slower, on request) and
+the three lessons re-explained with a three-seller example; no question was
+answered. Six prepared questions parked in `learning.md` as **B20–B25**
+(status `parked` — answerable now, set aside by choice; not `deferred`).
+
+### Hands-on checks (offered, not yet done)
+- `DESCRIBE HISTORY workspace.silver.customer` — what are v6 and v7?
+  (unexplained above); and `userName` on `silver.seller` v5 (auto
+  compaction vs Predictive Optimization).
+- `SHOW TBLPROPERTIES workspace.silver.seller` — is
+  `delta.enableDeletionVectors` true? (the "0 rows copied" explanation).
+- `SELECT * FROM table_changes('workspace.silver.seller', 6)` — the 100
+  `delete` rows of night 5, as the Gold export will see them.
+- Catalog Explorer → `workspace.silver` — four tables, CDF on, lineage
+  from `bronze.*`.
+
+### Next
+**Session 9 — Silver inventory CDC: `MERGE` on op flags, in-batch dedup, `seq`
+guard.** The other side of today's lesson: in CDC, absence means *nothing*,
+so `NOT MATCHED BY SOURCE` would be catastrophic there, and a duplicate key is
+normal (dedup), where today it was a broken file (fail).
+- Deferred D1 and D2 become answerable (both bound to S9).
+- **The topic has no `D` events** (generator `--delist-count 0`): drive the
+  delete branch on purpose, the way night 5 drove today's.
+- The 43 poisoned SKUs (tied `seq`) and the denylist
+  (`ops/incidents/2026-09-26_inventory_cdc_denylist.json`) meet Silver here.
+
+**Also Session 9, decided at the end of Session 8 (decisions.md):**
+- **Silver dims: hold the bad row, not the night.** Every row stays in the MERGE
+  source with `_ok`; `UPDATE` / `INSERT` only when `_ok`; a rejected-rows table;
+  a `held` count in the merge log; the whole night still refused above **1%**
+  bad rows, on any duplicate or NULL key, or on an empty file. Rewrite
+  `exp_03` G for the new rule, plus a part **H**: one bad row held, the night
+  applied, that seller **not deleted**.
+- **Alarms, in Databricks:** `autoload_dims` + `merge_dims` as a scheduled
+  **Job** with a failure email (Free Edition support unverified — check); a
+  **SQL Alert** on `silver.dims_merge_log`: no night applied in 26 hours.
+
+**Carried, each a claim to re-check:**
+- **For the Gold window:** Silver's change feed emits `delete` rows; the Session
+  6 export plan (`insert` / `update_postimage` only) would drop every deletion.
+  Also: dbt snapshot `hard_deletes` must be decided, or Gold keeps the 219
+  deleted rows as current forever — today's bug, one layer up.
+- Deletion vectors (above); the OPTIMIZE `userName`.
+- CI: the Actions log for the producer tests (since Drill 1) — still not seen.
+- Topics delete their oldest messages from ~**2026-12-25**; the Git-folder
+  token expires the same day.
+- Read-only Kafka identity for Bronze; dev-only Kafka credential.
+- Scratch leftovers: `bronze.exp02_{append,overwrite,replacewhere,mislabelled,stray}`
+  and `silver.exp03_{bug,fix,truncated,all}` (rebuilt by each
+  experiment run), plus Drill 1's list above.

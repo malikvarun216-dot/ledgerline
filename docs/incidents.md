@@ -1109,3 +1109,162 @@ before designing Silver's typing; nothing had flagged it in eight sessions.
   generator fails loudly and points at the decision that explains why not.
 - Lesson: "rows match" is not "values match". A pipeline can be exactly-once,
   gap-free and faithfully wrong.
+
+### Fix verified (2026-09-30, same session)
+Silver's first run padded 57 / 1,599 / 4,783 / **9,572** customer zips (nights
+2–5) and **1,027 / 1,002** seller zips; afterwards `zips not five digits = 0` on
+all three tables. "Lossless" checked on the laptop rather than asserted:
+**43,690 / 43,690** padded customer zips and **2,995 / 2,995** seller zips on
+night 5 equal the raw Olist value for the same person or seller, rebuilt from
+the raw files read as text.
+
+## [2026-09-30] — DELIBERATE (exp_03): a plain MERGE kept 100 deleted sellers in Silver, reported success, and raised no error
+
+**In plain words:** the first deliberate experiment on Silver. A MERGE with
+only the two usual clauses — "matched → update", "not matched → insert" — was
+given a night in which 100 sellers had disappeared from the file. All 100
+stayed in Silver, with their old values, and the MERGE reported success. Adding
+the third clause, `WHEN NOT MATCHED BY SOURCE THEN DELETE`, removed exactly
+those 100. The same notebook then broke the fix's own assumptions on purpose.
+
+- How it was made (`experiments/exp_03_merge_gap_stale_row`, scratch tables
+  `workspace.silver.exp03_*`, the production code with one switch per part):
+  seller nights 2017-08-30 (3,095) → 2017-12-28 (2,995) from real Bronze; the
+  generator's own report for that step is 50 changed, 100 gone, 0 new.
+- Results:
+  - **A. bug** (`delete_missing=False`): `+0 ~50 -0`, **3,095 rows, 100 stale**,
+    every stale row holding its 2017-08-30 values. No error.
+  - **B. fix**: `+0 ~50 -100`, 2,995 rows, Silver equals the night on every
+    column of every row.
+  - **C. same night again**: `0 / 0 / 0` — and **the table version still moved
+    (2 → 3)**: Delta commits a MERGE that changes nothing.
+  - **D. one row set aside** before the MERGE (what a quarantine does): that
+    seller **deleted** (`-1`); re-applying the full night brought it back as
+    `+1`, with `_first_seen_dump_date` **2017-08-30 → 2017-12-28** — the row
+    returned, its history did not.
+  - **E. half a file**: the breaker refused — would delete **1,643 of 3,095
+    (53.1%)** — and nothing was written. With the breaker off: **1,643
+    deleted, no error**.
+  - **F. update every match** (`only_changed=False`): **2,995 updates** and
+    2,995 change-feed rows for the same final table, against 50 and 50.
+- Root cause of the bug: both usual MERGE clauses are about rows **in** the
+  source. A row that is only in the target matches neither, so nothing ever
+  looks at it. On a full snapshot, that absence is the deletion signal.
+- Why nothing would catch it in production: every count the MERGE reports is
+  true (0 deleted *is* what it did), the table has no duplicate keys, and every
+  row in it is a real seller that once existed. Only a comparison of the whole
+  table against the night's file (production's Verify 2: `extra=0`) shows 100
+  rows too many.
+- Fix: the production MERGE (`databricks/silver/_merge_dims`) carries
+  `WHEN NOT MATCHED BY SOURCE THEN DELETE`, behind the 5% delete breaker and
+  the whole-night contract check (decisions.md, Session 8).
+- Prevention rule: **on a full snapshot, check the table against the file both
+  ways, not just the MERGE's counts** — a missed delete shows only as rows the
+  file lacks. And the clause's two dangers each get a guard: a truncated file
+  (breaker) and a filtered source (bad values fail the night, never dropped).
+- Lesson: an insert-or-update MERGE is an *upsert*, not a *sync*. It can
+  never shrink a table, so on a snapshot source it silently turns every
+  deletion into a permanent stale row.
+
+## [2026-09-30] — a planned deliberate-failure experiment (exp_02) was never scheduled; its layer was finished two sessions earlier
+
+**In plain words:** the project promises six experiments that break a pattern
+on purpose. One of them, `exp_02` (partition overwrite: what `replaceWhere`
+protects against), belongs to Bronze dims — built in Session 6. It was never
+run: not in Session 6, not in Drill 1, whose whole job was to attack every
+Bronze guarantee. Nobody noticed until the human asked "did we do exp_02?" at
+the end of Session 8.
+
+- What happened: `experiments/exp_02_partition_overwrite_deletes.py` has been
+  an empty file since `6701b93` (2026-09-19). The pattern it tests shipped in
+  Session 6 and was attacked in Drill 1 — but only on its **success path**
+  (a re-delivered night replaces that night only). The two **bug** variants
+  the experiment exists for — a plain append (the night doubles) and an
+  overwrite without a predicate (one night replaces the whole table) — were
+  never run. The second is named in `CLAUDE.md`'s own danger zones.
+- What I thought was wrong: nothing; `progress.md` Session 8 listed it under
+  "Not done" as "never scheduled", which described the miss without asking why.
+- Root cause: **the six experiments were created as stubs and never bound to
+  sessions.** The only record of them was the end-of-project success criterion
+  "all six pass". Each got done only when some session's `### Next` happened to
+  name it: `exp_01` rode on Session 7's topic, `exp_03` was named by Drill 1's
+  `### Next`, `exp_04` by a Session 6 decision. `exp_02` was named nowhere.
+  Session 6 — the session that built `replaceWhere` — was consumed by the Free
+  Edition switch and three incidents, and its plan never mentioned it.
+- Why nothing caught it: an empty stub looks exactly like "not yet". No list
+  put each experiment next to the layer it tests and whether that layer
+  exists, so "the layer was finished two sessions ago" was never visible. And
+  Drill 1's plan was written from the guarantees, not cross-checked against
+  the experiment list, so "attack every guarantee" passed with the bug-first
+  half missing.
+- Fix: `exp_02` built and run in Session 8 (results appended below when run).
+  An **experiment tracker** — all six, each with its layer, the session it is
+  due in and its status — at the top of `progress.md`.
+- Prevention rule: **every planned deliverable that spans sessions is bound to
+  a session the day it is created, in a tracker read at every session start.**
+  `CLAUDE.md` start-of-session now includes the tracker: an experiment whose
+  layer exists and whose status is not "done" is either built that session or
+  carried *by name* in `### Next`. Every drill cross-checks its attack list
+  against the tracker.
+- Lesson: a goal stated only at the finish line gets done only when it happens
+  to be on the way. Anything worth promising needs a date, not just a place in
+  the success criteria.
+- Fix verified (same day): `exp_02` ran in Session 8 — entry below. Tracker
+  status updated to done.
+
+## [2026-09-30] — DELIBERATE (exp_02): re-writing one night by append doubled it; by overwrite without a predicate, it deleted every other night
+
+**In plain words:** Bronze keeps every night's dump side by side, and a night
+can be delivered again (a correction, a replay). The experiment wrote a
+corrected night — the same night with one seller retracted — three ways. A
+plain append put it beside the first copy (every seller twice, the retracted
+one still there). A plain overwrite replaced the **whole table** with that one
+night. Only `replaceWhere dump_date IN (<that night>)`, what production does,
+replaced exactly that night — and the retracted seller disappeared without any
+delete logic, because the new copy of the night simply does not contain it.
+
+- How it was made (`experiments/exp_02_partition_overwrite_deletes`, scratch
+  tables `workspace.bronze.exp02_*`): each table holds two real seller nights
+  from Bronze (2017-08-30: 3,095; 2017-12-28: 2,995), written by production's
+  `write_batch`. The re-delivery: 2017-12-28 minus seller
+  `0015a82c2db000af6aaaf3ae2ecb0532` (2,994 rows).
+- Results:
+  - **A. append:** night 2017-12-28 = **5,989** rows, **2,994 sellers twice**,
+    the retracted seller still present. No error.
+  - **B. overwrite, no predicate:** the table = `{2017-12-28: 2,994}` — **night
+    2017-08-30's 3,095 rows deleted**. History records it as `CREATE OR
+    REPLACE TABLE AS SELECT` (`isV1SaveAsTableOverwrite: true`), not `WRITE`:
+    `saveAsTable` in overwrite mode replaces the table.
+  - **C. `replaceWhere` (production):** `{3,095, 2,994}`, retracted seller gone,
+    the other night identical on every column, the night equal to the
+    corrected file. Last commit: predicate `dump_date IN ('2017-12-28')`,
+    **2,994 rows written** — the nights sat in separate files, so nothing was
+    copied (Drill 1's 6,190 was the shared-file case).
+  - **D. mislabelled file** (folder `2017-12-28`, rows `2017-08-30`):
+    production's folder check **refused** — the first time it has ever fired.
+    With the check bypassed: night 2017-08-30 now holds 2017-12-28's sellers,
+    and **100 sellers that existed only on 2017-08-30 exist nowhere** in the
+    table.
+  - **E. stray row** (one row dated 2017-08-30 in a write replacing
+    2017-12-28): Delta refused — `DELTA_REPLACE_WHERE_MISMATCH` /
+    `DELTA_VIOLATE_CONSTRAINT_WITH_VALUES`; nothing written.
+- Root cause of both bugs: a write mode that does not name *which* rows it
+  replaces. Append replaces nothing, so a second copy is a duplicate. Overwrite
+  replaces everything, so one night is the whole table. `replaceWhere` names
+  the night — and the night's name must come from somewhere trustworthy, which
+  is what D and E guard.
+- Why nothing would catch the bugs in production: A and B both report success
+  with plausible metrics (`numOutputRows 2,994`). A shows up only as rows per
+  key > 1; B only as a night missing from the table — Bronze's per-night
+  comparison against the landing zone (`autoload_dims` Verify) catches both,
+  which is why that check exists.
+- Fix: production already uses `replaceWhere` with the folder check
+  (Session 6); this experiment is the first proof that the alternatives fail
+  and that both guards fire.
+- Prevention rule: **a re-writable unit of data (a night, a partition) is
+  always written with a predicate that names exactly that unit, and the name is
+  checked against a second source (the folder) before the write.** Never
+  `mode("overwrite")` on a table that holds more than one unit.
+- Lesson: `replaceWhere` handles deletions for free *inside the unit it
+  replaces*; a MERGE over the whole table needs `NOT MATCHED BY SOURCE` to do
+  the same (exp_03). Same data, same deletion, two layers, two mechanisms.
