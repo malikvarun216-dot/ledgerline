@@ -66,6 +66,10 @@ EVENT_COLUMNS = [
 COORDINATES = ["_kafka_partition", "_kafka_offset"]  # where the kept copy sits on the topic
 STOCK_COLUMNS = ["sku_key", "product_id", "seller_id", "stock_qty", "seq"]
 
+# Enforced by Delta on every write (Session 10): stock below zero means the feed is broken upstream, and
+# the batch should stop rather than land it. The feed's lowest stock_qty is 11.
+STOCK_CONSTRAINTS = {"stock_not_negative": "stock_qty >= 0"}
+
 
 class BatchRefused(Exception):
     """A batch whose order cannot be decided. Nothing was written; the next run retries the same batch."""
@@ -100,6 +104,23 @@ def ensure_properties(table):
             print(f"{table}: set {name} = {value}")
 
 
+def ensure_constraints(table, constraints):
+    """Add each CHECK constraint the table lacks (same as `_merge_orders.ensure_constraints`). Delta checks
+    every existing row first; a row that breaks it fails the ALTER and nothing changes."""
+    have = {r.key: r.value for r in spark.sql(f"SHOW TBLPROPERTIES {table}").collect()}
+
+    def canonical(rule):  # Delta may store the rule with other spacing, case, brackets or backticks
+        return "".join(ch for ch in rule.lower() if ch not in " ()`")
+
+    for name, rule in constraints.items():
+        stored = have.get(f"delta.constraints.{name}")
+        if stored is None:
+            spark.sql(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({rule})")
+            print(f"{table}: added constraint {name}")
+        elif canonical(stored) != canonical(rule):
+            raise ValueError(f"{table}: constraint {name} is {stored!r}, the code says {rule!r}")
+
+
 def create_tables(events=EVENTS, stock=STOCK, log=CDC_LOG):
     """In the notebook's own session, before the stream starts: inside foreachBatch the session is a
     clone, where a catalog lookup once answered wrongly (incidents.md, 2026-09-26)."""
@@ -128,6 +149,7 @@ def create_tables(events=EVENTS, stock=STOCK, log=CDC_LOG):
     )
     for table in (events, stock):
         ensure_properties(table)
+    ensure_constraints(stock, STOCK_CONSTRAINTS)
 
 # COMMAND ----------
 
@@ -192,6 +214,20 @@ def latest_per_sku(events):
     source rows for one target row, and Delta refuses the MERGE ("multiple source rows matched")."""
     newest = Window.partitionBy("sku_key").orderBy(F.col("seq").desc())
     return events.withColumn("_rank", F.row_number().over(newest)).where("_rank = 1").drop("_rank")
+
+
+def newest_in_log(events, events_table):
+    """The newest event per SKU over the whole event log, for the SKUs this batch touched.
+
+    The log already holds this batch (it is written first) and every earlier event, deletes included. So
+    an update that arrives late, after a newer delete, is not the newest event of its SKU — the delete is
+    — and the stock MERGE never sees it. With `latest_per_sku(events)` alone it would be the newest in its
+    batch, match no row (the delete removed it) and be inserted: the SKU comes back (exp_04 C).
+    """
+    s = events.sparkSession
+    touched = events.select("sku_key").distinct()
+    logged = s.table(events_table).join(touched, "sku_key").select(*EVENT_COLUMNS, *COORDINATES)
+    return latest_per_sku(logged)
 
 
 def events_merge_sql(target, source):
@@ -297,16 +333,22 @@ def make_batch_writer(
     dedup=True,
     seq_guard=True,
     refuse=True,
+    newest_from="batch",
 ):
     """Return the foreachBatch function.
 
     `dedup`, `seq_guard` and `refuse` exist ONLY for exp_04 (Session 10), which removes each guard to
     watch it break. Production never passes them.
 
+    `newest_from`: where the stock MERGE takes each SKU's newest event from — `"batch"` (Session 9) or
+    `"log"` (the whole event log, so a late update cannot resurrect a deleted SKU; `newest_in_log`).
+
     Nothing printed in here reaches the notebook on serverless (incidents.md, Drill 1): the evidence is
     the CDC log table and the tables' history.
     """
     denylist = list(denylist)
+    if newest_from not in ("batch", "log"):
+        raise ValueError(f"newest_from must be 'batch' or 'log', not {newest_from!r}")
 
     def apply_batch(batch_df, batch_id):
         s = batch_df.sparkSession
@@ -332,7 +374,12 @@ def make_batch_writer(
 
         # The WHOLE batch, not only the events new to the log: if a run died between the two MERGEs, the
         # replay finds every event already logged, and "new only" would never apply them to the stock.
-        newest = latest_per_sku(events) if dedup else events
+        if not dedup:
+            newest = events
+        elif newest_from == "log":
+            newest = newest_in_log(events, events_table)
+        else:
+            newest = latest_per_sku(events)
         newest.createOrReplaceTempView("_cdc_newest")
         newest_deletes = newest.where("op = 'D'").count()
         applied = _merge(s, stock_table, stock_merge_sql(stock_table, "_cdc_newest", seq_guard=seq_guard))
