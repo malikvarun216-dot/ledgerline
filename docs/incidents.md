@@ -1268,3 +1268,59 @@ delete logic, because the new copy of the night simply does not contain it.
 - Lesson: `replaceWhere` handles deletions for free *inside the unit it
   replaces*; a MERGE over the whole table needs `NOT MATCHED BY SOURCE` to do
   the same (exp_03). Same data, same deletion, two layers, two mechanisms.
+
+## [2026-10-01] — the CDC feed's "stock before" and "stock after" disagree with its own `seq` order on 237 SKUs, and every check passed
+
+**In plain words:** in a change log, each event for a SKU should start where
+the previous one ended: "stock before" of event n equals "stock after" of event
+n−1. Ours does not, 1,423 times. The generator applies a restock to its running
+stock *straight after* the sale that triggers it, but stamps the restock **one
+hour later**. Any sale inside that hour gets an earlier `seq` than the restock,
+yet a "stock before" that already includes it. Found at the start of Session 9,
+computing on the laptop what Silver must hold before building Silver.
+
+- What happened: the clean log (158,346 events, regenerated locally) read in
+  `seq` order per SKU has **1,423 broken links on 237 of 34,448 SKUs**. Example,
+  SKU `eba7488e…|620c87c1…`:
+
+      seq …2553  sale     prev 62 → 61
+      seq …3641  sale     prev 86 → 85     ← 86 exists only after the restock
+      seq …6153  restock  prev 61 → 86     ← stamped 1 h after the sale that caused it
+
+  Consequence for a CDC MERGE (keep the after-image of the highest `seq`):
+  **26 SKUs end on the wrong stock, 27 units in total** — Silver would sum to
+  **993,982** where the generator's own deltas sum to **993,955**.
+- What I thought was wrong: nothing — the check was the answer key for Silver,
+  not a bug hunt. The first number (1,423 chain breaks) looked like a bug in
+  the check script; one SKU printed in `seq` order showed it was the data.
+- Root cause: `build_cdc_events` (Session 1) walks each SKU's sales in time
+  order and updates `running` as it goes; a restock is appended at
+  `sale_ts + 1 h` with `prev = running`, and `running += 25` **immediately**.
+  `assign_seq` then sorts every event by `event_ts`. When the next sale is less
+  than an hour after the restock-triggering one, sorting moves it in front of
+  the restock — but its images were computed after it. The images follow
+  generation order; `seq` follows time order. A real database cannot do this:
+  the after-image *is* the row at commit, and the log is in commit order.
+- Why nothing caught it: **every check reads deltas, and a delta does not
+  depend on order.** Units sold is rebuilt as `-sum(stock − prev)` over sales
+  — each event's own two numbers — so it ties out (112,650) whatever order the
+  events are in. The tests check seq monotonicity, seeds, no clamping, no
+  negative stock, the tie-out: all per-event or per-sum. None compares one
+  event with the event before it. The test fixture restocks after the third
+  sale of the only SKU with three sales, so no sale ever lands inside the hour.
+- Fix: in Silver, not in the generator (decisions.md, Session 9, "Silver
+  inventory mirrors the source's after-images …"). The topic holds these events
+  and is treated as production; a fixed generator would regenerate different
+  stock values and event ids for ~1,400 events that are correct-as-delivered,
+  and "compare with a clean regeneration" — how the Session 6 denylist was
+  found — would then flag them. Silver applies the standard after-image MERGE,
+  **counts chain breaks per batch** in its log, and its verification pins the
+  known baseline (1,423 / 237 / 26 SKUs / 27 units) so that any new break fails.
+- Prevention rule: **a change log carrying before- and after-images must be
+  checked as a chain — `prev` of each event equals `stock` of the event before
+  it for the same key, in log order.** That is the one check that sees order;
+  totals and deltas never will. A generator test pins the current behaviour,
+  so "just fixing" it fails loudly and points here.
+- Lesson: a reconciliation built on deltas proves the *sum* is right and
+  nothing about the *order*. The before-image exists so a consumer can check
+  it was handed events in the order they happened.

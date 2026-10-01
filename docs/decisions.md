@@ -1815,3 +1815,150 @@ left as it is.
   history — refused by the write-once rule above, deliberately.
 - Consequence: a source-side format fix is itself a change event. If the source
   ever starts sending five digits, Silver's padding makes it a non-event.
+
+## Silver inventory CDC: one stream from Bronze, two tables, every write idempotent by its own condition (Session 9)
+
+**In plain words:** Silver reads Bronze `inventory_cdc` as a stream. For each
+micro-batch it drops the 53 denylisted events, keeps one copy of each event,
+refuses the batch if two *different* events claim the same position for a SKU,
+then writes two tables: a clean **event log** (one row per event, nothing
+interpreted) and the **current stock** per SKU (the CDC `MERGE`: op flags,
+latest event per SKU, `seq` guard). Nothing in it needs Kafka-style
+`txnVersion` protection, because every write is safe to repeat.
+
+- Chosen: `spark.readStream.table("workspace.bronze.inventory_cdc")` →
+  `foreachBatch` → `Trigger.AvailableNow`, checkpoint in the volume, generation
+  `v1` like Bronze. Bronze is append-only, so a plain Delta stream over it works
+  (Silver dims could not do this — Bronze dims are rewritten by `replaceWhere`).
+- Chosen, per batch, in this order:
+  1. **denylist** — `event_id NOT IN` the 53 ids from
+     `ops/incidents/2026-09-26_inventory_cdc_denylist.json`, passed into the
+     batch function as a Python list (on serverless the batch runs in a cloned
+     session; a temp view from the notebook is not relied on);
+  2. **one copy per `event_id`** — the topic holds 120 exact re-sends;
+  3. **tie refusal** — two different `event_id`s with one `(sku_key, seq)`, in
+     the batch or against the log, fail the batch (entry below);
+  4. **event log** `silver.inventory_events` — `MERGE … WHEN NOT MATCHED INSERT`
+     on `event_id`. `change_reason` is **not carried**: Session 1 said nothing in
+     the pipeline may read it, and a column that is not there cannot be read;
+  5. **current stock** `silver.inventory` — dedup to the highest `seq` per SKU
+     (`row_number() … = 1`), then the three-clause MERGE with the `seq` guard on
+     **all three** (CLAUDE.md's version guards only the update; a delete older
+     than the row it would delete must not delete it either);
+  6. **chain breaks** counted for the batch (entry below), and one line appended
+     to `silver.inventory_cdc_log` with `txnAppId` / `txnVersion = batch_id`.
+- Why no `txnVersion` on the two MERGEs: a replayed batch changes nothing.
+  Events already in the log match and are not inserted; the stock MERGE finds
+  `s.seq = t.seq`, which is not `>`; a `D` for a row already deleted finds no
+  row. Contrast Bronze, where an append is not repeatable and needed it. The
+  log line *is* an append, so it gets the Bronze treatment.
+- The stock MERGE reads the **whole** deduped batch, not only the events that
+  were new to the log. If a run dies between the two MERGEs, the replay finds
+  every event already logged — filtering to "new" would leave the stock
+  un-applied forever.
+- Rejected: **a batch job with a high-water mark** (`_ingested_at`, or offsets
+  per partition). It re-implements what the checkpoint does, and a mark kept by
+  hand is how late rows get skipped (the Gold experiment, exp_06).
+- Rejected: **stock only, no event log.** Gold's reconciliation (units sold ↔
+  decrements) needs every decrement, not the last after-image; the chain check
+  needs the history; and Gold reads Silver, never Bronze.
+- Rejected: **two streams, one per table.** Twice the checkpoints and Bronze
+  reads, and the two tables could drift to different batches.
+
+## Silver inventory mirrors the source's after-images; the broken chain is counted, not repaired (Session 9)
+
+**In plain words:** on 237 SKUs the feed's "stock before" / "stock after" do
+not follow its own `seq` order (incidents.md, 2026-10-01), and 26 SKUs would
+end 27 units off the generator's own arithmetic. Silver still keeps, for each
+SKU, the "stock after" of its highest-`seq` event — what the source says the
+stock is now — and counts every broken link, so the defect is visible and any
+*new* break fails the checks.
+
+- Chosen: the standard after-image MERGE; `chain_breaks` per batch in
+  `silver.inventory_cdc_log` (an event whose `prev_stock_qty` differs from the
+  `stock_qty` of the event before it, same SKU, by `seq`, read from the event
+  log); the verification pins the known baseline: **1,423 breaks, 237 SKUs, 26
+  SKUs / 27 units** between after-image and deltas.
+- Rejected: **fix the generator.** The topic holds these events and is treated
+  as production. A fixed generator would compute different stock values — and,
+  since `event_id` hashes `stock_qty`, different ids — for ~1,400 events, so a
+  clean regeneration (how the denylist was found) would call correct-as-
+  delivered events contaminated. Same reasoning as the zips (Session 8): the
+  fix belongs upstream, the defence here. A test pins the defect.
+- Rejected: **stock = seed + sum of deltas** (rebuild from the event log). It
+  gives the generator's intended number on all 26 SKUs, but it is a different
+  pattern: one lost or doubled event makes the sum wrong forever, where an
+  after-image corrects itself at the SKU's next event. It would also make
+  `seq` and the after-images pointless — the CDC MERGE is what this layer
+  exists to build.
+- Rejected: **refuse a batch with chain breaks, or hold those SKUs.** The
+  history cannot change, so the stream would stop for good on 237 SKUs.
+- Trade-off, accepted: Silver serves 26 stock levels the source's own deltas
+  disagree with, by 27 units in total. Visible in the log and the checks;
+  recorded rather than hidden.
+
+## Silver inventory deletes hard (`DELETE`), not with a tombstone; a late update after a delete is a known gap, bound to exp_04 (Session 9)
+
+**In plain words:** when a `D` arrives, the SKU's row is removed. The risk:
+the row's `seq` goes with it, so if an *older* update for that SKU arrives in a
+later batch, nothing remembers the delete and the MERGE inserts the SKU again.
+The alternative — keep the row with `_deleted = true` (a tombstone) — prevents
+that, at a cost.
+
+- Chosen: hard delete, guarded by `s.seq > t.seq`.
+- Why it is safe here, and only here: the Kafka key is `sku_key`, so a SKU's
+  events share one partition in `seq` order; Bronze appends them in offset
+  order; Silver's Delta stream reads Bronze versions in order. An older event
+  can only reach Silver after a newer one if the producer emitted it out of
+  order — which `--out-of-order-pct` does on purpose. **This is an assumption
+  about the source, not a guarantee of the MERGE**, and Session 10's `exp_04`
+  tests it: a late update after a delete, assert the SKU comes back, then
+  decide the fix with evidence.
+- Rejected: **tombstones now** (`_deleted`, keep `seq`). What Lakeflow's
+  `APPLY CHANGES` does internally — it is the S11 comparison. But every reader
+  must then remember `WHERE NOT _deleted`, the same leak-by-omission Session 7
+  rejected for a quarantine flag column; and tombstones need their own
+  clean-up. Not worth it before the failure has been shown.
+- Rejected: **ignore `D`** (keep delisted SKUs). Upsert is not sync — exp_03's
+  lesson, one layer over.
+
+## Two different events at one `(sku_key, seq)` fail the batch (Session 9)
+
+**In plain words:** `seq` is the order. If two different events claim the same
+place in it for one SKU, no rule can say which one happened — Silver stops and
+waits for a person, who adds the wrong one to the denylist.
+
+- Chosen: after the denylist and the per-`event_id` dedup, count
+  `(sku_key, seq)` pairs with more than one `event_id`, inside the batch and
+  against the event log. Any → the batch raises, nothing is written, and the
+  stream retries the same batch on the next run until the denylist covers it.
+  With the denylist: 0. Without it: the 2026-09-26 contamination fires it.
+- Rejected: **keep the first** — what `s.seq > t.seq` does on its own, in
+  silence (the Session 5 incident).
+- Rejected: **keep the latest Kafka offset.** The contamination was produced
+  *after* the clean run, so "latest" picks the wrong stock on every tied SKU.
+- Rejected: **hold just that SKU and carry on** (the Session 8 "hold the row"
+  rule). There, a held row keeps yesterday's value and the rest of the file is
+  fine. Here, two producers wrote the same keys — the topic is wrong, not a
+  row — and both events would sit in the event log, counting one sale twice.
+
+## The delete branch is driven by 100 delist events on the live topic, produced after Silver's first run (Session 9)
+
+**In plain words:** the topic has no `D` events, so Silver's delete clause
+would never run. The generator already knows how to delist SKUs; a new flag
+sends **only** those 100 events, and they go to the live topic after Silver
+has built its stock, so the `DELETE` hits rows that exist.
+
+- Chosen: `inventory_cdc.py --sink kafka --delist-count 100 --delists-only`.
+  The run builds the full event set (its other events are identical to the
+  topic's — checked: same ids, same `seq`) and sends only the `D`s. Scope
+  header `full;only=D`. 100 SKUs, 2,452 units of stock removed; every `D`
+  carries a `seq` above its SKU's last event; stock goes 34,448 SKUs → 34,348.
+- Why after Silver's first run: produced first, a SKU's `D` would land in the
+  same batch as its history, dedup would keep only the `D`, and `NOT MATCHED
+  AND op = 'D'` would simply not insert it. Correct — and the `DELETE` clause
+  would still never have run. Same idea as night 5 in Session 8.
+- Rejected: **a scratch topic or a hand-built batch.** Proves the SQL, not the
+  pipeline; exp_04 does that on scratch tables.
+- Rejected: **regenerate the topic with `--delist-count 100`.** Rewrites
+  production history.
