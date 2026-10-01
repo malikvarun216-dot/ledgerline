@@ -21,6 +21,13 @@
 # MAGIC Real events throughout: from `silver.inventory_events` (the clean log) and, for D, the contaminated
 # MAGIC rows still in `bronze.inventory_cdc`. Both read-only. Contaminating the live topic was rejected
 # MAGIC (decisions.md, Session 10). Each part asserts the bug **present** before the fix.
+# MAGIC
+# MAGIC **Steps that must fail do not run a stream.** A stream that dies inside a notebook command fails the
+# MAGIC command even when the code catches the error, and "Run all" stops there (incidents.md, 2026-09-27,
+# MAGIC exp_01 — repeated by this notebook's first version, 2026-10-02). So a failing step calls the
+# MAGIC stream's own batch function on exactly the rows its next micro-batch would read, with the batch id
+# MAGIC it would use. The checkpoint does not move, so the next real run reads those rows again — the same
+# MAGIC retry a failed micro-batch gets.
 
 # COMMAND ----------
 
@@ -50,20 +57,40 @@ def scratch(part):
 
 
 def land(t, rows):
-    """Append to the scratch Bronze. One append = one micro-batch, because each run() follows one land()."""
+    """Append to the scratch Bronze. One append = one micro-batch, because each step reads one append."""
     schema = spark.table(t["bronze"]).schema
     typed = rows.select(*[F.col(f.name).cast(f.dataType) for f in schema])
     typed.write.mode("append").saveAsTable(t["bronze"])
 
 
 def run(t, denylist=(), **switches):
-    """One AvailableNow pass with the production batch function. None, or the error's text."""
+    """One AvailableNow pass with the production batch function. ONLY for steps expected to succeed."""
+    run_silver_cdc(
+        checkpoint=t["checkpoint"], app_id=t["app_id"], denylist=list(denylist), source=t["bronze"],
+        events_table=t["events"], stock_table=t["stock"], log_table=t["log"], **switches,
+    )
+
+
+def pending(t):
+    """The rows of the latest append to the scratch Bronze: what the stream's next micro-batch reads.
+    Found by operation, not "latest version": Delta may add an OPTIMIZE commit of its own (Session 8)."""
+    writes = spark.sql(f"DESCRIBE HISTORY {t['bronze']}").where("operation = 'WRITE'")
+    v = writes.agg(F.max("version")).first()[0]
+    now = spark.read.option("versionAsOf", v).table(t["bronze"])
+    return now.exceptAll(spark.read.option("versionAsOf", v - 1).table(t["bronze"]))
+
+
+def apply_directly(t, denylist=(), **switches):
+    """The stream's next micro-batch without the stream, for steps expected to FAIL: the production batch
+    function on `pending(t)`, with the batch id the stream would use. None, or the error's text."""
+    create_tables(t["events"], t["stock"], t["log"])
+    apply_batch = make_batch_writer(
+        denylist=list(denylist), app_id=t["app_id"], events_table=t["events"], stock_table=t["stock"],
+        log_table=t["log"], **switches,
+    )
     try:
-        run_silver_cdc(
-            checkpoint=t["checkpoint"], app_id=t["app_id"], denylist=list(denylist), source=t["bronze"],
-            events_table=t["events"], stock_table=t["stock"], log_table=t["log"], **switches,
-        )
-    except Exception as e:  # the stream's error carries the batch function's
+        apply_batch(pending(t), len(lines(t)))
+    except Exception as e:
         return str(e)
     return None
 
@@ -127,9 +154,9 @@ assert H[X][-1].op == "D"
 
 a1 = scratch("a1")
 land(a1, pick(A, 1))
-assert run(a1) is None
+run(a1)
 land(a1, pick(A, 2, 3).unionByName(pick(N, 1, 2)))
-err = run(a1, dedup=False)
+err = apply_directly(a1, dedup=False)
 print((err or "no error")[:400])
 assert err and ("MULTIPLE_SOURCE_ROW" in err or "multiple source rows matched" in err.lower())
 
@@ -142,12 +169,13 @@ assert len(lines(a1)) == 1
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **The fix, as production does it:** the same checkpoint, dedup on. The stream retries batch 1 — the
-# MAGIC same Bronze rows — and this time it applies. The event log adds nothing (it already has them).
+# MAGIC **The fix, as production does it:** the same checkpoint, dedup on. The stream reads batch 1 — the
+# MAGIC same Bronze rows the failed attempt had — and this time it applies. The event log adds nothing (it
+# MAGIC already has them).
 
 # COMMAND ----------
 
-assert run(a1) is None
+run(a1)
 retried = lines(a1)[1]
 print(f"stock {stock(a1)}\nbatch 1 line: {retried.asDict()}")
 assert stock(a1) == {A: at(A, 3), N: at(N, 2)}
@@ -166,7 +194,7 @@ assert (retried.events_inserted, retried.updated, retried.inserted) == (0, 1, 1)
 
 a2 = scratch("a2")
 land(a2, pick(N, 1, 2))
-err = run(a2, dedup=False)
+err = apply_directly(a2, dedup=False)
 rows_n = spark.table(a2["stock"]).where(F.col("sku_key") == N).count()
 print(f"error: {(err or 'none')[:300]}\nrows for N: {rows_n}")
 assert err is None and rows_n == 2, "B25's expectation was wrong — record what Delta did instead"
@@ -184,24 +212,24 @@ assert err is None and rows_n == 2, "B25's expectation was wrong — record what
 
 b1 = scratch("b1")
 land(b1, pick(A, 1, 3))
-assert run(b1) is None
+run(b1)
 assert stock(b1) == {A: at(A, 3)}
 land(b1, pick(A, 2))
-assert run(b1, seq_guard=False) is None
+run(b1, seq_guard=False)
 print(f"no guard: A is {stock(b1)[A]}, the 3rd event said {at(A, 3)}, the late 2nd said {at(A, 2)}")
 assert stock(b1) == {A: at(A, 2)}, "expected the older event to overwrite the newer stock"
 
 b2 = scratch("b2")
 land(b2, pick(A, 1, 3))
-assert run(b2) is None
+run(b2)
 land(b2, pick(A, 2))
-assert run(b2) is None
+run(b2)
 late = lines(b2)[1]
 print(f"guard on, late event: A is {stock(b2)[A]}; line {late.asDict()}")
 assert stock(b2) == {A: at(A, 3)}
 assert (late.events_inserted, late.updated, late.inserted, late.deleted) == (1, 0, 0, 0)
 land(b2, pick(A, 4))
-assert run(b2) is None
+run(b2)
 newer = lines(b2)[2]
 print(f"newer event: A is {stock(b2)[A]}; line {newer.asDict()}")
 assert stock(b2) == {A: at(A, 4)}
@@ -224,12 +252,12 @@ K = len(H[X])
 def delete_then_late_update(part, **switches):
     t = scratch(part)
     land(t, pick(X, 1, 2))
-    assert run(t, **switches) is None
+    run(t, **switches)
     land(t, pick(X, K))
-    assert run(t, **switches) is None
+    run(t, **switches)
     assert stock(t) == {}, "the delete did not delete"
     land(t, pick(X, 3))
-    assert run(t, **switches) is None
+    run(t, **switches)
     return t
 
 
@@ -300,14 +328,14 @@ def units_sold(events_table):
 
 d = scratch("d1")
 land(d, clean)
-assert run(d) is None
+run(d)
 land(d, bad)
-err = run(d)
+err = apply_directly(d)
 print(f"1. guard on, no denylist:\n{(err or 'no error')[:400]}")
 assert err and ("BatchRefused" in err or "Nothing was written" in err)
 assert spark.table(d["events"]).count() == n_clean and len(lines(d)) == 1
 
-assert run(d, denylist=DENYLIST) is None
+run(d, denylist=DENYLIST)
 fixed = lines(d)[1]
 print(f"2. with the denylist: {fixed.asDict()}")
 assert (fixed.bronze_rows, fixed.denied_rows, fixed.events, fixed.events_inserted) == (159, 159, 0, 0)
@@ -318,9 +346,9 @@ assert spark.table(d["events"]).count() == n_clean
 
 p = scratch("d3")
 land(p, clean)
-assert run(p) is None
+run(p)
 land(p, bad)
-assert run(p, refuse=False) is None
+run(p, refuse=False)
 polluted = lines(p)[1]
 print(f"3. guard off: {polluted.asDict()}")
 print(f"   event log {spark.table(p['events']).count()} rows (clean {n_clean}); units sold "

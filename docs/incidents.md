@@ -1324,3 +1324,39 @@ computing on the laptop what Silver must hold before building Silver.
 - Lesson: a reconciliation built on deltas proves the *sum* is right and
   nothing about the *order*. The before-image exists so a consumer can check
   it was handed events in the order they happened.
+
+## [2026-10-02] — exp_04 failed a stream on purpose inside a notebook cell, and Databricks failed the cell — the exp_01 incident, repeated with its prevention rule already written
+
+**In plain words:** exp_04's step A1 had to show a MERGE being refused, so it
+ran the Silver stream with dedup switched off, expecting the stream to die and
+the code to catch it. The stream died as planned and the code caught it — and
+Databricks still marked the cell as failed (*"Some streams terminated before
+this command could finish!"*), so "Run all" stopped at the first experiment.
+This exact behaviour was found on 2026-09-27 (exp_01), and its prevention rule
+says what to do instead. I did not apply it.
+
+- What happened: `workspace.silver.exp04_a1_*` built batch 0; batch 1 ran with
+  `dedup=False`; the stream failed with `[STREAM_FAILED] … Found error inside
+  foreachBatch Python process`; `run()` returned the text; the notebook added
+  its own error and failed the command. Nothing after A1 ran. The production
+  run of `merge_inventory_cdc` just before it was unaffected (it passed).
+- What I thought was wrong: nothing — the design assumed a caught exception
+  is a handled one, which is true in Python and not in a Databricks notebook.
+- Root cause: a Databricks notebook fails any command in which a stream it
+  started ended with an error, caught or not (incidents.md, 2026-09-27). The
+  rule lived only in `incidents.md`, which a session start reads by its
+  headings. `CLAUDE.md`'s verified-constraints table — the "do not re-discover
+  these" list read in full every session — did not have it.
+- Fix: in exp_04, a step that must fail no longer runs a stream. It calls the
+  stream's own batch function (`make_batch_writer`) on exactly the rows the
+  next micro-batch would read (`pending()`, the latest Bronze append by time
+  travel) with the batch id the stream would use. The checkpoint does not move,
+  so the next real run reads the same rows — the retry a failed micro-batch
+  gets. Steps expected to succeed still run the real stream.
+- Prevention rule: **a platform behaviour that broke a run goes into
+  `CLAUDE.md`'s verified-constraints table the day it is found, not only into
+  `incidents.md`.** Added now: "a stream that dies inside a notebook command
+  fails the command, caught or not". Before writing an experiment that fails
+  something on purpose, search `incidents.md` for the failure kind.
+- Lesson: a prevention rule nobody reads at the moment of the next decision
+  does not prevent anything; put it where that decision is made.
