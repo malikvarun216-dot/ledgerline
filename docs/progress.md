@@ -15,10 +15,15 @@ changes it.
 |---|---|---|---|---|
 | exp_01 | exactly-once replay (`txnAppId` / `txnVersion`) | Bronze Kafka | S7 | **done** S7; re-run Drill 1 |
 | exp_02 | partition overwrite: append doubles, predicate-less overwrite wipes | Bronze dims (`replaceWhere`) | **S6 — missed**; S8 | **done** S8 (two sessions late) |
-| exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8 |
-| exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination | Silver CDC | S10 | not started |
+| exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8; G rewritten + H added S9 (hold the bad row) |
+| exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | not started — layer exists, due next session |
 | exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | not started |
 | exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | not started |
+
+**The rest of the plan is bound the same way** — since Session 9, every
+Databricks / Snowflake / dbt topic has a row, a weight and a session in
+[`docs/coverage.md`](coverage.md): built, or taught as theory at a named
+session. Read its rows for the session at every start (CLAUDE.md item 6).
 
 > **On references to `docs/learning.md` below.** That file is the
 > end-of-session recall check — answers, wrong answers and carried-forward weak
@@ -1935,3 +1940,251 @@ normal (dedup), where today it was a broken file (fail).
 - Scratch leftovers: `bronze.exp02_{append,overwrite,replacewhere,mislabelled,stray}`
   and `silver.exp03_{bug,fix,truncated,all}` (rebuilt by each
   experiment run), plus Drill 1's list above.
+
+---
+
+## Session 9 — Silver inventory CDC: the MERGE where absence means nothing
+Date: 2026-10-01 → 10-02
+
+**In plain words:** Silver now holds the current stock of every SKU (one
+product sold by one seller), built from the inventory change feed: each change
+says "this SKU's stock went from X to Y" with an order number (`seq`) and a
+flag (`I`nsert / `U`pdate / `D`elete). The opposite of Session 8: here a SKU
+missing from a batch means *nothing changed*, deletes arrive as `D` events, and
+two rows for one SKU in a batch are normal (keep the newest). The 53 events the
+test suite wrongly put on the topic in Session 6 are dropped by their published
+denylist, and a new guard refuses any batch where two different events claim
+the same place in a SKU's order — all 53 would have tripped it. To give the
+delete clause real work, 100 delist events were sent to the live topic after
+Silver's first build, and Silver deleted exactly those 100 SKUs. On the way,
+the laptop answer key found that the feed's own "stock before / stock after"
+disagree with its `seq` order on 237 SKUs — every check had passed because all
+of them read deltas. Then the two items carried from Session 8: Silver dims now
+**hold** a bad row instead of refusing the whole night, and the pipeline has
+alarms — a scheduled Job that emails on failure and two SQL alerts — each one
+seen firing, by email.
+
+### Scope, as it actually ran
+Planned (Session 8's `### Next`): Silver CDC with dedup and the `seq` guard,
+drive the delete branch, the denylist; then dims hold-the-row and the alarms.
+All done. Added: the answer key (laptop, pandas) before any Spark, which found
+the chain defect (incident); the tie guard; the event log; a revision of the
+alarm plan (a calendar alarm would never be green here).
+
+### Start-of-session re-check (read-only)
+The full CDC log regenerated on the laptop as the answer key: 158,346 events,
+34,448 SKUs, stock 993,982, units sold 112,650; with 100 delists 34,348 SKUs,
+991,530. Adding delists changes no other event (same ids, same `seq`).
+**1,423 broken before/after links on 237 SKUs** (incident).
+
+### Built
+- **Generator:** `--delists-only` (builds every event, sends only the `D`s;
+  scope header `full;only=D`); `run_scope(limit, only=…)`; module docstring
+  states the unheld invariant. Tests 146 → **152** (delists-only sends only
+  `D`s, changes no other event, refused without a count, CLI writes only
+  deletes, scope string; the chain defect pinned by a constructed SKU).
+- **Silver CDC** (`databricks/silver/_merge_inventory_cdc` library,
+  `merge_inventory_cdc` production): a Delta stream from Bronze
+  `inventory_cdc`, `foreachBatch`, `AvailableNow`, checkpoint in the new volume
+  `workspace.silver.checkpoints`, generation `v1`. Per batch: denylist → one
+  copy per `event_id` → tie / bad-op refusal → insert-only MERGE into
+  `silver.inventory_events` → newest event per SKU → the three-clause MERGE
+  into `silver.inventory` with `s.seq > t.seq` on **all three** clauses →
+  chain breaks counted → one line in `silver.inventory_cdc_log`
+  (`txnAppId`/`txnVersion`). CDF on, 30-day retention, `change_reason` not
+  carried. Five checks: Bronze rows seen once, event log = Bronze − denylist;
+  stock vs the laptop answer key and vs a batch window query over the log;
+  the chain baseline; change feed vs log; the tie guard over all of Bronze
+  with and without the denylist. Plus a no-op re-run.
+- **Bronze `stream_cdc`:** checks expect the delists by their provenance
+  label (every labelled message a delist, every delist labelled).
+- **Silver dims, hold the bad row** (`_merge_dims`): `_ok` per row; update and
+  insert need `s._ok`, the delete clause unchanged — a held key is present, so
+  never deleted; `silver.dims_rejected_rows` (one row per key and column, raw
+  text, `replaceWhere` per dimension and night); `held` in the merge log
+  (`ALTER TABLE ADD COLUMNS`; older lines NULL); night refused whole only for
+  > 1% bad rows, a NULL or duplicate key, or no rows. `merge_dims` reports held
+  rows; Verify 2 leaves held keys out.
+- **exp_03 G rewritten, H added:** G1 a duplicate key, G2 2% bad zips — both
+  refused whole; H one bad zip held, the night applied, then the corrected
+  file re-delivered.
+- **Alarms:** Job `ledgerline-silver` (id 788110523503206): `autoload_dims →
+  merge_dims`, `stream_cdc → merge_inventory_cdc`, serverless, daily 06:00
+  IST, email on failure. SQL Alerts `ledgerline silver behind bronze`
+  (`sources_behind > 0`) and `ledgerline dims rows held` (`rows_held > 0`),
+  daily 07:00 (set at the end; not seen in a screenshot); queries versioned
+  in `databricks/alerts/`. Test notebook
+  `alarm_test` kept in the user folder (outside git) for Drill 2.
+
+### Verified
+- **Silver CDC, first build (batch 0, one micro-batch):** `bronze_rows
+  158,625 · denied 159 · duplicate_copies 120 · events 158,346 · skus 34,448 ·
+  inserted 34,448 · updated 0 · deleted 0 · chain_breaks 1,423`. Event log
+  158,346 rows = distinct ids, 0 denylisted. Stock **34,448 / 993,982** = the
+  laptop; `extra=0 missing=0` against the window recomputation. Chain report
+  **1,423 / 237 / 26 SKUs / 27 units**, units sold **112,650**. Change feed v1
+  `(34,448, 0, 0)` = log. **Tie guard:** without the denylist **53** ties in the
+  batch and **53** against the log — every contaminated event sits exactly on a
+  clean event's `seq`; with it `{}`. Re-run: commits 2/2/2 unchanged.
+- **Delist produce + delete branch:** Bronze read 100 new messages in one
+  batch (topic end 158,725: +35 / +33 / +32 per partition), 0 quarantined,
+  `deletes = labelled_rows = delist_scope_rows = 100`, distinct 158,499, clean
+  158,446, units still 112,650; re-run nothing. Silver **batch 1:** `100 rows ·
+  0 denied · 100 events · 100 newest are D · inserted 0 · deleted 100 · chain
+  breaks 0`; stock **34,348 / 991,530** = the laptop; change feed v2
+  `(0, 0, 100)`; chain report unchanged (no delisted SKU is a broken one, as
+  predicted); re-run commits 3/3/3 unchanged.
+- **Dims, production run of the new code:** only `added column held`; nothing
+  new ×3; held 0/0/0; all 15 nights = the generator; Silver = night 5 on every
+  column; feed = log; re-run versions `{7, 6, 8}` and 15 log rows unchanged;
+  rejected-rows table empty.
+- **exp_03 (A–F unchanged, then):** G1 `{'duplicate_keys': 1}` refused; G2
+  `{'bad_rows': '60 of 2,995 (2.0%)', 'bad__seller_zip_code_prefix': 60}`
+  refused; Silver kept the clean night, nothing logged; corrected night
+  `+0 ~50 -100`. **H:** `+0 ~49 -100, held 1`; seller `056b4ada…` still in
+  Silver with its old values (zip 26379, queimados/RJ, last changed
+  2017-08-30); one rejected row `ABCDE`; the corrected re-delivery (newer file
+  time) re-applied the newest night: `+0 ~1 -0, held 0`, rejected rows cleared
+  — **Session 8's correction path, driven for the first time.**
+- **Alarms, each seen firing by email:** the Job ran green (4 tasks, 5 m 58 s);
+  a deliberate failing task (`alarm_test`) → email from
+  `prod-monitoring@databricks.com` within a minute, naming the task; each SQL
+  alert, set to `>= 0` and run → **Triggered** + email from
+  `noreply@databricks.com`; both queries return 0 on today's data; set back
+  to `> 0` → OK. **Free Edition sends both kinds of email** (was unverified).
+- `ruff` clean, `pytest` 152 passed.
+
+### Built but NOT verified
+- **The CDC MERGE's update clause and its "older event ignored" path have
+  never run on live data:** the first build was one batch (every SKU new →
+  insert), the second only deletes. exp_04 (S10) drives both.
+- **The tie guard inside the stream** never raised `BatchRefused`; only the
+  same function, read-only, over Bronze (Verify 5).
+- **The alarms on a real condition:** both SQL alerts were fired by the `>= 0`
+  trick, not by a real lag or a real held row in production (H's held row was
+  in a scratch log).
+- **An older corrected night is reported, not applied** — still never driven.
+
+### Not done
+- The delist run's `run id` was not recorded here; it is in Bronze:
+  `SELECT DISTINCT cast(try_element_at(map_from_entries(_kafka_headers),
+  'ledgerline.run_id') AS STRING) FROM workspace.bronze.inventory_cdc WHERE op = 'D'`.
+
+### Incidents (1 new)
+1. The CDC feed's before/after images break their own `seq` order on 237
+   SKUs; every check passed because every check read deltas. Fixed in Silver
+   by counting, not repairing; the generator pinned.
+
+### Decisions (7 new, plus one revision)
+Silver CDC: one stream, two tables, every write idempotent by its own
+condition; mirror the source's after-images and count the broken chain; hard
+delete with the `seq` guard (late update after a delete bound to exp_04); a
+`seq` tie fails the batch; 100 delists on the live topic after the first
+build; held dims rows replaced per night; **the coverage map** — every
+Databricks / Snowflake / dbt topic bound to a session as built or theory
+(`docs/coverage.md`, at the human's request: "a strict plan now, nothing to
+skip like exp_02"). **Revision:** the "nothing happened" alarm watches Silver
+falling behind Bronze, not the calendar — nights land by hand here, so a
+26-hour calendar alarm would never be green.
+
+### Seen, recorded rather than guessed
+- **A failed serverless job task ran twice** ("2 attempts") with no retry
+  configured — presumably a default retry on serverless. Harmless here: every
+  task is safe to repeat (Bronze `txnVersion`, Silver's idempotent MERGEs, the
+  dims merge log). It also means a refused night fails twice before the email.
+- **`silver.seller` v7 `SET TBLPROPERTIES`
+  (`delta.workloadBasedColumns.deltaFileStatistics = seller_zip_code_prefix`)
+  and v8 `COMPUTE STATS`, 16 s apart** — commits nobody here made; probably
+  Predictive Optimization choosing a column our queries filter on (the zip
+  format check) and collecting statistics. The likely answer to Session 8's
+  "two commits on `silver.customer`"; `userName` still not read.
+- **"Run task" (▶ on one task) disables the other tasks for that run**; the
+  failure email still fires for the job.
+- The new SQL alert editor runs the **saved** alert, not unsaved edits; its
+  column list is empty until the query has run in the editor.
+
+### Cost
+Databricks $0 (Free Edition; Job, serverless tasks, SQL warehouse for the
+alerts). Confluent: 100 messages. AWS: nothing new.
+
+### Learning check
+**Skipped by choice, logged.** The human, 2026-10-02: "skip the test" — the
+priority is a strict plan and finishing the project. A plain-words summary was
+given twice (the second longer, with examples, on request), then the real row
+shapes of the event log and the stock table. Five questions were prepared and
+not answered; they are parked in `learning.md`: the CDC MERGE from memory
+(**B3**, already in the bank, missed S4), and **B26–B29** — in-batch dedup in
+PySpark, `NOT MATCHED BY SOURCE` on today's 100-row delete batch (was deferred
+**D1**), two rows for one SKU without dedup (was deferred **D2**), and why the
+112,650 tie-out could not see the broken chain. D1 and D2 move from `deferred`
+to `parked`: Session 9 made them answerable.
+
+### Hands-on checks (offered)
+- `DESCRIBE HISTORY workspace.silver.inventory` — v1 MERGE (34,448 inserted),
+  v2 MERGE (100 deleted): `numTargetRowsInserted` / `numTargetRowsDeleted`.
+- `SELECT * FROM table_changes('workspace.silver.inventory', 2)` — the 100
+  `delete` rows, as the Gold export will see them.
+- `SELECT * FROM workspace.silver.inventory_cdc_log` — the two batches.
+- One broken SKU, by `seq`: `SELECT seq, op, prev_stock_qty, stock_qty FROM
+  workspace.silver.inventory_events WHERE sku_key LIKE 'eba7488e%' ORDER BY seq`
+  — the 86 that appears before the restock that makes it.
+- `DESCRIBE HISTORY workspace.silver.seller` — `userName` on v5 (OPTIMIZE) and
+  v7/v8 (stats): Databricks or us?
+- Jobs & Pipelines → `ledgerline-silver` → Runs (the green run, the failed
+  `alarm_test` run, tomorrow's 06:00); Alerts → both alerts' run history.
+
+### Next
+**Session 10 — Silver orders (`MERGE INTO` on `order_id`), and `exp_04`.**
+The last Silver pattern: order events fan out (`created` / `approved` /
+`shipped` / `delivered`), so an order arrives and then updates three times —
+the MERGE that makes the S6/S7 order pipeline mean something. Silver is then
+complete, and Drill 2 follows. **Every S10 row of `docs/coverage.md` is bound
+here** — built this session or carried by name, never dropped:
+- **Silver orders** — `MERGE INTO` on `order_id`, the latest lifecycle state per
+  order, dedup on `event_id`.
+- **`RESTORE` / repair by time travel** — ends exp_04's contamination part with
+  the production fix (Session 6 named it as the alternative to recreating a topic).
+- **A concurrent-write conflict** — two MERGEs into one table at once, the
+  exception Delta raises, and what isolation level allows (a CLAUDE.md danger
+  zone never triggered).
+- **Delta `CHECK` / `NOT NULL` constraints** — enforced, unlike Snowflake's
+  primary key (15 minutes).
+- **Theory hooks** (end of session, `learning.md` C11): classic clusters (sizing,
+  autoscaling, spot, job vs all-purpose); Kafka internals and log compaction;
+  Debezium in operation.
+- **`exp_04` (due S10, by name)** — on scratch tables with production's
+  `make_batch_writer` switches (`dedup`, `seq_guard`, `refuse`):
+  - no in-batch dedup: a batch with two rows for an *existing* SKU → Delta
+    refuses ("multiple source rows matched"); for a *new* SKU → inserted twice,
+    no error (B25 / D2, unverified expectation);
+  - no `seq` guard + out-of-order emission → an older event clobbers newer stock;
+  - **a late update after a delete resurrects the SKU** (hard delete forgets
+    the `seq`) → decide tombstone vs ordering assumption with evidence;
+  - the update clause and "older event ignored" path, which live data has never
+    exercised;
+  - deliberate contamination (Session 5's partial run) → the tie guard fires
+    *in the stream*, the job fails, the email arrives, a denylist entry fixes it
+    — the production response end to end, closed by `RESTORE`. Decide first:
+    live topic (the S6 plan) or a scratch topic.
+- Parked questions from S9 (B3, B26–B29) are fair game where S10's work touches
+  them (exp_04 answers B28 by running it).
+
+**After S10:** Drill 2, then S11 → S21 exactly as `docs/coverage.md` section 6
+lists them. Gate before S13: every Databricks-only row done before the
+Snowflake trial starts.
+
+**Carried, each a claim to re-check:**
+- Confirm the `alarm_test` task is gone from the Job (else every 06:00 run
+  fails) and both alerts have their daily schedule.
+- **For the Gold window:** Silver's change feed emits `delete` rows on dims
+  *and* inventory now; the Session 6 export plan (`insert` /
+  `update_postimage` only) would drop every one. dbt snapshot `hard_deletes`
+  still to decide.
+- Deletion vectors (`SHOW TBLPROPERTIES`); the OPTIMIZE / stats `userName`.
+- CI: the Actions log for the producer tests — still not seen.
+- Topics delete their oldest messages from ~**2026-12-25**; the Git-folder
+  token expires the same day.
+- Read-only Kafka identity for Bronze; dev-only Kafka credential.
+- Scratch leftovers: `workspace.exp03_{bronze,silver}`,
+  `workspace.exp03h_{bronze,silver}` (rebuilt by each exp_03 run), plus the
+  Session 8 and Drill 1 lists.

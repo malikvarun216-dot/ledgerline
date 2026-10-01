@@ -2010,3 +2010,62 @@ D's rows — with nothing, if the correction fixed them.
   re-delivery would leave the fixed row looking still-held, and the alarm query
   would have to work out which attempt is current. The history of earlier
   attempts stays in the table's Delta history (30 days).
+
+## Coverage map: every Databricks / Snowflake / dbt topic gets a row, a weight and a session — built, or taught as theory (Session 9)
+
+**In plain words:** the human asked whether the project covers what Databricks
+and Snowflake interviews and production actually ask about. Honest answer: the
+data-engineering core yes, the analytics, governance, loading and performance
+sides only partly. So every topic worth knowing now has one row in
+`docs/coverage.md` with an interview weight and a session. Where the free tiers
+or the project's data make a topic impossible or dishonest to build, it is
+**taught as theory** at a named session (a short note and one interview question
+in `learning.md`), so nothing is missing without being known to be missing. The
+file is binding: a session reads its rows at the start, the same way the
+experiment tracker works since `exp_02` went unscheduled.
+
+- Chosen: `docs/coverage.md` as a living status table (built ✓ / build B /
+  build-if-allowed B? / theory T / skip X, each bound to a session), CLAUDE.md
+  start-of-session item 6 to read it, theory notes in `learning.md` Part C
+  "C11. Theory-only topics", and a calendar rule — every Databricks-only row is
+  done before the Snowflake trial starts.
+- Chosen: the Snowflake trial is created as **Enterprise edition** — masking,
+  row access policies, multi-cluster warehouses and materialized views need it.
+- Origin, recorded honestly: the map started as a proposal from a conversation
+  outside this session, reviewed here against the repo. Four corrections were
+  made before adopting it:
+  - **Liquid clustering moves from S10 (Silver orders) to S21** on a large
+    sample table. Silver orders will be one file, so "files read" would be 1 vs
+    1 — and Session 0 already decided Olist is too small for a pruning demo.
+  - **Photon is theory only.** Free Edition is serverless, and serverless always
+    runs Photon; there is nothing to compare against.
+  - **Jobs and alerts are built**, not planned (S9).
+  - **Free Edition features the proposal assumed** — UC groups and service
+    principals, Delta Sharing, system tables, feature engineering, UniForm read
+    by Snowflake — are **B?**: verified first, turned into T with a recorded
+    finding if refused.
+- Added in review, missing from the proposal: Spark performance (joins, skew,
+  AQE, query profile — ★★★, no session built it); `AUTO CDC … STORED AS SCD TYPE
+  2` vs the dbt snapshot; `COPY INTO` with a re-delivered file of new content
+  (the cross-platform twin of Drill 1's Auto Loader skip); Snowpipe's S3 event
+  notification and 14-day history; suspending every Snowflake Task as a cost
+  guard; Snowpark (small); and every item of the existing plan the proposal's
+  session list had left out (S10 Silver orders + exp_04, S11 windowed streaming
+  and DLT, Drills 2 and 3, the CDF export including `delete` rows).
+- Rejected: **a new session per topic.** Breaks the Snowflake trial's 30-day
+  calendar and the human's "finish sooner" goal. Additions fold into existing
+  sessions; only two optional sessions are new (S12b ML features, S20 interop).
+- Rejected: **build everything, A/B where possible.** The human, explicitly:
+  not every topic needs building; what matters is knowing what exists and how an
+  interview asks about it. A theory hook costs ~10 minutes; building blocked or
+  dishonest features would be coverage for its own sake, against the thesis.
+- Rejected: **skip the analytics, governance and ML side.** Leaves common
+  interview questions unanswerable, and Free Edition already offers most of it.
+- Rejected: **ML model tuning, serving, vector search.** No honest use here. ML
+  stays only as the pipeline feeding a model — point-in-time features, no
+  training on future data — which is a data-engineering problem.
+- Rejected: **keep the plan in `### Next` only.** That is where `exp_02` was
+  lost: a promise with no binding is not a plan.
+- Trade-off: about 10–12 extra hours across sessions plus two optional
+  sessions, and S13–S21 plus Drill 3 (~10 sessions) inside 30 trial days.
+  Accepted, with the gate that Databricks-only work finishes first.

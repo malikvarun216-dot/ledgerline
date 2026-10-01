@@ -55,9 +55,23 @@ deletes arrive in-band as `op = 'D'`.
 
 ## Status
 
-**Session 1 of 21.** Source generators built and tested; no cloud account exists
-yet, so everything runs locally against offline sinks.
+**Session 9 done; Session 10 next** (2026-10-02). Live on Confluent Cloud
+(`orders`, `inventory.cdc`), S3 (nightly dimension dumps) and Databricks Free
+Edition:
 
+- **Bronze** — every source, exactly once (Kafka offsets + `txnVersion`;
+  Auto Loader + `replaceWhere`), with quarantine and provenance headers.
+- **Silver** — dimensions by snapshot MERGE with delete-by-absence (a bad row is
+  held, not the night); inventory by CDC MERGE (op flags, in-batch dedup, `seq`
+  guard, a tie guard). Silver orders is Session 10.
+- **Alarms** — a daily Databricks Job with a failure email and two SQL alerts,
+  each seen firing.
+- **Experiments** — 3 of 6 deliberate failures done (exactly-once replay,
+  partition overwrite, the MERGE gap).
+- **Not started** — Gold (Snowflake + dbt), Airflow.
+
+The remaining plan — every Databricks / Snowflake / dbt topic, built or taught as
+theory, each bound to a session — is [`docs/coverage.md`](docs/coverage.md).
 See [`docs/progress.md`](docs/progress.md) for what has been *verified* as
 opposed to merely built — the distinction is maintained deliberately.
 
@@ -106,7 +120,11 @@ a check.
 ### 3. Tests and lint
 
 ```bash
-python -m pytest tests/ && python -m ruff check .
+python -m pytest tests/
+```
+
+```bash
+python -m ruff check .
 ```
 
 ---
@@ -121,7 +139,8 @@ working notes rather than project record, so it is not in the repo:
 |---|---|
 | [`decisions.md`](docs/decisions.md) | Every architectural choice **with its rejected alternative** |
 | [`incidents.md`](docs/incidents.md) | Every bug and deliberate breakage, each ending in a prevention rule |
-| [`progress.md`](docs/progress.md) | Session log — what was *verified*, not what was built |
+| [`progress.md`](docs/progress.md) | Session log — what was *verified*, not what was built; the experiment tracker |
+| [`coverage.md`](docs/coverage.md) | The plan: every Databricks / Snowflake / dbt topic with a weight and a session — built, or theory |
 | [`runbook.md`](docs/runbook.md) | Procedures for known failure modes, including the cost emergency |
 
 Six of the incidents will be **deliberate** — patterns broken on purpose to
@@ -132,13 +151,16 @@ present before the fix.
 
 ## Cost
 
-Target **~$22 total**. Confluent Basic is $0 at rest and the Snowflake trial is
-$0; Databricks is the only real spend.
+Target **~$22 total**. Databricks runs on **Free Edition** ($0, serverless only)
+since Session 6; Confluent Basic is about $0.01/month at rest and cents per full
+produce; S3 is cents; the Snowflake trial is $0 but its **30-day calendar** is
+the binding limit. AWS budget alarms ($20/month, $2/day) exclude credits.
 
-The risk is a forgotten cluster, not the hourly rate — **a single node left
-running a week is ~$120, six times the entire budget.** Hence 10-minute
-auto-terminate on every cluster, single-node dev, serverless where possible, and
-budget alarms configured before any compute runs.
+The risk is no longer a forgotten cluster (there are none on Free Edition —
+though **a single node left running a week is ~$120, six times the budget**,
+stays true knowledge). It is resources created as side effects — a Flink pool
+from a new Confluent environment, a Snowflake warehouse without auto-suspend,
+a Snowflake Task left running.
 
 If spend looks wrong, `docs/runbook.md` has the emergency procedure.
 
