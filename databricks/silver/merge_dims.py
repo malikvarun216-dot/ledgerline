@@ -12,9 +12,14 @@
 # MAGIC **Safe to "Run all" at any time.** A night already applied is not applied again (the merge log
 # MAGIC `silver.dims_merge_log` records each one), so a re-run with no new night writes nothing.
 # MAGIC
-# MAGIC **If a night is refused** — a bad value, a duplicate key, or more than 5% of the table deleted —
-# MAGIC nothing is merged for that dimension and Silver keeps the previous night. For a *real* mass
-# MAGIC deletion, add the night to `ALLOW_MASS_DELETE` below, in a commit, so the decision is on record.
+# MAGIC **A bad row is held, not the night** (Session 9): the rest of the night is applied, that key keeps
+# MAGIC its previous values (and is never deleted for it), and the row is copied to
+# MAGIC `silver.dims_rejected_rows`. A corrected re-delivery of the night applies it.
+# MAGIC
+# MAGIC **A night is refused whole** when the file looks broken — more than 1% bad rows, a NULL or duplicate
+# MAGIC key, no rows — or would delete more than 5% of the table. Nothing is merged for that dimension and
+# MAGIC Silver keeps the previous night. For a *real* mass deletion, add the night to `ALLOW_MASS_DELETE`
+# MAGIC below, in a commit, so the decision is on record.
 
 # COMMAND ----------
 
@@ -30,17 +35,19 @@ ALLOW_MASS_DELETE = {"customer": [], "product": [], "seller": []}
 
 
 def run_all():
-    refused = []
+    """Returns rows held this run, per dimension. A refused night raises — the job's failure alarm."""
+    refused, held = [], {}
     for dim in DIMS:  # one dimension's bad night does not hold back the others
         try:
-            apply_dim(dim, allow_mass_delete=ALLOW_MASS_DELETE[dim])
+            held[dim] = apply_dim(dim, allow_mass_delete=ALLOW_MASS_DELETE[dim])
         except (NightRefused, MassDeleteRefused) as e:
             refused.append(str(e))
     if refused:
         raise RuntimeError("\n".join(refused))
+    return held
 
 
-run_all()
+print(f"rows held this run: {run_all()}")
 
 # COMMAND ----------
 
@@ -164,6 +171,11 @@ assert log_rows_after == log_rows, "a re-run with no new night added to the merg
 # COMMAND ----------
 
 display(spark.table(MERGE_LOG).orderBy("dimension", "dump_date", "applied_at"))
+
+# COMMAND ----------
+
+# Rows held back from the last apply of each night. Empty while every file is clean.
+display(spark.table(REJECTED).orderBy("dimension", "dump_date", "key"))
 
 # COMMAND ----------
 

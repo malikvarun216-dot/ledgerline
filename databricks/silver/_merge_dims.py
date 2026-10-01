@@ -23,9 +23,13 @@
 # MAGIC The last row is right **only because every file is a full snapshot**: absent means gone. Three
 # MAGIC guards follow from that one fact (decisions.md, Session 8):
 # MAGIC 1. a truncated file would delete real rows → **delete circuit breaker**, at most 5% per night;
-# MAGIC 2. setting a bad row aside would delete it from Silver → a bad value **fails the whole night**;
-# MAGIC 3. a duplicate key means a broken file → **fail**, never pick one (the CDC path, Session 9, is
-# MAGIC    the opposite: several rows per key are normal there).
+# MAGIC 2. setting a bad row aside would delete it from Silver → a bad row is **held, not removed**: it
+# MAGIC    stays in the MERGE source flagged `_ok = false`, so its key is present (no delete) but it may
+# MAGIC    not update or insert. Copied to `silver.dims_rejected_rows`. **Filter the changes, never the
+# MAGIC    keys.** (Session 9; Session 8 refused the whole night instead.)
+# MAGIC 3. a file that looks broken — more than 1% bad rows, a NULL or duplicate key, no rows — is
+# MAGIC    **refused whole**; a duplicate key is never resolved by picking one (the CDC path is the
+# MAGIC    opposite: several rows per key are normal there).
 
 # COMMAND ----------
 
@@ -34,7 +38,11 @@ from pyspark.sql import functions as F
 BRONZE = "workspace.bronze"
 SILVER = "workspace.silver"
 MERGE_LOG = f"{SILVER}.dims_merge_log"
+REJECTED = f"{SILVER}.dims_rejected_rows"
 MAX_DELETE_FRACTION = 0.05
+# Above this share of bad rows the file itself is broken (a shifted column, a wrong delimiter), not a
+# few rows in it: the whole night is refused. Same shape as Snowflake's ON_ERROR = SKIP_FILE_<n>%.
+MAX_BAD_FRACTION = 0.01
 
 # Change Data Feed records which rows each commit changed. It only records from the moment it is
 # on, so it is set at creation. Old files kept 30 days (Session 7's rule) — the change feed's own
@@ -92,7 +100,7 @@ LINEAGE = ["_first_seen_dump_date", "_last_changed_dump_date", "_source_file", "
 
 
 class NightRefused(Exception):
-    """A night's file is unfit for a snapshot MERGE. Silver keeps the previous night."""
+    """A night's file looks broken as a whole. Silver keeps the previous night."""
 
 
 class MassDeleteRefused(Exception):
@@ -128,15 +136,28 @@ def bad_value(column, kind):
     return "false"
 
 
+def unfit(column, kind):
+    """SQL true when this column makes the row unfit to apply: a bad value, or a required one missing."""
+    sql = bad_value(column, kind)
+    return f"({sql} OR {column} IS NULL)" if column in REQUIRED else sql
+
+
+def bad_row(dim):
+    """SQL true when any column of the row is unfit. Such a row is HELD, never removed."""
+    return " OR ".join(unfit(c, kind) for c, kind in DIMS[dim]["columns"].items())
+
+
 def bronze_night(dim, night, bronze=BRONZE):
     return spark.table(f"{bronze}.{dim}").where(F.col("dump_date") == night)
 
 
 def check_night(dim, raw):
-    """Count every way this night's file is unfit for a snapshot MERGE, in one pass.
+    """Count, in one pass, the bad rows and every way the file as a whole looks broken.
 
-    Returns (stats, problems). `problems` must be empty. Nothing is ever filtered out instead: in
-    this MERGE a row missing from the source is a delete, so dropping a bad row deletes it.
+    Returns (stats, problems). `problems` must be empty, or the whole night is refused: no rows, a NULL
+    or duplicate key, or more than MAX_BAD_FRACTION bad rows. Fewer bad rows are `stats["held"]`:
+    applied as "no change" for that key, never filtered out — in this MERGE a row missing from the
+    source is a delete, so dropping a bad row deletes it (exp_03 D).
     """
     spec = DIMS[dim]
     key = spec["key"]
@@ -144,6 +165,7 @@ def check_night(dim, raw):
         F.count(F.lit(1)).alias("rows"),
         F.count_distinct(key).alias("distinct_keys"),
         F.sum(F.col(key).isNull().cast("int")).alias("null_keys"),
+        F.sum(F.expr(bad_row(dim)).cast("int")).alias("held"),
     ]
     for column, kind in spec["columns"].items():
         aggs.append(F.sum(F.expr(bad_value(column, kind)).cast("int")).alias(f"bad__{column}"))
@@ -153,7 +175,7 @@ def check_night(dim, raw):
             aggs.append(F.sum((F.length(column) < 5).cast("int")).alias(f"padded__{column}"))
     stats = {k: (v or 0) for k, v in raw.agg(*aggs).first().asDict().items()}  # sum of 0 rows is NULL
 
-    problems = {k: v for k, v in stats.items() if k.startswith(("bad__", "missing__")) and v}
+    problems = {}
     if stats["rows"] == 0:
         problems["empty_night"] = 0
     if stats["null_keys"]:
@@ -161,19 +183,44 @@ def check_night(dim, raw):
     duplicates = stats["rows"] - stats["null_keys"] - stats["distinct_keys"]  # distinct skips NULL
     if duplicates:
         problems["duplicate_keys"] = duplicates
+    if stats["rows"] and stats["held"] / stats["rows"] > MAX_BAD_FRACTION:
+        problems["bad_rows"] = f"{stats['held']:,} of {stats['rows']:,} ({stats['held'] / stats['rows']:.1%})"
+        problems.update({k: v for k, v in stats.items() if k.startswith(("bad__", "missing__")) and v})
     stats["padded_zips"] = sum(v for k, v in stats.items() if k.startswith("padded__"))
     return stats, problems
 
 
 def typed_night(dim, raw):
-    """The night as Silver will hold it: key, typed columns, and where it came from."""
+    """The night as Silver will hold it: key, typed columns, where it came from, and `_ok` — false for a
+    held row, which stays in the source (its key protects it from the delete) but changes nothing."""
     spec = DIMS[dim]
     return raw.select(
         F.col(spec["key"]),
         *[F.expr(typed_value(c, kind)).alias(c) for c, kind in spec["columns"].items()],
         F.to_date("dump_date").alias("_dump_date"),
         F.col("_source_file"),
+        (~F.expr(bad_row(dim))).alias("_ok"),
     )
+
+
+def rejected_rows(dim, raw):
+    """One row per (key, unfit column) of this night, with the raw text exactly as delivered."""
+    key = DIMS[dim]["key"]
+    parts = [
+        raw.where(F.expr(unfit(c, kind))).select(
+            F.lit(dim).alias("dimension"),
+            F.to_date("dump_date").alias("dump_date"),
+            F.col(key).alias("key"),
+            F.lit(c).alias("column"),
+            F.col(c).alias("raw_value"),
+            F.col("_source_file"),
+        )
+        for c, kind in DIMS[dim]["columns"].items()
+    ]
+    out = parts[0]
+    for part in parts[1:]:
+        out = out.unionByName(part)
+    return out.withColumn("recorded_at", F.current_timestamp())
 
 # COMMAND ----------
 
@@ -212,7 +259,32 @@ def create_merge_log(log=MERGE_LOG):
         f"""CREATE TABLE IF NOT EXISTS {log} (
             dimension STRING, dump_date DATE, bronze_modified_at TIMESTAMP, source_rows BIGINT,
             inserted BIGINT, updated BIGINT, deleted BIGINT, rows_after BIGINT,
-            silver_version BIGINT, padded_zips BIGINT, applied_at TIMESTAMP)"""
+            silver_version BIGINT, padded_zips BIGINT, applied_at TIMESTAMP, held BIGINT)"""
+    )
+    # Added in Session 9; lines written before it read NULL ("not counted"), not 0.
+    if "held" not in spark.table(log).columns:
+        spark.sql(f"ALTER TABLE {log} ADD COLUMNS (held BIGINT)")
+        print(f"{log}: added column held")
+
+
+def create_rejected(rejected=REJECTED):
+    spark.sql(
+        f"""CREATE TABLE IF NOT EXISTS {rejected} (
+            dimension STRING, dump_date DATE, key STRING, column STRING, raw_value STRING,
+            _source_file STRING, recorded_at TIMESTAMP)"""
+    )
+
+
+def record_rejected(dim, night, raw, held, rejected=REJECTED):
+    """Replace this (dimension, night)'s held rows with tonight's — written with replaceWhere, the rule
+    for a re-writable unit (exp_02), so a corrected re-delivery that holds nothing clears them. Skipped
+    when there is nothing to write and nothing to clear: an empty overwrite is still a commit."""
+    unit = f"dimension = '{dim}' AND dump_date = DATE'{night}'"
+    if not held and not spark.table(rejected).where(unit).limit(1).count():
+        return
+    (
+        rejected_rows(dim, raw).write.format("delta").mode("overwrite")
+        .option("replaceWhere", unit).saveAsTable(rejected)
     )
 
 # COMMAND ----------
@@ -231,7 +303,8 @@ def merge_sql(target, source, dim, *, delete_missing=True, only_changed=True):
     # <=> is "equal, counting two NULLs as equal". Plain = gives NULL for NULL = NULL, and
     # NOT (NULL) is NULL, so a row with any NULL would never count as changed.
     same = " AND ".join(f"t.{c} <=> s.{c}" for c in cols)
-    matched = f"WHEN MATCHED AND NOT ({same})" if only_changed else "WHEN MATCHED"
+    # s._ok: a held row matches (so it is not deleted) but may not change anything.
+    matched = f"WHEN MATCHED AND s._ok AND NOT ({same})" if only_changed else "WHEN MATCHED AND s._ok"
     sets = [f"t.{c} = s.{c}" for c in cols] + [
         "t._last_changed_dump_date = s._dump_date",
         "t._source_file = s._source_file",
@@ -246,7 +319,7 @@ def merge_sql(target, source, dim, *, delete_missing=True, only_changed=True):
         f"USING {source} AS s\n"
         f"ON t.{key} = s.{key}\n"
         f"{matched} THEN UPDATE SET {', '.join(sets)}\n"
-        f"WHEN NOT MATCHED THEN INSERT ({', '.join(insert_cols)}) VALUES ({', '.join(insert_vals)})"
+        f"WHEN NOT MATCHED AND s._ok THEN INSERT ({', '.join(insert_cols)}) VALUES ({', '.join(insert_vals)})"
     )
     if delete_missing:
         sql += "\nWHEN NOT MATCHED BY SOURCE THEN DELETE"
@@ -339,13 +412,19 @@ def plan_nights(dim, bronze=BRONZE, log=MERGE_LOG):
     return apply, report
 
 
-def apply_dim(dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER, log=MERGE_LOG):
-    """Bring silver.<dim> up to Bronze's newest night. Each night: contract, breaker, MERGE, log.
+def apply_dim(
+    dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER, log=MERGE_LOG, rejected=REJECTED
+):
+    """Bring silver.<dim> up to Bronze's newest night. Each night: contract, breaker, MERGE, held rows,
+    log. Returns the number of rows held across the nights applied.
 
-    `bronze`, `silver` and `log` exist so exp_03 can run this exact function on scratch tables.
+    `bronze`, `silver`, `log` and `rejected` exist so exp_03 can run this exact function on scratch
+    tables.
     """
     table = f"{silver}.{dim}"
     create_silver(table, dim)
+    create_rejected(rejected)
+    held_total = 0
     apply, older = plan_nights(dim, bronze, log)
     for night in older:
         print(f"{dim:9} {night}: changed in Bronze, but older than what Silver shows — NOT applied")
@@ -362,6 +441,8 @@ def apply_dim(dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER, log=ME
         typed = typed_night(dim, raw)
         current, doomed = check_deletes(table, typed, dim, allowed=night in allow_mass_delete)
         result = merge_night(table, typed, dim)
+        record_rejected(dim, night, raw, stats["held"], rejected)
+        held_total += stats["held"]
         rows_after = spark.table(table).count()
 
         # Built inside Spark: the Bronze file time is never pulled into Python and written back,
@@ -381,13 +462,15 @@ def apply_dim(dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER, log=ME
             n(result["version"], "silver_version"),
             n(stats["padded_zips"], "padded_zips"),
             F.current_timestamp().alias("applied_at"),
+            n(stats["held"], "held"),
         ).write.mode("append").saveAsTable(log)
         share = f"{doomed / current:.2%} of {current:,}" if current else "empty table"
         print(
             f"{dim:9} {night}: {stats['rows']:>6,} rows in file -> +{result['inserted']:,} "
-            f"~{result['updated']:,} -{result['deleted']:,} ({share}); {rows_after:,} in Silver; "
-            f"{stats['padded_zips']:,} zips padded; version {result['version']}"
+            f"~{result['updated']:,} -{result['deleted']:,} ({share}); {stats['held']:,} held; "
+            f"{rows_after:,} in Silver; {stats['padded_zips']:,} zips padded; version {result['version']}"
         )
+    return held_total
 
 # COMMAND ----------
 
@@ -402,9 +485,14 @@ def business_columns(dim):
 
 
 def compare_to_night(table, typed, dim):
-    """(rows in Silver but not in the night, rows in the night but not in Silver). (0, 0) = equal."""
-    cols = business_columns(dim)
-    silver, night = spark.table(table).select(*cols), typed.select(*cols)
+    """(rows in Silver but not in the night, rows in the night but not in Silver). (0, 0) = equal.
+
+    Held keys are left out on both sides: Silver keeps their previous values on purpose.
+    """
+    cols, key = business_columns(dim), DIMS[dim]["key"]
+    held = typed.where(~F.col("_ok")).select(key)
+    silver = spark.table(table).select(*cols).join(held, key, "left_anti")
+    night = typed.where("_ok").select(*cols)
     return silver.exceptAll(night).count(), night.exceptAll(silver).count()
 
 
