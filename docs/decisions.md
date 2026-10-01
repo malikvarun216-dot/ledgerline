@@ -2069,3 +2069,126 @@ experiment tracker works since `exp_02` went unscheduled.
 - Trade-off: about 10–12 extra hours across sessions plus two optional
   sessions, and S13–S21 plus Drill 3 (~10 sessions) inside 30 trial days.
   Accepted, with the gate that Databricks-only work finishes first.
+
+## Silver orders: one row per order, one column per lifecycle step — not "the last event wins" (Session 10)
+
+**In plain words:** an order sends up to four events (`created`, `approved`,
+`shipped`, `delivered`, or a synthetic `canceled` / `unavailable`). Silver keeps
+one row per order with **a timestamp column for each step**; each event fills
+its own column, and the status is the furthest step reached. The obvious
+alternative — treat it like the stock feed, keep the newest event and let it
+overwrite the row — gives the wrong status on 93 orders, because Olist's own
+timestamps sometimes run backwards.
+
+- Chosen: `silver.orders` (an *accumulating snapshot*, Kimball's name for a row
+  that grows as a process moves) + `silver.order_items` (one row per unit, from
+  the `created` event's items). Per batch: one copy per `event_id` → refuse a
+  step with two different times → fold the batch to one row per order (a
+  `groupBy` with `max(CASE …)` per step — the in-batch dedup for this MERGE) →
+  `MERGE … ON order_id` where `WHEN MATCHED` fires only if the batch brings a
+  step Silver lacks, each column `coalesce(t, s)`, status recomputed → items
+  insert-only on `(order_id, order_item_id)` → one log line with `txnVersion`.
+- Measured on the laptop first (pinned in `tests/test_headline_numbers.py`):
+  - "the last event to arrive wins" disagrees on **93** orders: 61 would read
+    `approved` for an order that was delivered (approval timestamped after
+    delivery in Olist), 23 `shipped` for delivered, 9 `approved` for shipped;
+  - **1,305** orders have two steps at the same second (often `created` and
+    `approved`), so an `event_ts` used as a `seq` with `s.seq > t.seq` drops one
+    of them when they land in different batches — a tie is not "greater";
+  - **166** orders arrive with `shipped` first (carrier date before purchase).
+    A column per step does not care: arrival order cannot change the result, so
+    there is no `seq` and no guard to get wrong. The opposite of the CDC MERGE.
+  - A first count said 104, not 93: the laptop's sort broke those 1,305 ties at
+    random. Ties broken by arrival order (the Kafka offset), it is 93 every run.
+- Chosen: **`status` is derived from the steps**, precedence `canceled`,
+  `unavailable`, `delivered`, `shipped`, `approved`, `created`. The status Olist
+  printed on the row is kept as `source_status` and not used: every event
+  carries the order's **final** status, a fact from the future while the replay
+  runs, and it disagrees on **623** orders — 314 `invoiced` and 301
+  `processing` (no event says either) and 8 `delivered` with no delivery time.
+- Rejected: **the newest event per order overwrites the row** (the S9 CDC
+  shape). Wrong on 93 orders, drops a step on the 1,305 ties, and loses `items`
+  and earlier times on every update — the newest event carries neither.
+- Rejected: **an order event log beside the snapshot** (as inventory has).
+  Inventory needs every decrement for the reconciliation and the chain check;
+  here every event *is* one column, so the snapshot loses nothing but re-sends
+  and `produced_at`. Gold's incremental reads `_merged_at`.
+- Rejected: **items as an array column on `orders`.** Gold would explode it on
+  every read, and the reconciliation is per SKU, at the unit grain.
+- Trade-off: a new event type needs a new column (schema change); a generic
+  "latest event" table would not. Accepted — the lifecycle is fixed by Olist.
+
+## Silver orders' first run reads Bronze from version 0, three files a batch (Session 10)
+
+**In plain words:** by default a new stream over a Delta table reads the whole
+table as it is now in one go. Bronze `orders` already holds every event, so
+every order would reach Silver complete in one batch: 99,441 inserts, zero
+updates — the MERGE would be an insert in disguise, exactly what Session 1
+fanned the events out to avoid. Starting at Bronze's version 0 makes Silver
+read Bronze's history commit by commit, as it would have if Silver had been
+running since Bronze's first batch.
+
+- Chosen: `startingVersion = 0`, `maxFilesPerTrigger = 3` (Bronze wrote each
+  Kafka batch as 3 files, one per partition), first run only — after that the
+  checkpoint decides. Silver's log records the Bronze `_batch_id` range each
+  batch read; the verification recomputes inserts and updates per Bronze batch
+  from Bronze alone and must match exactly.
+- Why it is possible: Bronze's 8 original commits were replaced by an automatic
+  `OPTIMIZE` (v9, 2026-09-27), but their files are kept until VACUUM — 30 days
+  since Session 7's retention setting. **A new generation after ~2026-10-27
+  must drop `startingVersion`** and accept one big first batch.
+- Rejected: **the default snapshot read.** Correct final state, but the
+  `WHEN MATCHED` clause — the point of the layer — would never run on live data
+  (Session 9's CDC update clause is still in that state).
+- Rejected: **produce new order events after the first build** (S9's delist
+  trick). There are no new real orders to send; inventing lifecycle events would
+  put data on the live topic that the dataset does not contain.
+
+## Delta CHECK constraints only for facts true at every moment, not for the source's quality (Session 10)
+
+**In plain words:** a Delta `CHECK` constraint makes every write that breaks
+it fail — the whole write, nothing committed — whoever writes. That is right
+for "this can never happen in our tables", and wrong for "the source should
+not do this": the source does it, and the stream would stop for good.
+
+- Chosen: `silver.orders` `status_known` (status is one of the six steps);
+  `silver.order_items` `money_not_negative` (price and freight ≥ 0; laptop min
+  0.85 and 0.00); `order_id` / `(order_id, order_item_id)` `NOT NULL`.
+  Added from the notebook that creates the table, checked first (every `ALTER`
+  is a commit); a rule that exists with different text is refused.
+- Rejected: **`created_at IS NOT NULL`** — true at the end, false for the 166
+  orders whose `shipped` arrives first: the batch holding that `shipped` would
+  fail forever. A constraint must hold after every batch, not only the last.
+- Rejected: **`shipped_at >= approved_at`, `delivered_at >= shipped_at`** —
+  Olist breaks them 1,359 and 23 times. Those are facts about the source, counted
+  (like the CDC chain breaks), not rules to refuse it by.
+- Rejected: **no constraints, the code is correct.** A constraint is checked by
+  the engine on every writer — a hand-run `UPDATE`, a future job — not only by
+  this pipeline.
+- Note for Snowflake (S13): Snowflake enforces `NOT NULL` only and has no
+  `CHECK`. Databricks' `PRIMARY KEY` / `FOREIGN KEY` are informational too —
+  "enforced, unlike Snowflake's primary key" in coverage.md compares the wrong
+  things; the honest line is *Delta enforces CHECK and NOT NULL; neither
+  platform enforces a primary key*. To be shown on the platform this session.
+
+## exp_04's contamination runs on scratch tables fed with Bronze's real contaminated rows, not on the live topic (Session 10)
+
+**In plain words:** the experiment needs bad events to push through Silver's
+CDC code. They already exist: 159 contaminated rows from Session 6 sit in
+Bronze. exp_04 copies them, with the clean events of the same 23 SKUs, into
+scratch tables and runs the production Silver code over them. Nothing new is
+sent to the live topic.
+
+- Chosen (by the human, 2026-10-02): scratch. Four steps on the production
+  `make_batch_writer`: guard on, no denylist → the batch is refused; denylist
+  added → the same batch retried and applied; guard off → the bad events reach
+  the event log; `RESTORE` → the log is repaired and equals the guarded run.
+- Rejected: **a new partial run on the live topic** (the Session 5/6 plan). It
+  would show the real 06:00 job failing and emailing — but that email path was
+  already proven by `alarm_test` (S9), the tie guard was already shown to have
+  53 real ties to catch (S9 Verify 5), and a refused batch writes nothing, so
+  `RESTORE` would still need scratch tables. Against that, the topic and Bronze
+  would carry ~50 more bad events forever and every reader a longer denylist. A
+  production team does not put known-bad data into a production log on purpose.
+- Trade-off: the tie guard has still never fired inside the *live* stream —
+  only in exp_04's scratch stream, with the same code.
