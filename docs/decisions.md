@@ -1772,6 +1772,40 @@ not happen). Both are built inside Databricks in Session 9.
 - Adds Databricks surface area (Jobs, SQL Alerts), the project's stated
   preference.
 
+### Revision (2026-10-01, Session 9) — the "nothing happened" alarm watches Silver falling behind Bronze, not the calendar
+
+**In plain words:** the entry above planned a freshness alarm, "no night applied
+in the last 26 hours". In this project nights are landed by hand, months of
+business time apart and days of real time apart — so that alarm would be red
+every day, with nothing wrong. A check that cannot return healthy trains people
+to ignore it (incidents.md 2026-09-20, second prevention rule). The alarm
+instead asks: **has Bronze been holding data for more than 26 hours that Silver
+has not applied?** It is green on a quiet day and red when Silver is stuck.
+
+- Chosen, two Databricks SQL Alerts, their queries versioned in
+  `databricks/alerts/`:
+  - `silver_behind_bronze.sql` — sources (customer, product, seller, inventory
+    CDC) whose Bronze data landed over 26 hours ago and is still not in Silver.
+    A refused night shows here too, a day later, if nobody acted on the job's
+    failure email.
+  - `dims_rows_held.sql` — rows held by each dimension's latest applied night
+    (the `held` count). The "an alarm fires" half of hold-the-row: without it a
+    held row could stay stale silently.
+- Plus the scheduled **Job** with a failure email, as planned: a refused night,
+  a refused CDC batch (a `seq` tie), or any pinned check going red fails a task.
+- Rejected: **the calendar alarm, kept with a longer window** (say 7 days). Still
+  red between hand-landed nights, just less often; the noise is the problem,
+  not its rate.
+- Rejected: **a heartbeat table written by every job run**, alarmed when stale.
+  It catches "the job never ran", which the lag alarm only catches once data is
+  waiting. Real, but it is what an orchestrator's own scheduling monitor does;
+  Airflow (later) takes it, and the lag alarm stays as the check that does not
+  depend on the orchestrator running.
+- What it cannot see, recorded: **no file arrived at all.** In production that
+  is the most common failure of a nightly feed; here nothing arrives on a
+  schedule, so there is nothing to compare against. When landing is scheduled
+  (Airflow), the calendar alarm becomes meaningful and is added then.
+
 ## Delete circuit breaker: a night may delete at most 5% of a Silver dimension (Session 8)
 
 **In plain words:** `WHEN NOT MATCHED BY SOURCE DELETE` trusts the file to be
@@ -1962,3 +1996,17 @@ has built its stock, so the `DELETE` hits rows that exist.
   pipeline; exp_04 does that on scratch tables.
 - Rejected: **regenerate the topic with `--delist-count 100`.** Rewrites
   production history.
+
+## Held dims rows are kept per night, replaced on each apply — not an append-only log (Session 9)
+
+**In plain words:** `silver.dims_rejected_rows` answers "which rows of night D
+were held the last time D was applied". A corrected re-delivery of D replaces
+D's rows — with nothing, if the correction fixed them.
+
+- Chosen: written with `replaceWhere` on `dimension` and `dump_date` — exp_02's
+  rule for a re-writable unit. Skipped when nothing is held and nothing is there
+  to clear (an empty overwrite is still a commit).
+- Rejected: **append every held row on every apply.** A full audit trail, but a
+  re-delivery would leave the fixed row looking still-held, and the alarm query
+  would have to work out which attempt is current. The history of earlier
+  attempts stays in the table's Delta history (30 days).
