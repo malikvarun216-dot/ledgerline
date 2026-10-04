@@ -2298,3 +2298,70 @@ start unless its log is empty.
   *data*, Silver loses its *record* of the data. Both come from the same two
   memories — Spark's checkpoint and Delta's `txnAppId → txnVersion` — being reset
   separately.
+
+## Silver dims refuse to run when the merge log has lost a dimension's lines (Drill 2)
+
+**In plain words:** the dims path has no stream and no checkpoint; its memory
+is the merge log, which says which night Silver shows. If that log loses a
+dimension's lines while the table keeps its rows, the next run starts again from
+the first night and MERGEs every old night over today's table. Drill 2 did
+exactly that: customer was stopped by the 5% delete breaker, but seller replayed
+its whole history with no error — 100 deleted sellers inserted and deleted
+again, 273 updates — into the change feed Gold will read. So a dimension with
+no line in the log now refuses to run unless its table is empty.
+
+- Chosen: `refuse_lost_log(dim, table, log)` in `_merge_dims`, called by
+  `apply_dim` before any night (`guard_reset=False` only for the drill);
+  `MergeLogLost` is collected by `merge_dims.run_all` like the other refusals, so
+  the Job fails and emails. Two ways out, both shown in the drill: **restore the
+  log** with time travel (`RESTORE TABLE … TO VERSION AS OF n` → "nothing new",
+  no Silver version moved), or **rebuild the dimension from an empty table**
+  (delete its log lines, `TRUNCATE` the table, run) — part S showed a rebuild
+  reproduces production's merge log and every column exactly.
+- Evidence (`drills/drill2_dims`, scratch schemas, 2026-10-04): customer
+  `would delete 43,689 of 43,690 rows (100.0%)` → refused, version 5 → 5. Seller
+  `2016-09-04: +100 ~98 -0`, then the four golden nights; change feed since the
+  loss `insert 100, update_postimage 273, delete 100`; end state = production on
+  every column. With the guard: both refused before any MERGE; production's three
+  dimensions pass.
+- Rejected: **rely on the delete breaker.** It stopped customer only because
+  customer's first night held one row. Seller's and product's first nights hold
+  every key, so nothing is deleted and the breaker sees a normal night — the
+  damage (history rewritten in the change feed, deleted rows briefly back) is
+  invisible to it.
+- Rejected: **rebuild automatically when the log is empty.** Right only if the
+  loss was real and total; a log emptied by mistake (a wrong `DELETE`) is better
+  restored than rebuilt over, and the choice needs a person who knows which.
+- Same rule as the two stream guards, stated once for Silver: **a writer with no
+  memory may only write into an empty target.**
+
+## A corrected old night is alarmed, not applied (Drill 2)
+
+**In plain words:** Silver dims shows the newest night and never goes back in
+time, so a correction to an *older* night (re-delivered with `--redeliver`) is
+deliberately not applied. Drill 2 found that nobody was told: the Job stayed
+green, the lag alarm counted only nights newer than the last one applied, and
+the only trace was one printed line. The alarm query now counts it
+(`old_nights_changed`), and the response is a person's: rebuild that dimension
+from an empty table.
+
+- Chosen: a fourth part of `databricks/alerts/silver_behind_bronze.sql` — nights
+  older than the last applied whose Bronze copy is newer than the one the merge
+  log recorded (or which were never applied); the query now also returns each
+  part as its own column. Response: rebuild the dimension (delete its log lines,
+  `TRUNCATE`, run). That re-records the night and clears the count.
+- What the correction can and cannot change: Silver's **current** state comes
+  from the newest night, so an old-night correction leaves it untouched. It
+  changes the **record of history** — that night's merge-log numbers and the
+  change feed — and that is what Gold's history (S13–S14) is built from. Whether
+  that matters is why a person decides.
+- Rejected: **fail the Job.** It would block every newer night for a correction
+  that cannot change the current state, and fail daily until someone acts.
+- Rejected: **apply it.** Silver would go back to 2017-01-02 and forward again
+  only on the next new night — the "never backwards" rule of Session 8 exists to
+  prevent exactly that.
+- Rejected: **a separate alert.** Same audience, same first question ("what has
+  Bronze got that Silver does not?"); one query with one column per part is
+  easier to keep in step with the code than two.
+- Later: the Airflow backfill (S15–S16) is the automated form of "rebuild from
+  that night".

@@ -70,11 +70,16 @@ ALERT_SQL = repo_file("databricks", "alerts", "silver_behind_bronze.sql")
 
 def lag_alarm():
     """The production alert query with the dims tables swapped for the scratch ones (CDC and orders still
-    read production: 0)."""
+    read production: 0). One row: `sources_behind` and the part that fired."""
     sql = ALERT_SQL.replace("workspace.silver.dims_merge_log", D_LOG)
     for dim in DIMS:
         sql = sql.replace(f"workspace.bronze.{dim}", f"{D_BRONZE}.{dim}")
-    return spark.sql(sql).first().sources_behind
+    return spark.sql(sql).first()
+
+
+production = spark.sql(ALERT_SQL).first()
+print(f"the lag alarm on production today: {production.asDict()}")
+assert production.sources_behind == 0
 
 # COMMAND ----------
 
@@ -111,8 +116,8 @@ for dim in DIMS:
     print(f"{dim:9} rebuilt: {mine}\n          vs production, every column: {diff}")
     assert mine == sorted((n, v) for (d, n), v in first_applied.items() if d == dim)
     assert diff == (0, 0)
-print(f"lag alarm on the rebuilt tables: {lag_alarm()}")
-assert lag_alarm() == 0
+print(f"lag alarm on the rebuilt tables: {lag_alarm().asDict()}")
+assert lag_alarm().sources_behind == 0
 LOG_COMPLETE = spark.sql(f"DESCRIBE HISTORY {D_LOG} LIMIT 1").first().version
 
 # COMMAND ----------
@@ -219,8 +224,10 @@ print("REPAIRED: the restored log says where Silver is; nothing new, nothing wri
 # MAGIC
 # MAGIC Night 2017-01-02 of seller arrives again with one city corrected (a newer file time, as Auto Loader
 # MAGIC records a re-delivery). Silver shows night 2017-12-28 and never goes back in time, so `plan_nights`
-# MAGIC only reports it. **The question is who hears about it**: the report is a printed line; the lag alarm
-# MAGIC counts only nights newer than the last one applied.
+# MAGIC only reports it. **The question is who hears about it.** Drill 2's first run: nobody — one printed
+# MAGIC line in a green Job, and the lag alarm (which counted only nights *newer* than the last applied) at
+# MAGIC 0. Since then the alarm also counts `old_nights_changed`; its Session 9 part (`dims_behind`) is
+# MAGIC asserted still blind, so the bug stays visible next to the fix.
 
 # COMMAND ----------
 
@@ -243,12 +250,30 @@ before = spark.sql(f"DESCRIBE HISTORY {seller} LIMIT 1").first().version
 run("seller")  # raises nothing
 alarm = lag_alarm()
 print(f"plan: apply {plan[0]}, report {plan[1]}; seller version {before} -> "
-      f"{spark.sql(f'DESCRIBE HISTORY {seller} LIMIT 1').first().version}; lag alarm {alarm}")
+      f"{spark.sql(f'DESCRIBE HISTORY {seller} LIMIT 1').first().version}; lag alarm {alarm.asDict()}")
 assert plan == ([], [OLD_NIGHT])
 assert spark.sql(f"DESCRIBE HISTORY {seller} LIMIT 1").first().version == before
-assert alarm == 0
-print("SEEN: the corrected old night is in Bronze, not in Silver, and nothing failed or alarmed — "
-      "the only trace is one printed line in the Job's output")
+assert alarm.dims_behind == 0, "the Session 9 rule should not see an old night"
+assert (alarm.old_nights_changed, alarm.sources_behind) == (1, 1)
+print("GUARD SEEN: Silver did not go back in time, and the alarm now says so (old_nights_changed 1); "
+      "the Session 9 rule alone would have said 0")
+
+# The response the alarm asks for: rebuild seller from an empty table. Every night is applied again,
+# the corrected one included, and the merge log records it — which clears the count.
+spark.sql(f"DELETE FROM {D_LOG} WHERE dimension = 'seller'")
+spark.sql(f"TRUNCATE TABLE {seller}")
+run("seller")
+after = lag_alarm()
+production_lines = sorted((n, v) for (d, n), v in first_applied.items() if d == "seller")
+print(f"rebuilt seller: {log_lines('seller')}\nproduction:     {production_lines}\n"
+      f"seller vs production, every column: {vs_production('seller')}; lag alarm {after.asDict()}")
+assert after.sources_behind == 0
+# Silver shows the NEWEST night, which the correction did not touch: the current state is unchanged. What
+# changed is the record of history — that night's line in the merge log, and the change feed Gold reads.
+assert vs_production("seller") == (0, 0)
+assert log_lines("seller") != production_lines
+print("CLEARED: the rebuild applied every night, the corrected one included, and the alarm is back to 0. "
+      "Silver's current state did not move; only the history of 2017-01-02 did")
 
 # COMMAND ----------
 

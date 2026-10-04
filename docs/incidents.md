@@ -1558,3 +1558,103 @@ was a different event — one the log did not hold.
   that function writes.
 - Lesson: "DataFrame" reads like a noun; in Spark it is a verb, run again at
   every action.
+
+## [2026-10-04] — DELIBERATE (Drill 2): Bronze's history applied to Silver newest first — production held; Session 9's code brought back all 100 deleted SKUs
+
+**In plain words:** Silver claims arrival order does not matter: for orders
+because each lifecycle step has its own column, for inventory because each
+SKU's newest event comes from the whole log. The drill fed every Bronze batch to
+the production batch functions in the worst order a replay could produce —
+newest first. Production ended identical to the real Silver tables. Session 9's
+inventory code, run the same way, resurrected every one of the 100 delisted
+SKUs.
+
+- What happened, inventory (`drills/drill2_cdc` B): Bronze batches `[0..4]`
+  applied `[4, 3, 2, 1, 0]`; inserts 0 / 3,727 / 12,699 / 9,136 / 8,786, every
+  batch equal to the prediction computed from Bronze alone; stock and event log
+  vs production `(0, 0)`; whole-log chain report 1,423 / 237 / 26 / 27, units
+  112,650. With `newest_from="batch"`: stock **34,448 / 993,982** — the
+  pre-delist total to the unit — `extra 100`, all 100 delisted SKUs back.
+- What happened, orders (`drills/drill2_orders` B): batches `[8..0]`; the
+  prediction formula first reproduced production's log in Bronze's own order
+  (13,178 / 12,782 + 1,352 / … / batch 8 `(0, 0)`), then matched all 9 batches
+  backwards (batch 8 first: 10 orders, 12 items); updates 18,587 both ways, in
+  different batches; orders and items vs production `(0, 0)`. Only lineage moved:
+  12 items taken from Drill 1's re-sent copies — exactly the 12 units on re-sent
+  `created` events.
+- What I thought was wrong: nothing — both claims predicted to hold, Session 9's
+  path predicted to fail.
+- Root cause (Session 9 path): a delete removes the row and its `seq`; newest
+  first, every `D` arrives before the SKU exists, matches nothing, and each older
+  batch then inserts the SKU again (exp_04 C, now at full scale).
+- Seen, not a bug: **the per-batch chain count is exact only in order** — 1,415
+  summed per batch vs the true 1,423. A link is checked when its later event
+  arrives, against what the log holds then; newest first, the 8 broken links that
+  straddle a batch boundary are never checked. Production reads in order; the
+  whole-log report is the number to trust.
+- **Why nothing had caught the Session 9 gap before exp_04:** production's
+  stream has only ever read Bronze in order, where the gap cannot fire.
+- Fix: none needed (production's `newest_from="log"` since Session 10).
+- Prevention rule: **a claim that order does not matter is tested in the worst
+  order, on all the data**, not argued from the design.
+- Lesson: an accumulating snapshot needs no ordering guard at all; a CDC mirror
+  needs one *and* a memory of deletes — the two Silver tables sit at opposite
+  ends of the same question.
+
+## [2026-10-04] — DELIBERATE (Drill 2): the dims merge log lost — customer stopped by the breaker, seller replayed its whole history with no error
+
+**In plain words:** the merge log is the dims path's memory of which night
+Silver shows. Deleting it (on scratch copies) made the next run start again from
+the first night. Customer was saved by the 5% delete breaker only because its
+first night held one customer. Seller's first night holds every seller, so the
+breaker saw nothing wrong: 100 deleted sellers were inserted again, 98 changed
+sellers put back to their first values, then four nights replayed — ending right,
+with the whole history written a second time into the change feed.
+
+- What happened (`drills/drill2_dims` L1): customer `would delete 43,689 of
+  43,690 rows (100.0%) … Nothing was merged`, version 5 → 5. Seller
+  `2016-09-04: +100 ~98 -0`, `2017-01-02: +0 ~25`, `+0 ~50` ×2, `2017-12-28: +0
+  ~50 -100`; change feed `insert 100, update_postimage 273, delete 100`; vs
+  production `(0, 0)`. No error.
+- What I thought was wrong: nothing — predicted in the notebook before the run,
+  `(100, 98, 0)` computed from Bronze and Silver alone.
+- Root cause: `plan_nights` trusts the log for "where is Silver?"; with no line,
+  "nowhere" — so every night is new. The breaker guards row *counts*, and a
+  replayed first night that holds every key deletes nothing.
+- **Why nothing caught it:** the end state is correct, every check that compares
+  Silver with the newest night passes, and the only damage is in history — the
+  change feed — which nothing checks yet.
+- Fix: `refuse_lost_log` (decisions.md, Drill 2). Seen firing for both
+  dimensions; then the production repair: `RESTORE` the log (15 files back) →
+  "nothing new" ×3, no Silver version moved.
+- Prevention rule: **a writer with no memory may only write into an empty
+  target** — the same rule as the two stream guards.
+- Lesson: a correct end state can hide a wrong history, and Gold will read the
+  history.
+
+## [2026-10-04] — Drill 2: a corrected old night was silently ignored — Job green, alarm at 0, one printed line
+
+**In plain words:** a dims night older than the one Silver shows was
+re-delivered with one city corrected. Silver, by design, does not go back in
+time and did not apply it. But nothing told anyone: the Job would have stayed
+green, and the "Silver behind Bronze" alarm only counted nights *newer* than the
+last one applied. The correction sat in Bronze, unused, with one line of
+notebook output as its only trace.
+
+- What happened (`drills/drill2_dims` O, first run): `seller 2017-01-02:
+  changed in Bronze, but older than what Silver shows — NOT applied`; `plan:
+  apply [], report ['2017-01-02']`; seller version 13 → 13; lag alarm **0**.
+- What I thought was wrong: the rule itself is right (decisions.md Session 8,
+  "never backwards"); what was missing is anyone hearing about it.
+- Root cause: the report path was written as a `print`, and the alarm (Session 9
+  revision) was designed around "a night not yet applied", not "a night applied
+  and since changed".
+- **Why nothing caught it:** no correction of an old night had ever happened —
+  dims landing became write-once in Session 8 and `--redeliver` has never been
+  used on a night older than the newest.
+- Fix: the alarm query counts `old_nights_changed` (decisions.md, Drill 2); the
+  drill asserts the Session 9 part still says 0 and the new part says 1, then
+  rebuilds seller from empty and sees the count clear.
+- Prevention rule: **every "not applied" path ends in something a person will
+  see** — a failed Job or an alarm count — never only a printed line.
+- Lesson: `print` in a scheduled job is a message to nobody.
