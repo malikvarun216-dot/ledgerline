@@ -2248,3 +2248,53 @@ the MERGE's source for A was that newer event. So for out-of-order arrivals the
 `seq` guard is now a second line of defence, not the only one. It stays: it
 costs nothing, and it is what keeps the MERGE correct if anyone ever runs it
 with `newest_from="batch"` again. exp_04 B1b pins this behaviour.
+
+## Silver streams refuse a checkpoint reset into a log that already has lines (Drill 2)
+
+**In plain words:** if someone deletes a Silver stream's checkpoint — its
+memory of which Bronze rows it has applied — the data is not harmed: every
+Silver MERGE is safe to run twice. But the stream's one-line-per-batch log is
+keyed by a batch number that restarts at 0, and that log is what the "Silver is
+behind Bronze" alarm counts. Drill 2 showed the two ways it breaks: keep the old
+app id and the log silently stops recording (the alarm fires for rows Silver
+already has); give it a new app id and every row is recorded twice (the alarm
+can no longer fire at all). So a Silver stream with no history now refuses to
+start unless its log is empty.
+
+- Chosen: `refuse_unsafe_reset(checkpoint, app_id, log_table)` in
+  `_merge_inventory_cdc` and `_merge_orders`, called by `run_silver_cdc` /
+  `run_silver_orders` before `readStream`: if the checkpoint has no `offsets/N`
+  file and the log holds a row, raise `UnsafeStreamReset`. `guard_reset=False`
+  exists only so the drill can show the trap first. A rebuild is: new
+  `GENERATION` (checkpoint and app id together) **and an empty log** (archive
+  the old one first if its history matters: `CREATE TABLE … AS SELECT`, then
+  `TRUNCATE TABLE`).
+- Evidence (`drills/drill2_cdc`, scratch tables, 2026-10-04): life 1 applied
+  158,625 Bronze rows (one batch, `batch_id 0`). 100 delists landed; checkpoint
+  deleted, **same app id**: the event-log MERGE inserted **100**, stock went to
+  **34,348 / 991,530** (= production, `extra 0 missing 0`) — and the log still had
+  **1 line, 158,625 rows**, one WRITE commit, against 158,725 in Bronze. The
+  production alert query, pointed at those tables, said **1**. Then a **new app
+  id**: a second line, **317,350** rows logged for 158,725; with 100 more rows
+  waiting and never applied, the alert said **0**. With the guard on, both resets
+  were refused before any stream started; production's two checkpoints have
+  history and pass.
+- Why only the log, not Bronze's rule ("a stream with no history may only write
+  into empty tables"): the drill shows the data tables are safe to replay into
+  — demanding they be empty forces a full rebuild the reset never needed, and
+  after ~2026-10-27 a Silver orders rebuild can no longer read Bronze's history
+  commit by commit (VACUUM removes the replaced files), so it would lose the
+  "inserted, then updated" order of every order.
+- Rejected: **no guard — "the data is safe, the log is bookkeeping".** The log
+  is the input to the lag alarm. R1 made the alarm lie in the noisy direction (a
+  false page); R2 made it lie in the quiet direction: Silver could fall 158,625
+  rows behind Bronze with nothing firing. A blind alarm is worse than none,
+  because people stop looking.
+- Rejected: **record the generation in every log line and alarm per
+  generation.** Fixes the double count of a new app id, not the silent skip of
+  a kept one; adds a column, a migration of old lines, and a harder alert query.
+  The guard is ten lines and covers both.
+- Same shape as Bronze's guard (Drill 1), different reason: Bronze would lose
+  *data*, Silver loses its *record* of the data. Both come from the same two
+  memories — Spark's checkpoint and Delta's `txnAppId → txnVersion` — being reset
+  separately.

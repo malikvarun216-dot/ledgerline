@@ -395,8 +395,9 @@ clean_sku = spark.sql(
     """
 ).first().sku_key
 held_now = spark.table(B1["stock"]).where(F.col("sku_key") == clean_sku).first()
+breaks_before = chain_report(B1["events"]).breaks
 newest = spark.table(B1["events"]).where(F.col("sku_key") == clean_sku).orderBy(F.col("seq").desc()).limit(1)
-broken = newest.select(
+recipe = newest.select(
     F.sha2(F.concat(F.col("event_id"), F.lit("-drill2-broken")), 256).substr(1, 32).alias("event_id"),
     "event_ts", "produced_at", F.lit("U").alias("op"), (F.col("seq") + 1).alias("seq"),
     "sku_key", "product_id", "seller_id",
@@ -404,13 +405,18 @@ broken = newest.select(
     (F.col("stock_qty") + 7).cast("int").alias("prev_stock_qty"),
     F.lit(None).cast("int").alias("_kafka_partition"), F.lit(None).cast("bigint").alias("_kafka_offset"),
 )
+# Frozen into rows first. `recipe` is a query over the event log this batch writes to: every action re-runs
+# it, and after the batch inserts the event, "the newest event + 1" is a different event (the first run of
+# this cell counted 0 breaks that way — incidents.md, Drill 2). A stream's micro-batch is fixed; this is too.
+broken = spark.createDataFrame(recipe.collect(), recipe.schema)
 apply_b1(broken, len(backwards))
 line = lines(B1)[-1]
+breaks_after = chain_report(B1["events"]).breaks
 print(f"SKU {clean_sku} held {held_now.stock_qty}; new event says before {held_now.stock_qty + 7}, "
       f"after {held_now.stock_qty + 6}\nits batch: {line.asDict()}\n"
-      f"whole log: {chain_report(B1['events']).breaks}")
+      f"whole log: {breaks_before} -> {breaks_after}")
 assert (line.events_inserted, line.updated, line.chain_breaks) == (1, 1, 1)
-assert chain_report(B1["events"]).breaks == 1_424
+assert breaks_after == breaks_before + 1
 print("GUARD SEEN: the new break is counted; in production the pinned 1,423 would fail the Job")
 
 # COMMAND ----------

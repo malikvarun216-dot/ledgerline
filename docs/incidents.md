@@ -1485,3 +1485,76 @@ SQL would predict.
   repeat, because the only answer to a write conflict is "run it again".
 - Lesson: "enforced" and "declared" are different words — Delta enforces CHECK
   and NOT NULL, and only declares a primary key.
+
+## [2026-10-04] — DELIBERATE (Drill 2): a Silver stream's checkpoint deleted — no data lost, but the lag alarm first lied loudly, then went blind
+
+**In plain words:** Drill 1 deleted a Bronze stream's checkpoint and lost 74
+messages. The same attack on Silver lost nothing — the 100 rows waiting were
+applied correctly — but the stream's log, which the "Silver is behind Bronze"
+alarm counts, silently stopped recording them, so the alarm fired for rows
+Silver already had. "Fixing" that with a new app id made the log count every
+row twice, and the alarm then stayed quiet with 100 rows really waiting.
+
+- What happened (`drills/drill2_cdc`, scratch copies, production read-only):
+  life 1 → log `batch 0, 158,625 rows`, stock 34,448 / 993,982. 100 delists
+  appended; checkpoint deleted; same app id → event-log MERGE `inserted 100`,
+  stock 34,348 / 991,530 (= production), log **unchanged: 1 line, 158,625**,
+  alert query on those tables **1**. Checkpoint deleted again, new app id → log
+  `(0, 158,625 …)`, `(0, 158,725, 0, 0, 0)` = **317,350**; 100 more rows landed
+  and were never applied → alert **0**. No error anywhere.
+- What I thought was wrong: nothing — the prediction, written in the notebook
+  before it ran, was "no data lost; the log is". Confirmed on every number.
+- Root cause: the MERGEs carry no `txnVersion` (each is safe to repeat by its
+  own condition), so a replay changes nothing. The log append does carry it,
+  keyed by a batch id that restarts at 0 in a new checkpoint: Delta skips every
+  line up to the batch it remembers for that app id. A new app id remembers
+  nothing, so everything is logged again. The alert compares *counts* (Bronze
+  rows older than 26 h vs rows the log has seen), so it reads a short log as lag
+  and a doubled log as health.
+- **Why nothing caught it:** the data checks all pass — stock, event log and
+  change feed are right. The only wrong thing is the bookkeeping that the alarm
+  trusts, and nothing checks the bookkeeping against the data.
+- Fix: `refuse_unsafe_reset` in both Silver stream libraries (decisions.md,
+  "Silver streams refuse a checkpoint reset …"). Seen firing: both resets refused
+  before any stream started, the log untouched; production's checkpoints pass.
+- Prevention rule: **a stream with no history may only write into an empty
+  log** — a rebuild resets checkpoint, app id and log together. The drill keeps
+  the bug visible through a named switch (`guard_reset=False`).
+- Lesson: an idempotent write protects the data, not the audit trail around it.
+  Every record keyed by a counter that can restart needs the same protection as
+  the data it describes.
+
+## [2026-10-04] — Drill 2's "new broken link" step counted 0 breaks: the event it fed in was a query over the table it writes to
+
+**In plain words:** to re-trigger the 2026-10-01 incident, the drill made one
+new event for a healthy SKU — "its newest event, plus one" — and fed it to the
+production batch function. The batch inserted it, and then the chain check
+reported 0 breaks while the whole-log report said 1,424. The event had been
+defined as a query over the very event log the batch writes to; Spark re-runs a
+query every time it is used, and after the insert "the newest event, plus one"
+was a different event — one the log did not hold.
+
+- What happened: line `batch_id 5 · events_inserted 1 · updated 1 ·
+  chain_breaks 0`; `chain_report` → 1,424; the cell's assertion failed and
+  "Run all" stopped before the last two display cells. Everything before it had
+  passed.
+- What I thought was wrong: nothing in production. The chain check joins the
+  log to the batch's own `event_id`s; the batch DataFrame now named an event id
+  that does not exist.
+- Root cause: a Spark DataFrame is a recipe, not a result. The batch function
+  uses its input several times (refusal check, counts, MERGE, newest-in-log,
+  chain check), each a fresh run of the recipe. A real micro-batch is fixed —
+  its recipe reads a fixed range of Bronze, which the batch never writes — so
+  production cannot hit this. exp_04's `pending()` is also safe: it reads a fixed
+  table version.
+- **Why nothing caught it sooner:** every earlier drill step fed the batch
+  function from production Bronze, which the scratch batch does not write; this
+  was the first input built from the batch's own target.
+- Fix: the event is frozen into rows first (`createDataFrame(recipe.collect(),
+  recipe.schema)`), and the step asserts "+1 break" instead of a pinned 1,424,
+  so it can be re-run on the same tables.
+- Prevention rule: **anything fed to a batch function by hand is materialised
+  first** — rows, or a fixed table version — never a live query over a table
+  that function writes.
+- Lesson: "DataFrame" reads like a noun; in Spark it is a verb, run again at
+  every action.
