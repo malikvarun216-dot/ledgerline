@@ -1956,6 +1956,15 @@ that, at a cost.
 - Rejected: **ignore `D`** (keep delisted SKUs). Upsert is not sync — exp_03's
   lesson, one layer over.
 
+### Correction (2026-10-02, Session 10) — the gap was real, and it is closed without tombstones
+
+exp_04 C showed it: X's update arriving after X's newer delete put X back in
+the stock (`extra=1` against the log's newest events). The fix is not a
+tombstone in the stock table but reading each SKU's newest event from the
+**event log**, which already keeps every delete — entry "The stock MERGE takes
+each SKU's newest event from the event log" (Session 10). The hard delete
+stays.
+
 ## Two different events at one `(sku_key, seq)` fail the batch (Session 9)
 
 **In plain words:** `seq` is the order. If two different events claim the same
@@ -2192,3 +2201,40 @@ sent to the live topic.
   production team does not put known-bad data into a production log on purpose.
 - Trade-off: the tie guard has still never fired inside the *live* stream —
   only in exp_04's scratch stream, with the same code.
+
+## The stock MERGE takes each SKU's newest event from the event log, not from the batch (Session 10)
+
+**In plain words:** when a SKU is deleted, its stock row is gone, and with it
+the `seq` that would tell Silver "anything older than this is history". An
+update that arrives after the delete, but happened before it, then matches
+nothing and is inserted — the SKU comes back. Silver already keeps every event,
+deletes included, in its event log. So the stock MERGE now asks the log, not
+the batch, "what is this SKU's newest event?" — and for that SKU the answer is
+the delete.
+
+- Chosen: `newest_in_log(events, events_table)` — the batch's SKUs joined to
+  the whole event log (which already holds the batch: it is written first),
+  `row_number()` over `seq` descending, `= 1`. `make_batch_writer(newest_from=
+  "log")` is the default; `"batch"` stays only so exp_04 C can show the bug.
+- Evidence (exp_04, 2026-10-02): with the batch's newest, X (`157b4fa7…`:
+  `I` 14 → `U` 13 → `U` 12 → `D`) came back at stock 12 after its late 3rd
+  event; with the log's newest, X stayed deleted and the batch did nothing
+  (`newest_is_delete 1`, inserted / updated / deleted 0). On the live feed,
+  **53** events arrive behind their SKU's order — every one of them the
+  denylisted 2026-09-26 contamination; **0** clean ones. So nothing changes
+  for any data Silver has seen; the guarantee now holds by construction
+  instead of by an assumption about the producer.
+- Rejected: **tombstones** (keep the row with `_deleted = true` and its `seq`).
+  What Lakeflow's `APPLY CHANGES` does, and the S11 comparison. Every reader
+  of the stock would have to filter them (leak-by-omission, as Session 7 said of
+  a quarantine flag), and they need their own clean-up — to solve a problem the
+  event log already solves.
+- Rejected: **keep the ordering assumption and add a detector** (count events
+  arriving below their SKU's highest `seq`, alarm on > 0). Cheap, and it was
+  the plan if the fix had been expensive. It is not: the fix costs one join of
+  the batch's SKUs to the log, and it removes the failure instead of reporting
+  it after the stock is wrong.
+- Trade-off: each batch reads the log for the SKUs it touches (on the first
+  build, all 34,448 — the same work the batch dedup did). The `seq` guard stays
+  on all three clauses: with the log's newest event it should never fire, and
+  if it does, something else is wrong.

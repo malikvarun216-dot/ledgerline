@@ -1360,3 +1360,55 @@ says what to do instead. I did not apply it.
   something on purpose, search `incidents.md` for the failure kind.
 - Lesson: a prevention rule nobody reads at the moment of the next decision
   does not prevent anything; put it where that decision is made.
+
+## [2026-10-02] — DELIBERATE (exp_04): every guard of Silver inventory removed in turn — a refused MERGE, a silent double insert, an old change overwriting a new one, a deleted SKU brought back, contaminated history
+
+**In plain words:** Silver keeps the current stock per SKU from a change feed,
+and four things keep it right: one row per SKU per batch (dedup), "only newer
+changes apply" (the `seq` guard), "two events at one place in the order stop
+the batch" (the tie refusal), and — found missing — "a delete is remembered".
+exp_04 took each away on scratch tables, with the production code and real
+events, and asserted the damage before the fix.
+
+- What happened, part by part (A = `001795ec…`, stock 28 → 27 → 26 → 25;
+  N = `001b72df…`, 38 → 36; X = `157b4fa7…`, 14 → 13 → 12 → delete):
+  - **A1, no dedup, SKU already in Silver** → `[DELTA_MULTIPLE_SOURCE_ROW_
+    MATCHING_TARGET_ROW_IN_MERGE]`. The stock stayed at A's 1st event (28) —
+    but the event log already had the batch's 4 events: it is written first,
+    in its own commit. Retried with dedup: A = 26, N = 36, `events_inserted 0`.
+  - **A2, no dedup, SKU new to Silver** → **no error, N inserted twice**. Delta
+    only refuses several source rows that *match* one target row; two inserts of
+    one key are not checked. Silent, and worse than A1's loud failure.
+  - **B, no `seq` guard** → A's late 2nd event (27) overwrote its 3rd (26).
+    With the guard: ignored (`updated 0`), then a newer 4th event updated it
+    to 25 — the UPDATE path and the "older event ignored" path, run for the
+    first time.
+  - **C, late update after a newer delete** → X came back at 12; the
+    log-based check saw it (`extra=1`). Fixed by `newest_from="log"`.
+  - **D, tie refusal on Bronze's real contamination** (159 rows = 53 events ×
+    3, on 23 SKUs whose clean history is 330 events) → refused,
+    `{'tied_seq_vs_log': 53}`, nothing written; the denylist retry dropped all
+    159. Guard off: the 53 reached the event log (330 → 383, `chain_breaks 53`),
+    units sold 281 instead of 250 — **and the stock was identical** to the
+    guarded run, because every bad event sits on an early `seq` the guard
+    ignores. `RESTORE … TO VERSION AS OF 1` removed the one file the bad batch
+    added (7,840 bytes): log = the guarded run on every column, units sold 250.
+- What I thought was wrong: nothing — deliberate. Two expectations had never
+  been seen: A2 (B25's answer, now verified) and what a `RESTORE` does to the
+  change feed.
+- Root cause, per guard: Delta's MERGE checks ambiguity only among matches
+  (A); a MERGE has no memory but the target row (B, C); and a history can be
+  wrong while the current state is right (D) — which is why the stock alone
+  would never have shown the contamination.
+- Fix: A, B, D were already production behaviour (S9). C is new: the stock
+  MERGE reads each SKU's newest event from the event log (decisions.md,
+  Session 10).
+- Seen for the first time: **a `RESTORE` writes `delete` rows into the change
+  feed** — 53, one per row it removed. Gold, which will read Silver through the
+  feed (S13), sees a repair as deletes; the export must carry `delete` rows (a
+  carried item since S9, now with a second reason).
+- Prevention rule: each guard is a switch on the production batch function,
+  exercised by exp_04 against real events; any change to `_merge_inventory_cdc`
+  re-runs exp_04 and `merge_inventory_cdc`'s five checks.
+- Lesson: the dangerous failure is the quiet one — A1 threw an error, A2 and C
+  wrote wrong rows with none. Test the case where nothing complains.
