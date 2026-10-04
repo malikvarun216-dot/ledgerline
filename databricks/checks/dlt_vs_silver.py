@@ -37,8 +37,8 @@ ev = spark.table(EVENTS).agg(
 stock = spark.table(STOCK).agg(F.count(F.lit(1)).alias("skus"), F.sum("stock_qty").alias("units")).first()
 orders = spark.table(BRONZE_ORDERS).agg(
     F.count(F.lit(1)).alias("rows"),
-    F.count_if("event_type = 'created' AND items IS NULL").alias("created_no_items"),
-    F.count_if("order_status IS NULL OR trim(order_status) = ''").alias("blank_status"),
+    F.count_if(F.expr("event_type = 'created' AND items IS NULL")).alias("created_no_items"),
+    F.count_if(F.expr("order_status IS NULL OR trim(order_status) = ''")).alias("blank_status"),
 ).first()
 
 PREDICTED = {
@@ -193,7 +193,7 @@ display(expectations(ORDERS_CHECKED))
 
 orders_checked = spark.table(ORDERS_CHECKED).agg(
     F.count(F.lit(1)).alias("rows"),
-    F.count_if("event_type = 'created' AND items IS NULL").alias("created_no_items"),
+    F.count_if(F.expr("event_type = 'created' AND items IS NULL")).alias("created_no_items"),
 ).first()
 print(f"orders_checked: {orders_checked.asDict()}")
 assert orders_checked.rows == PREDICTED["orders rows (warn)"], "rows missing — was the rule `drop`?"
