@@ -2365,3 +2365,14 @@ from an empty table.
   easier to keep in step with the code than two.
 - Later: the Airflow backfill (S15–S16) is the automated form of "rebuild from
   that night".
+
+### Correction (2026-10-04, same session) — the current row's lineage does move
+
+The entry above says an old-night correction "leaves [Silver's current state]
+untouched". True of every business value, not of the row's lineage. The drill's
+rebuild with the corrected 2017-01-02 ended with **one** seller different from
+production: the victim, whose `_last_changed_dump_date` became 2017-05-02 — it
+changed on the corrected night and changed back on the next one (merge log
+`(0, 26, 0)` and `(0, 51, 0)` against production's 25 and 50). So the
+correction reaches today's table too, through the lineage columns that record
+history. The decision stands; the reason for a person to look is stronger.

@@ -268,12 +268,24 @@ production_lines = sorted((n, v) for (d, n), v in first_applied.items() if d == 
 print(f"rebuilt seller: {log_lines('seller')}\nproduction:     {production_lines}\n"
       f"seller vs production, every column: {vs_production('seller')}; lag alarm {after.asDict()}")
 assert after.sources_behind == 0
-# Silver shows the NEWEST night, which the correction did not touch: the current state is unchanged. What
-# changed is the record of history — that night's line in the merge log, and the change feed Gold reads.
-assert vs_production("seller") == (0, 0)
+# Silver shows the NEWEST night, which the correction did not touch: every business value is unchanged.
+# What changed is the record of history: the corrected night's line in the merge log, the change feed —
+# and the lineage of the one seller it touched, which changed on 2017-01-02 and changed back on 2017-05-02.
+# (Drill 2's first run asserted every column equal and failed on exactly that row.)
+cols = business_columns("seller")
+mine, prod = spark.table(seller), spark.table(f"{SILVER}.seller")
+values = (mine.select(*cols).exceptAll(prod.select(*cols)).count(),
+          prod.select(*cols).exceptAll(mine.select(*cols)).count())
+lineage_moved = mine.select(*columns("seller")).exceptAll(prod.select(*columns("seller"))).collect()
+was = prod.where(F.col("seller_id") == victim).first()
+print(f"values vs production {values}; rows whose lineage moved {[r.seller_id for r in lineage_moved]}; "
+      f"{victim} last changed {was._last_changed_dump_date} -> {lineage_moved[0]._last_changed_dump_date}")
+assert values == (0, 0)
+assert [r.seller_id for r in lineage_moved] == [victim]
+assert str(lineage_moved[0]._last_changed_dump_date) == "2017-05-02"
 assert log_lines("seller") != production_lines
 print("CLEARED: the rebuild applied every night, the corrected one included, and the alarm is back to 0. "
-      "Silver's current state did not move; only the history of 2017-01-02 did")
+      "No value in Silver moved; the history did — two merge-log counts and one row's lineage")
 
 # COMMAND ----------
 
