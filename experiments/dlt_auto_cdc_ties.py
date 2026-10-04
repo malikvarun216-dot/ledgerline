@@ -74,7 +74,9 @@ ties = spark.sql(f"""
                 ELSE 'other' END AS kept
     FROM pairs p LEFT JOIN {SCD2} v ON v.sku_key = p.sku_key AND v.__START_AT = p.seq
 """)
-ties.cache()
+# 53 rows: collected once, so every count below reads the same rows. `.cache()` is refused on
+# serverless (`NOT_SUPPORTED_WITH_SERVERLESS`: PERSIST TABLE), seen the first time this ran.
+ties = spark.createDataFrame(ties.collect(), ties.schema)
 summary = ties.agg(
     F.count(F.lit(1)).alias("rows"),
     F.count_if(F.col("real_event").isNull()).alias("no_real_twin"),

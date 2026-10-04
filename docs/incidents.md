@@ -1658,3 +1658,57 @@ notebook output as its only trace.
 - Prevention rule: **every "not applied" path ends in something a person will
   see** — a failed Job or an alarm count — never only a printed line.
 - Lesson: `print` in a scheduled job is a message to nobody.
+
+## [2026-10-05] — DELIBERATE (Session 11, Lakeflow): `expect_or_fail` on a full refresh — the update stopped at the first bad row, and left the table empty
+
+**In plain words:** the Lakeflow pipeline's `orders_checked` table has a rule,
+"every `created` event carries items", that 777 real Bronze rows break (775
+Olist orders placed with no items, plus re-sent copies). The rule was switched
+from *count them* to *fail the run* and the table was rebuilt from scratch. The
+run stopped at the first bad row, as designed — and the rebuild had already
+emptied the table, so a table that held 394,164 good rows an hour earlier now
+held **0**, with no data written back.
+
+- What happened: pipeline `ledgerline-dlt`, setting `ledgerline.items_rule =
+  fail`, "Select tables for refresh" → `orders_checked` only → **Run with full
+  refresh**. Update `307b9339…` failed in seconds:
+  `EXPECTATION_VIOLATION.VERBOSITY_ALL`, SQL state `22000`, "Flow
+  'workspace.silver_dlt.orders_checked' failed to meet the expectation.
+  Violated expectations: 'created_has_items'", with the whole row: order
+  `809a282b…`, `created` 2016-09-13 15:24:19, `order_status canceled`,
+  `items null`, **partition 2, offset 130446**. The three inventory tables:
+  "Omitted" (not selected, untouched). Afterwards `SELECT count(*)` → **0**.
+  `DESCRIBE HISTORY`: v0 `CREATE TABLE`, v1 `DLT SETUP`, v2 `STREAMING UPDATE`
+  (the first run's 394,164 rows), then the full refresh: v3 **`DLT REFRESH`**,
+  v4 `DLT SETUP`, v5 `SET TBLPROPERTIES` (`delta.enableRowTracking = true`) —
+  and **no write after it**.
+- What I thought was wrong: nothing — deliberate. The open question was what a
+  failed full refresh leaves behind; predicted (before the count) "0 rows, the
+  reset committed, nothing after it". Right.
+- Root cause: a full refresh is **two transactions, not one**: the reset
+  (`DLT REFRESH`, committed at the start) and the reprocessing (each micro-batch
+  its own commit). `expect_or_fail` refuses the micro-batch that holds a bad
+  row, so that commit never happens — the reset already has.
+- Fix: none needed — the pipeline's own copy, rebuilt in the next run with the
+  rule back on `warn`. What it changes for any real use: a full refresh of a
+  table with an `expect_or_fail` rule can leave readers an **empty table** until
+  someone fixes the data or the rule.
+- Prevention rule: `expect_or_fail` only on rules the **source** cannot break
+  (here `event_type_known`, `op_known` — 0 failures on every Bronze row); a rule
+  real data breaks is `warn` (count it) or `drop` (remove and count it). Before
+  a full refresh, check the rules against the source with a plain query — the
+  same count the check notebook makes (`created_no_items`).
+- Lesson: "the run failed, so nothing changed" is false for a full refresh — the
+  reset is its own commit, and it is the one that succeeds.
+
+### Follow-up (2026-10-05, same hour) — the old rows cannot be read back by time travel
+
+`SELECT count(*) FROM workspace.silver_dlt.orders_checked VERSION AS OF 2` (the
+version holding the 394,164 rows) failed on the SQL warehouse: "assertion
+failed: The reconciliation query was not resolved for the StreamingTable or
+MaterializedView." The files of version 2 still exist (nothing has VACUUMed
+them), but a pipeline-owned streaming table is not read like a plain Delta
+table, and `VERSION AS OF` is refused. So the repair for a DLT table is **re-run
+the pipeline from its source** — not `RESTORE` or time travel, which repaired
+hand-written Silver in Session 10 (exp_04 D). That holds only while the source
+still holds everything: here Bronze does, and Bronze is append-only.
