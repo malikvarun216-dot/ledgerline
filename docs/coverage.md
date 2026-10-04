@@ -47,9 +47,9 @@ session · **X** skip (no honest use here).
 | Structured Streaming: checkpoints, `foreachBatch`, exactly-once, `AvailableNow` | ★★★ | ✓ S7–S9 |
 | Auto Loader: schema, rescued data, re-delivered files | ★★★ | ✓ S6, Drill 1 |
 | Jobs, retries, failure emails; SQL Alerts | ★★ | ✓ S9 |
-| `RESTORE` / repair by time travel | ★★★ | B S10 (exp_04's contamination repair) |
-| Concurrent writes: optimistic concurrency, conflict exceptions, isolation levels | ★★★ | B S10 (two MERGEs at once — a danger zone never triggered) |
-| Delta constraints (`NOT NULL`, `CHECK`) — enforced, unlike Snowflake's primary key | ★★ | B S10 |
+| `RESTORE` / repair by time travel | ★★★ | ✓ S10 (exp_04 D: guard off → 53 bad events → `RESTORE`; the change feed shows it as 53 `delete` rows) |
+| Concurrent writes: optimistic concurrency, conflict exceptions, isolation levels | ★★★ | ✓ S10 (row-level concurrency with deletion vectors; same rows / no deletion vectors → conflict; retry) |
+| Delta constraints (`NOT NULL`, `CHECK`) — enforced; `PRIMARY KEY` informational on both platforms (corrected S10) | ★★ | ✓ S10 (production: `status_known`, `money_not_negative`, `stock_not_negative`; NULL counts as a violation) |
 | Watermarks, stream-stream join, `dropDuplicatesWithinWatermark` vs `MERGE` | ★★★ | B S11 |
 | Lakeflow Declarative Pipelines (DLT): expectations; `AUTO CDC` / `APPLY CHANGES` as SCD1 (vs the S9 hand-written MERGE) and SCD2 (vs the dbt snapshot) | ★★★ | B S11 |
 | Delta schema evolution (`mergeSchema`, column mapping) | ★★ | B S11 |
@@ -77,7 +77,7 @@ session · **X** skip (no honest use here).
 | `COPY INTO` load history — an already-loaded file is skipped (64 days); and a re-delivered file with **new content**? (compare with Auto Loader's Drill 1 skip) | ★★★ | B S13 |
 | Snowpipe auto-ingest vs `COPY` (14-day history; needs an S3 event notification on the bucket) | ★★★ | B S13 |
 | `VARIANT` / `FLATTEN` — land raw, then type | ★★★ | B S13 |
-| Primary keys are not enforced; MERGE with duplicate source rows (vs Delta's refusal) | ★★★ | B S13–S14 |
+| Primary keys are not enforced; MERGE with duplicate source rows (vs Delta, which refuses only duplicates matching an *existing* row — exp_04 A1/A2) | ★★★ | B S13–S14 |
 | MERGE + anti-join delete (no `NOT MATCHED BY SOURCE` in Snowflake) | ★★★ | B Gold (S14–S15) |
 | Zero-copy clone, CI gating (write-audit-publish) | ★★★ | B S16 |
 | Time Travel, `UNDROP` | ★★★ | B S18 |
@@ -111,7 +111,7 @@ session · **X** skip (no honest use here).
 
 | Topic | Weight | Status |
 |---|---|---|
-| Classic clusters: sizing, autoscaling, spot instances, job vs all-purpose clusters, pools, policies | ★★★ | T S10 |
+| Classic clusters: sizing, autoscaling, spot instances, job vs all-purpose clusters, pools, policies | ★★★ | T ✓ S10 |
 | Continuous / `ProcessingTime` triggers, latency tuning | ★★★ | T S11 |
 | Spark UI and most Spark settings (serverless manages them) | ★★★ | T S21 |
 | Photon on vs off (serverless always runs it) | ★★ | T S21 |
@@ -137,8 +137,8 @@ session · **X** skip (no honest use here).
 
 | Topic | Weight | Status |
 |---|---|---|
-| Kafka internals: partitions, consumer groups, rebalancing, **log compaction** (a natural fit for a CDC topic) | ★★★ | T S10 |
-| Debezium in operation: initial snapshot, log positions, schema history, tombstones (we copy its message shape, not its operations) | ★★★ | T S10 |
+| Kafka internals: partitions, consumer groups, rebalancing, **log compaction** (a natural fit for a CDC topic) | ★★★ | T ✓ S10 |
+| Debezium in operation: initial snapshot, log positions, schema history, tombstones (we copy its message shape, not its operations) | ★★★ | T ✓ S10 |
 | Lambda vs Kappa architecture; real-time latency trade-offs | ★★ | T S11 |
 | Model serving, vector search | ★ | X |
 
@@ -147,7 +147,7 @@ session · **X** skip (no honest use here).
 - **Built:** exactly-once replay, idempotent writes, quarantine (dead-letter
   table), delete circuit breaker, write-once landing, merge log, provenance
   headers, schema-registry contract, denylist repair, answer-key reconciliation,
-  chain check, hold-the-row, alarms.
+  chain check, hold-the-row, alarms; **S10:** accumulating snapshot (Silver orders), newest event from the log (no resurrected deletes), CHECK constraints, repair by `RESTORE`, conflict + retry.
 - **Planned:** SCD2 (S14), late data with lookback (S17), backfill (Airflow,
   S15–S16), write-audit-publish (clone gating, S16), GDPR erasure with
   crypto-shredding (S12, S18), cost guards (S13), governance — grants and masks
@@ -162,7 +162,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 
 | Session | Builds | Theory hooks (T rows) |
 |---|---|---|
-| **S10** | Silver orders (`MERGE INTO` on `order_id`); **exp_04** (CDC correctness: dedup, `seq` guard, late update after a delete, contamination → tie guard in the stream → repair); **`RESTORE` repair, a concurrent-write conflict, `CHECK` constraints** | classic clusters; Kafka internals + log compaction; Debezium in operation |
+| **S10** ✓ | Silver orders (`MERGE INTO` on `order_id`); **exp_04** (CDC correctness: dedup, `seq` guard, late update after a delete, contamination → tie guard in the stream → repair); **`RESTORE` repair, a concurrent-write conflict, `CHECK` constraints** | classic clusters; Kafka internals + log compaction; Debezium in operation |
 | **Drill 2** | attacks on Silver (dedup, MERGE correctness, out-of-order, reconciliation 112,806 → 112,650), incident regression, **lineage check, alarm regression (`alarm_test`)** | — |
 | **S11** | Lakeflow expectations + **`AUTO CDC` as SCD1 and SCD2**; windowed streaming (stream-stream join, watermarks, `dropDuplicatesWithinWatermark` vs `MERGE`); **schema evolution; pipeline-health dashboard** | continuous triggers / latency; Lambda vs Kappa; Lakeflow Connect |
 | **S12** | GDPR, lakehouse half (synthetic PII, pseudonymise, erasure) + **UC grants, column masks, row filters, tags, Asset Bundles from CI** (all B?) | account console; networking; Terraform; customer-managed keys |

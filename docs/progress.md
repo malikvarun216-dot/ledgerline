@@ -16,7 +16,7 @@ changes it.
 | exp_01 | exactly-once replay (`txnAppId` / `txnVersion`) | Bronze Kafka | S7 | **done** S7; re-run Drill 1 |
 | exp_02 | partition overwrite: append doubles, predicate-less overwrite wipes | Bronze dims (`replaceWhere`) | **S6 — missed**; S8 | **done** S8 (two sessions late) |
 | exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8; G rewritten + H added S9 (hold the bad row) |
-| exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | not started — layer exists, due next session |
+| exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | **done** S10 (on time); its part C changed production (`newest_from="log"`) |
 | exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | not started |
 | exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | not started |
 
@@ -2188,3 +2188,238 @@ Snowflake trial starts.
 - Scratch leftovers: `workspace.exp03_{bronze,silver}`,
   `workspace.exp03h_{bronze,silver}` (rebuilt by each exp_03 run), plus the
   Session 8 and Drill 1 lists.
+
+---
+
+## Session 10 — Silver orders, and every CDC guard removed on purpose
+Date: 2026-10-02 → 10-04
+
+**In plain words:** Silver now holds every order as one row that fills in as
+its events arrive — a timestamp column for each step (created, approved,
+shipped, delivered, canceled / unavailable) — built from Bronze's history batch
+by batch, so 18,587 orders were inserted in one batch and completed in a later
+one. "Keep the newest event" was rejected on numbers: Olist's own timestamps
+run backwards on some orders, and it would have given the wrong status on 93.
+Then `exp_04` took each guard of Silver inventory away on scratch tables and
+showed the damage first: Delta refusing an ambiguous MERGE, a brand-new SKU
+inserted twice with no error, an old change overwriting new stock, a deleted
+SKU coming back, and contaminated history repaired with `RESTORE`. The
+deleted-SKU gap was real, so production now takes each SKU's newest event from
+the event log, which remembers deletes. Two more danger zones were caused on
+purpose: two MERGEs into one table at once, and writes that break a `CHECK`
+rule. Silver orders joined the daily Job, the lag alarm now watches it, and the
+three theory topics bound here were taught.
+
+### Scope, as it actually ran
+Planned (Session 9's `### Next` and `docs/coverage.md` S10): Silver orders,
+`exp_04`, `RESTORE`, a concurrent-write conflict, `CHECK` constraints, three
+theory hooks. All done. Added: the laptop answer key for Silver orders before
+any Spark (pinned in tests); a production change from exp_04's evidence
+(`newest_from="log"`); Silver orders in the Job and the alert. Two incidents of
+my own making (a dying stream failed a notebook cell — a repeat; an experiment
+that silently stopped showing its bug).
+
+### Start-of-session re-check (read-only, laptop)
+Full order stream rebuilt: 99,441 orders, 394,090 events. As one row per order:
+statuses delivered 96,470 · shipped 1,114 · canceled 625 · approved 618 ·
+unavailable 609 · created 5; units 112,650; 775 orders without items; per SKU,
+units ordered = units the CDC feed decremented on **all 34,448 SKUs**. "The
+last event to arrive wins" disagrees on **93** (first count said 104 — the
+laptop's sort broke 1,305 same-second ties at random). 166 orders arrive with
+`shipped` first; the printed status disagrees with the steps on 623.
+
+### Built
+- **Silver orders** (`databricks/silver/_merge_orders` library, `merge_orders`
+  production): stream from Bronze `orders`, `startingVersion=0`,
+  `maxFilesPerTrigger=3` (first run only), `foreachBatch`, generation `v1`.
+  Per batch: one copy per `event_id` → refuse a step with two different times
+  (`find_problems`) → fold to one row per order (`per_order`) → accumulating-
+  snapshot `MERGE` into `silver.orders` (update only when a step is new;
+  `status` derived; `source_status` kept, unused) → insert-only `MERGE` into
+  `silver.order_items` → one `silver.orders_log` line with `txnVersion`. CDF on,
+  30-day retention, constraints `status_known`, `money_not_negative`. Seven
+  checks + a no-op re-run.
+- **Silver CDC:** `stock_not_negative` constraint (`ensure_constraints`);
+  `newest_in_log` and the `newest_from` switch, **default `"log"`** since this
+  session (decisions.md).
+- **`experiments/exp_04_cdc_correctness`** — parts A1, A2, B1, B1b, B2, C1, C2,
+  the live out-of-order count, D1–D4; failing steps call the batch function
+  directly (`apply_directly`), never a dying stream.
+- **`experiments/delta_concurrency_constraints`** — C1–C4 (two threads, one
+  MERGE each), K1–K5.
+- **Tests:** 152 → **155** (`test_headline_numbers`: the Silver orders answer
+  key, `source_status` vs steps, per-SKU tie-out). `pyproject.toml`: ruff
+  per-file ignores for the two new notebooks.
+- **Job `ledgerline-silver`:** + `stream_orders → merge_orders` (Notebook,
+  Workspace, Serverless, "All succeeded"). **Alert** `ledgerline silver behind
+  bronze`: query replaced with the git version (+ `orders_behind`).
+- **CLAUDE.md:** 10 new verified-constraint rows; the CDC rule notes
+  `newest_in_log`.
+
+### Verified
+- **Silver orders, first build:** 9 batches = Bronze's 9 data commits (49,999
+  ×5, 49,998 ×2, 44,099, then 74); **inserted 99,441, updated 18,587, items
+  112,650**; Bronze 394,164 rows seen once; duplicate copies 37 (Drill 1's
+  re-sends — batch 8 changed nothing). Verify 2: every step's count and
+  Unix-seconds checksum, statuses, estimated date (150,828,461,078,400), units
+  112,650 / 775 without / 0 NULL, items 112,650 on 34,448 SKUs, price
+  13,591,643.70, freight 2,251,909.54 = the laptop. Verify 3: aligned — **every
+  batch's inserts and updates = the Bronze-only prediction**. Verify 4: change
+  feed = log, 0 deletes. Verify 5: 93 / 623 / 166 / 1,305. Verify 6: the
+  refusal fires on a moved copy (`two_events_one_step 1, step_time_changed 1`),
+  nothing real trips it. **Verify 7: per SKU, order items = CDC decrements —
+  34,448 SKUs, 0 mismatched, 112,650 = 112,650** (Silver's cross-source
+  reconciliation). Re-run: commits 11 / 11 / 10 unchanged.
+- **Silver CDC, production runs of the changed code** (constraint, then the
+  `"log"` default): `added constraint stock_not_negative` (v4), every Session 9
+  number unchanged (158,725 / 159 / 158,446; 34,348 / 991,530; chain 1,423 /
+  237 / 26 / 27; ties 53 / 53 → `{}`), re-run 4 / 4 / 4. No new CDC data
+  arrived, so the `"log"` path ran on live data only as a no-op.
+- **exp_04, full pass** (A = `001795ec…` 28 → 27 → 26 → 25; N = `001b72df…`
+  38 → 36; X = `157b4fa7…` 14 → 13 → 12 → `D`): A1
+  `DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE`, stock unchanged,
+  event log already 5 rows; retry → A 26, N 36, `events_inserted 0`. **A2: no
+  error, N inserted twice.** B1 (batch path, no guard): A = 27, the late older
+  event won. B1b (log path, no guard): A = 26. B2: late ignored (`updated 0`),
+  newer applied (`updated 1`, A = 25). C1: X back at 12, `extra=1`; C2: X stays
+  deleted. Live feed: **53** events behind their SKU's order, all denylisted;
+  **0** clean. D: refused `{'tied_seq_vs_log': 53}`; denylist retry dropped
+  159; guard off → log 330 → 383, `chain_breaks 53`, units 281 vs 250, stock
+  identical; `RESTORE … TO VERSION AS OF 1` removed 1 file (7,840 bytes),
+  restored = guarded `(0, 0)`, units 250; **change feed at the RESTORE: `delete`
+  53**.
+- **Concurrency:** C1 deletion vectors on, different rows → both committed,
+  both `read v0` (6.0 s / 8.7 s); C2 same rows → one `ROW_LEVEL_CHANGES`
+  conflict; C3 deletion vectors off → one `WITHOUT_HINT` conflict; C4 retry →
+  2,000 rows changed, second retry `updated 0`; `WriteSerializable` throughout.
+- **Constraints:** K1 `lost` refused (0 commits, 99,441 rows); K2 one bad row
+  in 1,000 refused the MERGE (price total unchanged); K3 `3156 rows … violate`
+  (= 1,359 + 1,797 NULL-sided); K4 NULL status refused; K5 PK added with **0
+  Delta commits**, duplicate inserted (2 rows). Stored rules shown exactly as
+  written.
+- **Job:** `alarm_test` is gone (Session 9's carried check); scheduled runs Oct
+  02 / 03 / 04 06:00 all green; manual run `701594167256298` with 6 tasks: all
+  green, **6m 24s** (dims chain 6m 23s is the critical path; orders 4m 53s).
+- **Alert:** saved with `orders_behind`, run → `sources_behind = 0`, **OK**.
+- `ruff` clean; `pytest` 155 passed (the first full run had one CLI smoke test
+  time out at 180 s under load; alone 12 s; full re-run green).
+
+### Built but NOT verified
+- **`newest_in_log` on a real new CDC batch** — only on scratch tables
+  (exp_04) and in production no-op runs.
+- **The orders refusal inside a stream** — `find_problems` shown read-only; no
+  live batch has raised `BatchRefused`.
+- **The alarms on a real condition** — `orders_behind` never fired; the Job's
+  new tasks have not yet run at 06:00 (tomorrow is the first).
+- **A Silver orders rebuild after ~2026-10-27** — `startingVersion=0` will then
+  fail on VACUUMed files; the documented answer (drop it, one big batch) is
+  untested.
+
+### Not done
+Nothing bound to Session 10 is left. The orders refusal has no denylist file
+(none needed yet); the parameter exists.
+
+### Incidents (4 new, two deliberate)
+1. exp_04 failed a stream on purpose inside a notebook cell — the exp_01
+   incident, repeated because its rule lived only in `incidents.md`; the rule is
+   now in CLAUDE.md's table.
+2. **DELIBERATE (exp_04):** every Silver inventory guard removed in turn.
+3. exp_04's bug-first step stopped showing the bug after the part C fix changed
+   a default it relied on; every switch is now named.
+4. **DELIBERATE (delta_concurrency_constraints):** two MERGEs at once; writes
+   breaking a rule.
+
+### Decisions (6 new, plus an addendum and a correction)
+Silver orders as an accumulating snapshot (one column per step), not "the last
+event wins"; its first run reads Bronze from version 0, three files a batch;
+CHECK constraints only for facts true at every moment of the stream; exp_04's
+contamination on scratch tables (the human's choice); the stock MERGE takes
+each SKU's newest event from the event log. **Addendum:** that also covers
+plain out-of-order arrival — the `seq` guard is now a second line. **Correction**
+under Session 9's hard-delete entry: the gap was real and is closed without
+tombstones.
+
+### Seen, recorded rather than guessed
+- **An empty micro-batch** in `silver.inventory_cdc_log` (batch 2, 0 rows,
+  committed 01:07 IST on Oct 02 — inside Session 9's first manual Job run at
+  01:04). Harmless; no later run made another. Cause not read from Bronze's
+  history.
+- **Delta's own `OPTIMIZE` (`auto: true`)** between Silver orders' MERGEs (v4,
+  v7, v10); a no-op MERGE still committed (batch 8, v13). And an `OPTIMIZE`
+  with `auto: false` on `silver.inventory` v5, 24 min after `ADD CONSTRAINT` —
+  probably Predictive Optimization; `userName` not read.
+- **A UC primary key makes no Delta commit**; it is listed under `# Constraints`
+  in `DESCRIBE TABLE EXTENDED`, not among `delta.constraints.*`.
+
+### Cost
+Databricks $0 (Free Edition: notebooks, the Job, the SQL warehouse for the
+alert). Confluent: nothing produced. AWS: nothing new.
+
+### Learning check
+**Skipped by choice, logged.** The human, 2026-10-04: "skip test, but explain the session with all
+the relevant details". A short plain-words summary came first (five steps, one order's example,
+three lessons), then a long explanation on request. Five questions were prepared and not answered;
+parked in `learning.md` as **B33–B37**: the accumulating-snapshot MERGE from memory (SQL), the fold
+per order in PySpark, the resurrected SKU and why the log fixes it, deletion vectors and row-level
+concurrency, and why `created_at IS NOT NULL` cannot be a constraint. The three theory questions
+(B30–B32) are in the bank as "not yet asked".
+
+### Hands-on checks (offered)
+- `DESCRIBE HISTORY workspace.silver.orders` — 9 MERGE commits with
+  `numTargetRowsInserted` / `numTargetRowsUpdated` falling and rising batch by
+  batch, Delta's own OPTIMIZEs between them, and batch 8's empty v13.
+- One order that was completed across batches: `SELECT * FROM
+  table_changes('workspace.silver.orders', 2) WHERE _change_type LIKE
+  'update%' LIMIT 4` — the pre-image without `delivered_at`, the post-image with.
+- `DESCRIBE HISTORY workspace.silver.exp04_d3_events` — the WRITE, the bad
+  MERGE, and the `RESTORE` with its `numRemovedFiles = 1`.
+- `DESCRIBE HISTORY workspace.silver.dx_dv` — two MERGEs, both `readVersion 0`.
+- `DESCRIBE HISTORY workspace.bronze.inventory_cdc` around 2026-10-01 19:30 UTC
+  — what made Silver CDC's empty batch 2.
+- Jobs & Pipelines → `ledgerline-silver` → tomorrow's 06:00 run: six green tasks.
+
+### Next
+**Drill 2 — attacking Silver on purpose, and re-breaking every past incident**
+(decisions.md, Session 6; `docs/coverage.md` row "Drill 2"). Silver is
+complete: dims (snapshot MERGE), inventory (CDC MERGE), orders (accumulating
+snapshot). Attack list, cross-checked against the experiment tracker
+(`exp_01`–`exp_04` done) and the coverage map:
+- **Dedup / MERGE correctness / out-of-order** — the three Silver MERGEs
+  replayed (same batch twice, a batch out of order); exp_04's guards re-run
+  against the production tables' current code.
+- **End-to-end reconciliation** — raw 112,806 → denylist + dedup 112,650; per
+  SKU, order items = CDC decrements (Verify 7) as a standing check.
+- **Silver checkpoint resets** — the Silver streams have no
+  `refuse_unsafe_reset` (Bronze's guard): delete a Silver checkpoint with the
+  same app id and see what the log lines and MERGEs do — assert the bug, then
+  decide whether Silver needs the guard.
+- **Incident regression** — every data-path incident re-triggered with its
+  guard shown to fire; an incident without a guard gets one.
+- **Lineage check, alarm regression** (`alarm_test` from the user folder;
+  `orders_behind` on a real lag).
+- Parked questions where Drill 2 touches them: B3, B25–B29.
+
+**After Drill 2:** S11 → S21 as `docs/coverage.md` section 6 lists them. Gate
+before S13: every Databricks-only row done before the Snowflake trial starts.
+
+**Carried, each a claim to re-check:**
+- **Deadline ~2026-10-27:** after it, a Silver orders rebuild must drop
+  `startingVersion` (Bronze's replaced files VACUUMed).
+- **For the Gold window (S13):** the change feed carries `delete` rows on dims,
+  inventory **and after any `RESTORE`** (53 in exp_04); the Session 6 export
+  plan (`insert` / `update_postimage` only) would drop every one. dbt snapshot
+  `hard_deletes` still to decide.
+- **For S12 (GDPR erasure):** an erasure `DELETE` running while the daily MERGE
+  writes the same table — row-level concurrency resolves different rows; same
+  rows conflict, and the loser must retry.
+- Deletion vectors on the production Silver tables (`SHOW TBLPROPERTIES`); the
+  OPTIMIZE / stats `userName`.
+- CI: the Actions log for the producer tests — still not seen.
+- Topics delete their oldest messages from ~**2026-12-25**; the Git-folder
+  token expires the same day.
+- Read-only Kafka identity for Bronze; dev-only Kafka credential.
+- Scratch leftovers: `workspace.silver.exp04_{a1,a2,b1,b1b,b2,c1,c2,d1,d3}_
+  {bronze,events,stock,log}`, `workspace.silver.dx_{dv,dv2,plain,changes,
+  orders,order_items}`, checkpoints under
+  `/Volumes/workspace/silver/checkpoints/exp04/` (rebuilt by each run), plus
+  the Session 8, Session 9 and Drill 1 lists.

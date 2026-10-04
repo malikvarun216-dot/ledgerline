@@ -55,7 +55,7 @@ deletes arrive in-band as `op = 'D'`.
 
 ## Status
 
-**Session 9 done; Session 10 next** (2026-10-02). Live on Confluent Cloud
+**Session 10 done; Drill 2 next** (2026-10-04). Live on Confluent Cloud
 (`orders`, `inventory.cdc`), S3 (nightly dimension dumps) and Databricks Free
 Edition:
 
@@ -63,11 +63,15 @@ Edition:
   Auto Loader + `replaceWhere`), with quarantine and provenance headers.
 - **Silver** — dimensions by snapshot MERGE with delete-by-absence (a bad row is
   held, not the night); inventory by CDC MERGE (op flags, in-batch dedup, `seq`
-  guard, a tie guard). Silver orders is Session 10.
-- **Alarms** — a daily Databricks Job with a failure email and two SQL alerts,
-  each seen firing.
-- **Experiments** — 3 of 6 deliberate failures done (exactly-once replay,
-  partition overwrite, the MERGE gap).
+  guard, a tie guard, the newest event read from the log so a delete is never
+  undone); orders as one row per order that fills in as its events arrive.
+  Delta `CHECK` constraints on orders, order items and stock; per SKU, units ordered = units the
+  stock feed decremented (34,448 SKUs, 0 mismatched).
+- **Alarms** — a daily Databricks Job (three Bronze → Silver chains) with a
+  failure email and two SQL alerts, each seen firing.
+- **Experiments** — 4 of 6 deliberate failures done (exactly-once replay,
+  partition overwrite, the MERGE gap, CDC correctness), plus concurrent writes
+  and constraint violations caused on purpose.
 - **Not started** — Gold (Snowflake + dbt), Airflow.
 
 The remaining plan — every Databricks / Snowflake / dbt topic, built or taught as
@@ -140,8 +144,7 @@ working notes rather than project record, so it is not in the repo:
 | [`decisions.md`](docs/decisions.md) | Every architectural choice **with its rejected alternative** |
 | [`incidents.md`](docs/incidents.md) | Every bug and deliberate breakage, each ending in a prevention rule |
 | [`progress.md`](docs/progress.md) | Session log — what was *verified*, not what was built; the experiment tracker |
-| [`coverage.md`](docs/coverage.md) | The plan: every Databricks / Snowflake / dbt topic with a weight and a session — built, or theory |
-| [`runbook.md`](docs/runbook.md) | Procedures for known failure modes, including the cost emergency |
+| [`coverage.md`](docs/coverage.md) | The plan: every Databricks / Snowflake / dbt topic with a weight and a session — built, or theory || [`runbook.md`](docs/runbook.md) | Procedures for known failure modes, including the cost emergency |
 
 Six of the incidents will be **deliberate** — patterns broken on purpose to
 observe the failure mode, each with a runnable assertion that the bug is

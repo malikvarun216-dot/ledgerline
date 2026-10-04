@@ -1442,3 +1442,46 @@ the bug it was written to show.
 - Lesson: reading the newest event from the log made the `seq` guard a second
   line of defence for plain out-of-order arrival, not just for deletes — found
   because a bug-first assertion failed instead of passing for the wrong reason.
+
+## [2026-10-04] — DELIBERATE (delta_concurrency_constraints): two MERGEs at once, and writes that break a rule — what Delta refuses, and what it lets through
+
+**In plain words:** two things CLAUDE.md lists as danger zones had never
+happened here: two jobs writing one table at the same moment, and a write that
+breaks a table rule. Both were caused on purpose on scratch copies of Silver.
+Delta refused what it should — and two of its answers were not what standard
+SQL would predict.
+
+- What happened, concurrency (two threads, one MERGE each, started at one
+  instant; a scratch copy of `silver.inventory`, 34,348 rows in **one file**):
+  - deletion vectors **on**, different rows → **both committed**, both having
+    read v0 — Databricks checked rows, not files (*row-level concurrency*);
+  - deletion vectors on, **same** rows → one committed; the other
+    `[DELTA_CONCURRENT_APPEND.ROW_LEVEL_CHANGES] … modified the same rows`;
+  - deletion vectors **off**, different rows → one failed,
+    `[DELTA_CONCURRENT_APPEND.WITHOUT_HINT]`: without deletion vectors a MERGE
+    rewrites the whole file, so rows it never touched still collide;
+  - the loser retried alone → committed (2,000 rows changed); retried again →
+    `updated 0`. Isolation level in every history row: `WriteSerializable`.
+- What happened, constraints (copies of `silver.orders` / `order_items` with the
+  production rules): status `lost` refused, nothing committed; one bad price in
+  a 1,000-row MERGE refused the whole MERGE (price total unchanged, 13,591,643.70);
+  adding `CHECK (shipped_at >= approved_at)` refused with **3,156** violating
+  rows; a NULL status refused; a `PRIMARY KEY` accepted with **no Delta commit**,
+  and a duplicate order id then **inserted fine**.
+- What I thought was wrong: nothing — deliberate. Two expectations were open
+  and are now answered: **a CHECK that evaluates to NULL is a violation** (3,156
+  = 1,359 real + 1,797 with a NULL side; standard SQL would pass those), and
+  **the primary key is not enforced** on Databricks either.
+- Root cause: optimistic concurrency checks, at commit, what a writer read and
+  rewrote against what committed since — at file grain, or row grain with
+  deletion vectors. Constraints are evaluated per row on every write, in the
+  same transaction, so one bad row fails all of it.
+- Fix: none needed in production. What it changes: CHECK rules are written for
+  never-NULL columns (all three are) or as `col IS NULL OR …`; a writer that
+  can collide (S12's GDPR erasure `DELETE` against the daily MERGE) must retry,
+  and can, because every Silver write is idempotent by its own condition.
+- Prevention rule: a rule the source itself breaks (1,359 orders shipped before
+  approval) is counted, never enforced; and every Silver writer stays safe to
+  repeat, because the only answer to a write conflict is "run it again".
+- Lesson: "enforced" and "declared" are different words — Delta enforces CHECK
+  and NOT NULL, and only declares a primary key.
