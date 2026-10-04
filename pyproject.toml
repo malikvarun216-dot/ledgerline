@@ -46,6 +46,7 @@ select = [
 "experiments/exp_03_merge_gap_stale_row.py" = ["F821", "W292"]
 "experiments/exp_04_cdc_correctness.py" = ["F821", "W292"]
 "experiments/delta_concurrency_constraints.py" = ["F821", "W292"]
+"experiments/dlt_auto_cdc_ties.py" = ["F821", "W292"]
 # Drill 1 notebooks (Databricks): same reason, plus the names they get from `%run`.
 "drills/drill1_*.py" = ["F821", "W292"]
 "drills/_drill1_*.py" = ["F821", "W292"]

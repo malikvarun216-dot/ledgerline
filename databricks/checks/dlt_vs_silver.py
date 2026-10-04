@@ -162,39 +162,51 @@ assert open_vs_scd1.different == 0
 # MAGIC
 # MAGIC Every pipeline writes an **event log**: one row per thing that happened in an update. A
 # MAGIC `flow_progress` row carries, per expectation, how many rows passed and failed. Read with the
-# MAGIC `event_log()` table function; one line per update and expectation.
+# MAGIC `event_log()` table function; one line per update, table and expectation.
+# MAGIC
+# MAGIC `event_log(TABLE(t))` returns the log of the **whole pipeline** that owns `t`, not only `t`'s
+# MAGIC rows (seen S11: the same six expectations for either table) — so it is read once, and each line
+# MAGIC names its table (`dataset`).
+# MAGIC
+# MAGIC Each expectation is checked on **every incoming row, independently**: `op_known` passes 158,725
+# MAGIC rows, the 159 that `not_denylisted` then drops included.
 
 # COMMAND ----------
 
 
-def expectations(table):
+def expectations(any_table):
     return spark.sql(f"""
         WITH progress AS (
             SELECT origin.update_id AS update_id, timestamp,
                    from_json(details:flow_progress.data_quality.expectations,
                              'array<struct<name: string, dataset: string,
                                            passed_records: bigint, failed_records: bigint>>') AS checks
-            FROM event_log(TABLE({table}))
+            FROM event_log(TABLE({any_table}))
             WHERE event_type = 'flow_progress'
               AND details:flow_progress.data_quality.expectations IS NOT NULL
         )
-        SELECT update_id, min(timestamp) AS first_seen, c.name,
+        SELECT update_id, min(timestamp) AS first_seen, c.dataset, c.name,
                sum(c.passed_records) AS passed, sum(c.failed_records) AS failed
         FROM progress LATERAL VIEW explode(checks) AS c
-        GROUP BY update_id, c.name
-        ORDER BY first_seen, c.name
+        GROUP BY update_id, c.dataset, c.name
+        ORDER BY first_seen, c.dataset, c.name
     """)
 
 
 display(expectations(CHECKED))
-display(expectations(ORDERS_CHECKED))
 
 # COMMAND ----------
 
+# 777 rows break `created_has_items`, but Silver counts 775 orders without items: an expectation counts
+# rows, and Bronze holds re-sent copies. `events` and `orders` say how many of the 777 are copies.
+no_items = F.expr("event_type = 'created' AND items IS NULL")
 orders_checked = spark.table(ORDERS_CHECKED).agg(
     F.count(F.lit(1)).alias("rows"),
-    F.count_if(F.expr("event_type = 'created' AND items IS NULL")).alias("created_no_items"),
+    F.count_if(no_items).alias("created_no_items"),
+    F.count_distinct(F.when(no_items, F.col("event_id"))).alias("events"),
+    F.count_distinct(F.when(no_items, F.col("order_id"))).alias("orders"),
 ).first()
 print(f"orders_checked: {orders_checked.asDict()}")
 assert orders_checked.rows == PREDICTED["orders rows (warn)"], "rows missing — was the rule `drop`?"
 assert orders_checked.created_no_items == PREDICTED["created_has_items failures"]
+assert orders_checked.orders == 775, "Silver orders counts 775 orders placed with no items"
