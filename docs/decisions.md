@@ -2376,3 +2376,54 @@ changed on the corrected night and changed back on the next one (merge log
 `(0, 26, 0)` and `(0, 51, 0)` against production's 25 and 50). So the
 correction reaches today's table too, through the lineage columns that record
 history. The decision stands; the reason for a person to look is stronger.
+
+## Lakeflow (DLT) runs beside production Silver in its own schema, as AUTO CDC on inventory and expectations on both streams — not as a replacement (Session 11)
+
+**In plain words:** Databricks' declarative pipelines (DLT, now "Lakeflow
+Declarative Pipelines") let you *declare* "keep the current stock per SKU from
+this change feed" in about ten lines, where production Silver inventory does it
+by hand in about 570. To learn what that declaration actually does, it is built
+**next to** production: the same Bronze rows, its own schema
+(`workspace.silver_dlt`), and a notebook that compares the two row by row. The
+numbers decide what it is good for; nothing in production reads it.
+
+- Chosen: one pipeline, `ledgerline-dlt`, two plain Python source files in
+  `databricks/dlt/`:
+  - `inventory_apply_changes.py` — `inventory_cdc_checked` (Bronze rows +
+    three expectations), then `create_auto_cdc_flow` twice from it: **SCD1**
+    (`inventory_scd1`, the twin of `silver.inventory`) and **SCD2**
+    (`inventory_scd2`, one row per stock level, `__START_AT` / `__END_AT` = `seq`).
+  - `orders_expectations.py` — `orders_checked` with the Session 7 guard
+    (`order_status` never blank) and a real data defect (775 orders placed with
+    no items) whose action is a pipeline setting: `warn`, `drop` or `fail`.
+- **The denylist becomes an `expect_or_drop`**, not a filter hidden in code:
+  the pipeline's own event log then counts the 159 copies it removes, every run.
+  It is read from `ops/incidents/` through a required setting
+  (`ledgerline.repo_root`) — a pipeline that cannot find it stops rather than
+  running without it.
+- **No in-batch dedup is written before AUTO CDC, on purpose.** Bronze holds 120
+  exact re-sent copies. Whether AUTO CDC handles two identical rows for one
+  `(sku_key, seq)` — and what it does with two *different* ones (the 53
+  contaminated events, in a deliberate run with the denylist off) — is the
+  question; production's MERGE refuses the second case (`find_problems`).
+- **Predictions are computed from Bronze and production Silver before any
+  pipeline table is read** (`databricks/checks/dlt_vs_silver.py`, cell 1):
+  checked rows 158,725 − 159; SCD1 = `silver.inventory` (34,348 SKUs / 991,530
+  units); SCD2 = 158,346 versions (one per I/U event), 34,348 open, 100 closed by
+  a delete; every version's end = `lead(seq)` over production's event log.
+- Rejected: **replace production Silver inventory with the pipeline.** Silver's
+  hand-written path has properties nothing here has shown AUTO CDC to have: a
+  refusal on tied `seq`, a chain check, the merge log the lag alarm counts, the
+  newest event *from the whole log* (no resurrected deletes). A rewrite that
+  loses one of these silently is the failure this project exists to catch. The
+  comparison may move pieces later; it does not start by moving them.
+- Rejected: **AUTO CDC for orders too.** AUTO CDC keeps, per key, the row with
+  the highest sequence — "the newest event wins", the model Session 10 rejected
+  on numbers (93 wrong statuses; Olist's own times run backwards). Orders get
+  expectations only.
+- Rejected: **a separate pipeline per source.** Free Edition allows one active
+  pipeline per type; one pipeline with two files runs both in one update.
+- Rejected: **the pipeline writing into `workspace.silver`.** Its tables would
+  sit beside production tables of almost the same name, and a full refresh of
+  the pipeline drops and rebuilds what it owns. Its own schema keeps a full
+  refresh harmless.
