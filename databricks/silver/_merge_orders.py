@@ -79,6 +79,10 @@ class BatchRefused(Exception):
     """A batch with two different times for one step of one order. Nothing was written; the next run
     retries the same batch."""
 
+
+class UnsafeStreamReset(Exception):
+    """A stream with no history about to write into an orders log that already has lines (Drill 2)."""
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -382,6 +386,38 @@ def make_batch_writer(*, app_id, denylist=(), orders_table=ORDERS, items_table=I
     return apply_batch
 
 
+def _missing_path(error):
+    """Same as `_kafka_bronze._missing_path`: on a Volume a missing path raises `INTERNAL: No such file
+    or directory`, not "not found"."""
+    text = f"{type(error).__name__} {error}".lower()
+    return any(s in text for s in ("not found", "filenotfound", "no such file"))
+
+
+def checkpoint_has_history(checkpoint):
+    """True once Spark has planned any batch here (an `offsets/N` file exists). Same as Bronze's."""
+    try:
+        return any(f.name.isdigit() for f in dbutils.fs.ls(f"{checkpoint}/offsets"))
+    except Exception as e:
+        if _missing_path(e):
+            return False
+        raise
+
+
+def refuse_unsafe_reset(checkpoint, app_id, log_table):
+    """A stream with no history may only write into an empty orders log (Drill 2). Same rule and same
+    reason as `_merge_inventory_cdc.refuse_unsafe_reset`: the MERGEs are safe to replay, the log line —
+    keyed by a batch id that restarts at 0 — is not."""
+    if checkpoint_has_history(checkpoint):
+        return
+    if spark.table(log_table).limit(1).count():
+        raise UnsafeStreamReset(
+            f"checkpoint {checkpoint} has no history, but {log_table} already has lines. A deleted "
+            f"checkpoint with app id {app_id!r} kept would leave the log silent for every replayed batch; "
+            "a new app id would log every row twice. Restore the checkpoint, or rebuild: new GENERATION "
+            "and an empty log."
+        )
+
+
 def run_silver_orders(
     *,
     checkpoint,
@@ -393,6 +429,7 @@ def run_silver_orders(
     starting_version=None,
     max_files_per_batch=None,
     denylist=(),
+    guard_reset=True,
 ):
     """One AvailableNow pass: every Bronze row not yet seen, in micro-batches, then stop.
 
@@ -402,8 +439,12 @@ def run_silver_orders(
     batch and delivered in a later one is inserted, then updated. Without them the first run reads the
     whole table as one snapshot, every order arrives complete, and the UPDATE clause never runs
     (decisions.md, Session 10). Needs the files Bronze's OPTIMIZE replaced, kept until VACUUM: 30 days.
+
+    `guard_reset=False` exists ONLY so a drill can show the checkpoint-reset trap first.
     """
     create_tables(orders_table, items_table, log_table)
+    if guard_reset:
+        refuse_unsafe_reset(checkpoint, app_id, log_table)
     reader = spark.readStream
     if starting_version is not None:
         reader = reader.option("startingVersion", starting_version)

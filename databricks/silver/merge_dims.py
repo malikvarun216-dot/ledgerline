@@ -40,7 +40,7 @@ def run_all():
     for dim in DIMS:  # one dimension's bad night does not hold back the others
         try:
             held[dim] = apply_dim(dim, allow_mass_delete=ALLOW_MASS_DELETE[dim])
-        except (NightRefused, MassDeleteRefused) as e:
+        except (NightRefused, MassDeleteRefused, MergeLogLost) as e:
             refused.append(str(e))
     if refused:
         raise RuntimeError("\n".join(refused))

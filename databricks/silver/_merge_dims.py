@@ -106,6 +106,10 @@ class NightRefused(Exception):
 class MassDeleteRefused(Exception):
     """A night would delete more of Silver than MAX_DELETE_FRACTION allows."""
 
+
+class MergeLogLost(Exception):
+    """Silver holds rows but the merge log has no line for that dimension (Drill 2)."""
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -412,18 +416,44 @@ def plan_nights(dim, bronze=BRONZE, log=MERGE_LOG):
     return apply, report
 
 
+def refuse_lost_log(dim, table, log=MERGE_LOG):
+    """A dimension with no line in the merge log may only be applied into an empty Silver table.
+
+    The merge log is this path's checkpoint: it says which night Silver shows. Without it plan_nights
+    starts again from the first night, and each old night is MERGEd over today's table — the delete
+    breaker may stop one dimension, the others replay their whole history into the change feed (Drill 2).
+    """
+    if spark.table(log).where(F.col("dimension") == dim).limit(1).count():
+        return
+    if spark.table(table).limit(1).count():
+        raise MergeLogLost(
+            f"{table} holds rows, but {log} has no line for {dim!r}: Silver would replay every night from "
+            "the first one over today's table. Restore the merge log (time travel), or rebuild this "
+            "dimension into an empty table."
+        )
+
+
 def apply_dim(
-    dim, *, allow_mass_delete=(), bronze=BRONZE, silver=SILVER, log=MERGE_LOG, rejected=REJECTED
+    dim,
+    *,
+    allow_mass_delete=(),
+    bronze=BRONZE,
+    silver=SILVER,
+    log=MERGE_LOG,
+    rejected=REJECTED,
+    guard_reset=True,
 ):
     """Bring silver.<dim> up to Bronze's newest night. Each night: contract, breaker, MERGE, held rows,
     log. Returns the number of rows held across the nights applied.
 
     `bronze`, `silver`, `log` and `rejected` exist so exp_03 can run this exact function on scratch
-    tables.
+    tables. `guard_reset=False` exists ONLY so Drill 2 can show a lost merge log first.
     """
     table = f"{silver}.{dim}"
     create_silver(table, dim)
     create_rejected(rejected)
+    if guard_reset:
+        refuse_lost_log(dim, table, log)
     held_total = 0
     apply, older = plan_nights(dim, bronze, log)
     for night in older:

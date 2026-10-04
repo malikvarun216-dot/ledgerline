@@ -77,6 +77,10 @@ class BatchRefused(Exception):
     """A batch whose order cannot be decided. Nothing was written; the next run retries the same batch."""
 
 
+class UnsafeStreamReset(Exception):
+    """A stream with no history about to write into a CDC log that already has lines (Drill 2)."""
+
+
 def load_denylist(name=DENYLIST_FILE):
     """The event ids a person decided are wrong (ops/incidents/). Found from the notebook's own folder
     upwards, so production (databricks/silver) and experiments (experiments/) read the same file."""
@@ -420,6 +424,45 @@ def make_batch_writer(
     return apply_batch
 
 
+def _missing_path(error):
+    """Same as `_kafka_bronze._missing_path`: on a Volume a missing path raises `INTERNAL: No such file
+    or directory`, not "not found"."""
+    text = f"{type(error).__name__} {error}".lower()
+    return any(s in text for s in ("not found", "filenotfound", "no such file"))
+
+
+def checkpoint_has_history(checkpoint):
+    """True once Spark has planned any batch here (an `offsets/N` file exists). Same as Bronze's."""
+    try:
+        return any(f.name.isdigit() for f in dbutils.fs.ls(f"{checkpoint}/offsets"))
+    except Exception as e:
+        if _missing_path(e):
+            return False
+        raise
+
+
+def refuse_unsafe_reset(checkpoint, app_id, log_table):
+    """A stream with no history may only write into an empty CDC log (Drill 2).
+
+    Bronze's rule (`_kafka_bronze.refuse_unsafe_reset`), on the log only. Every MERGE here is safe to
+    repeat, so a replay into the data tables changes nothing; the log line is the one write keyed by the
+    batch id, and batch ids restart at 0 with a new checkpoint:
+    - same app id: Delta skips every line up to the batch it remembers — the rows are applied, the log
+      never says so, and the lag alarm counts them as missing;
+    - new app id: every row is logged a second time, and the lag alarm stays quiet until Bronze grows
+      past the double count.
+    """
+    if checkpoint_has_history(checkpoint):
+        return
+    if spark.table(log_table).limit(1).count():
+        raise UnsafeStreamReset(
+            f"checkpoint {checkpoint} has no history, but {log_table} already has lines. A deleted "
+            f"checkpoint with app id {app_id!r} kept would leave the log silent for every replayed batch; "
+            "a new app id would log every row twice. Restore the checkpoint, or rebuild: new GENERATION "
+            "and an empty log."
+        )
+
+
 def run_silver_cdc(
     *,
     checkpoint,
@@ -429,15 +472,19 @@ def run_silver_cdc(
     events_table=EVENTS,
     stock_table=STOCK,
     log_table=CDC_LOG,
+    guard_reset=True,
     **switches,
 ):
     """One AvailableNow pass: every Bronze row not yet seen, in micro-batches, then stop.
 
     A deleted checkpoint is harmless to the data here — every MERGE is safe to repeat — but with the
     same app id the CDC log would silently skip its lines for batch ids already used. Same rule as
-    Bronze: a reset is a new GENERATION (checkpoint and app id together).
+    Bronze: a reset is a new GENERATION (checkpoint and app id together), into an empty log.
+    `guard_reset=False` exists ONLY so Drill 2 can show the trap first.
     """
     create_tables(events_table, stock_table, log_table)
+    if guard_reset:
+        refuse_unsafe_reset(checkpoint, app_id, log_table)
     query = (
         spark.readStream.table(source)
         .writeStream.foreachBatch(

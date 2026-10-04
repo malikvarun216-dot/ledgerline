@@ -49,6 +49,7 @@ select = [
 # Drill 1 notebooks (Databricks): same reason, plus the names they get from `%run`.
 "drills/drill1_*.py" = ["F821", "W292"]
 "drills/_drill1_*.py" = ["F821", "W292"]
+"drills/drill2_*.py" = ["F821", "W292"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
