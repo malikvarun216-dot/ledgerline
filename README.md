@@ -55,7 +55,7 @@ deletes arrive in-band as `op = 'D'`.
 
 ## Status
 
-**Session 10 done; Drill 2 next** (2026-10-04). Live on Confluent Cloud
+**Drill 2 done; Session 11 next** (2026-10-04). Live on Confluent Cloud
 (`orders`, `inventory.cdc`), S3 (nightly dimension dumps) and Databricks Free
 Edition:
 
@@ -69,6 +69,9 @@ Edition:
   stock feed decremented (34,448 SKUs, 0 mismatched).
 - **Alarms** — a daily Databricks Job (three Bronze → Silver chains) with a
   failure email and two SQL alerts, each seen firing.
+- **Drills** — Bronze (Drill 1) and Silver (Drill 2) attacked on purpose: replays,
+  checkpoint resets, history applied backwards, lost logs; every guard seen
+  firing, and a regression Job that re-runs every experiment.
 - **Experiments** — 4 of 6 deliberate failures done (exactly-once replay,
   partition overwrite, the MERGE gap, CDC correctness), plus concurrent writes
   and constraint violations caused on purpose.

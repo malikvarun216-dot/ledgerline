@@ -147,7 +147,7 @@ session · **X** skip (no honest use here).
 - **Built:** exactly-once replay, idempotent writes, quarantine (dead-letter
   table), delete circuit breaker, write-once landing, merge log, provenance
   headers, schema-registry contract, denylist repair, answer-key reconciliation,
-  chain check, hold-the-row, alarms; **S10:** accumulating snapshot (Silver orders), newest event from the log (no resurrected deletes), CHECK constraints, repair by `RESTORE`, conflict + retry.
+  chain check, hold-the-row, alarms; **S10:** accumulating snapshot (Silver orders), newest event from the log (no resurrected deletes), CHECK constraints, repair by `RESTORE`, conflict + retry; **Drill 2:** "a writer with no memory only writes into an empty target" (checkpoint reset and lost merge log refused), an alarm for every "not applied" path, end-to-end row-and-unit reconciliation, a one-click regression Job, refuse → email → denylist → retry seen end to end.
 - **Planned:** SCD2 (S14), late data with lookback (S17), backfill (Airflow,
   S15–S16), write-audit-publish (clone gating, S16), GDPR erasure with
   crypto-shredding (S12, S18), cost guards (S13), governance — grants and masks
@@ -163,7 +163,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | Session | Builds | Theory hooks (T rows) |
 |---|---|---|
 | **S10** ✓ | Silver orders (`MERGE INTO` on `order_id`); **exp_04** (CDC correctness: dedup, `seq` guard, late update after a delete, contamination → tie guard in the stream → repair); **`RESTORE` repair, a concurrent-write conflict, `CHECK` constraints** | classic clusters; Kafka internals + log compaction; Debezium in operation |
-| **Drill 2** | attacks on Silver (dedup, MERGE correctness, out-of-order, reconciliation 112,806 → 112,650), incident regression, **lineage check, alarm regression (`alarm_test`)** | — |
+| **Drill 2** ✓ | attacks on Silver (dedup, MERGE correctness, out-of-order, reconciliation 112,806 → 112,650), incident regression, **lineage check, alarm regression** — done 2026-10-04: Silver reset guards, old-night alarm, the refusal in a real stream + email, a regression Job for every experiment; Unity Catalog lineage follows the `foreachBatch` MERGE | — |
 | **S11** | Lakeflow expectations + **`AUTO CDC` as SCD1 and SCD2**; windowed streaming (stream-stream join, watermarks, `dropDuplicatesWithinWatermark` vs `MERGE`); **schema evolution; pipeline-health dashboard** | continuous triggers / latency; Lambda vs Kappa; Lakeflow Connect |
 | **S12** | GDPR, lakehouse half (synthetic PII, pseudonymise, erasure) + **UC grants, column masks, row filters, tags, Asset Bundles from CI** (all B?) | account console; networking; Terraform; customer-managed keys |
 | S12b (optional) | **ML point-in-time features, MLflow, model in UC** | — |

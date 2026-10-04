@@ -13,10 +13,10 @@ changes it.
 
 | # | Experiment | Layer / pattern | Due | Status |
 |---|---|---|---|---|
-| exp_01 | exactly-once replay (`txnAppId` / `txnVersion`) | Bronze Kafka | S7 | **done** S7; re-run Drill 1 |
-| exp_02 | partition overwrite: append doubles, predicate-less overwrite wipes | Bronze dims (`replaceWhere`) | **S6 — missed**; S8 | **done** S8 (two sessions late) |
-| exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8; G rewritten + H added S9 (hold the bad row) |
-| exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | **done** S10 (on time); its part C changed production (`newest_from="log"`) |
+| exp_01 | exactly-once replay (`txnAppId` / `txnVersion`) | Bronze Kafka | S7 | **done** S7; re-run Drill 1, Drill 2 (regression Job) |
+| exp_02 | partition overwrite: append doubles, predicate-less overwrite wipes | Bronze dims (`replaceWhere`) | **S6 — missed**; S8 | **done** S8 (two sessions late); re-run Drill 2 |
+| exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8; G rewritten + H added S9 (hold the bad row); re-run Drill 2 |
+| exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | **done** S10 (on time); its part C changed production (`newest_from="log"`); re-run Drill 2 |
 | exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | not started |
 | exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | not started |
 
@@ -2423,3 +2423,230 @@ before S13: every Databricks-only row done before the Snowflake trial starts.
   orders,order_items}`, checkpoints under
   `/Volumes/workspace/silver/checkpoints/exp04/` (rebuilt by each run), plus
   the Session 8, Session 9 and Drill 1 lists.
+
+---
+
+## Drill 2 — attacking Silver on purpose, and re-breaking every past incident
+Date: 2026-10-04 (named, not numbered — Session 11 is still Lakeflow and streaming)
+
+**In plain words:** nothing was built for the pipeline's own sake. Every
+guarantee Silver claims was attacked on scratch copies, and every experiment was
+re-run against today's code. Silver held where it claimed to: applied in the
+worst possible order — Bronze's history newest first — orders and stock ended
+identical to production, to the row. Three gaps turned up, all in Silver's
+*memory*, none in its data: a deleted checkpoint lost no rows but made the lag
+alarm lie (first a false page, then silence); a lost dims merge log replayed a
+whole history over today's table with no error; and a corrected old night was
+ignored with nobody told. Each now has a guard, seen firing. The orders refusal
+fired inside a real stream for the first time, and its failure email arrived.
+
+### Scope, as it actually ran
+Planned (Session 10's `### Next`, `docs/coverage.md` row "Drill 2"): Silver
+dedup / MERGE correctness / out-of-order, the 112,806 → 112,650 reconciliation,
+Silver checkpoint resets, incident regression, lineage check, alarm regression.
+All done. The human opened it as "Session 11"; the plan put Drill 2 first and
+the human chose it (named, like Drill 1). Added on the way: the dims form of a
+reset (a lost merge log), an old night re-delivered (found the alarm gap), a
+regression Job for all five experiment notebooks. Two mistakes of mine: a
+drill input defined as a query over the table it writes (incident), and an
+assertion that forgot lineage columns (a correction under the decision).
+
+### Start-of-drill re-check
+Bronze code has changed once since Drill 1 (`9a64ccb`, the CDC check expects
+the delists), so Drill 1's Bronze incident regression stands; its guards run in
+the daily Job (broker checks, quarantine self-test). The production lag alarm
+(old query) read 0; both production Silver checkpoints have history. `ruff`
+clean, `pytest` 155.
+
+### Built
+- **Silver reset guards** (decisions.md, Drill 2): `refuse_unsafe_reset`
+  in `_merge_inventory_cdc` and `_merge_orders` — a stream with no checkpoint
+  history may only write into an **empty log**; `refuse_lost_log` in
+  `_merge_dims` — no merge-log line for a dimension + rows in Silver → refuse
+  (`MergeLogLost`, collected by `merge_dims.run_all`). Each with a named
+  `guard_reset=False` for the drill only.
+- **Alarm query** (`databricks/alerts/silver_behind_bronze.sql`): a fourth part,
+  `old_nights_changed`, and every part returned as its own column; saved into
+  the alert `ledgerline silver behind bronze`.
+- **Drill notebooks** (`drills/`): `drill2_cdc` (R1, R2, G, B1, B2, B3, C),
+  `drill2_orders` (B, R, G), `drill2_dims` (S, L1, L2, L3, O + rebuild),
+  `drill2_reconcile`, `drill2_alarm_task` (a Job task meant to fail),
+  `drill2_alarm_retry`.
+- **Jobs** (no schedule, failure email): `ledgerline-drill2-alarm` (one task),
+  `ledgerline-regression` (exp_01, exp_02, exp_03, exp_04,
+  delta_concurrency_constraints in parallel — kept for Drill 3).
+- `pyproject.toml`: ruff ignores for `drills/drill2_*.py`. Tests 155 (count
+  unchanged).
+
+### Verified
+- **R — Silver CDC checkpoint deleted** (scratch; prediction written first, "no
+  data lost; the log is"): life 1 `batch 0 · 158,625 rows · 159 denied · 120
+  duplicates · 158,346 events · 34,448 inserted · chain 1,423`, stock 34,448 /
+  993,982. 100 delists appended. **Same app id:** event-log MERGE inserted
+  **100**, stock **34,348 / 991,530** (= production, extra 0 missing 0); log
+  still **1 line, 158,625 rows**, one WRITE commit, Bronze 158,725; the
+  production alert query on those tables → **1** (false alarm). History: log v1
+  WRITE, v2 WRITE (the next life), **no commit for this one**. **New app id:** a
+  second line, **317,350** logged for 158,725; 100 more rows waiting → alert
+  **0** (blind). Guard on: both refused before `readStream`, log untouched;
+  production checkpoints `inventory/v1`, `orders/v1` → history True. Run twice
+  (two run ids), identical numbers.
+- **B — Bronze CDC newest first** (batches `[0..4]` applied `[4, 3, 2, 1, 0]`):
+  inserts 0 / 3,727 / 12,699 / 9,136 / 8,786, each = the prediction from Bronze
+  alone; 0 updates, 0 deletes; stock and event log vs production **(0, 0)**;
+  whole-log chain 1,423 / 237 / 26 / 27, units 112,650; 40 events with copies in
+  more than one batch, all 40 logged from another copy. **Session 9's code**
+  (`newest_from="batch"`): stock **34,448 / 993,982**, extra 100 — **all 100
+  delisted SKUs back**. B3: the last batch again, same id → before = after,
+  every MERGE metric 0.
+- **C — new chain break** (incident 2026-10-01 re-triggered): batch line
+  `events_inserted 1 · updated 1 · chain_breaks 1`, whole log 1,423 → 1,424.
+- **Orders newest first** (batches `[8..0]`): the formula in Bronze's own order
+  reproduced production's log batch by batch (13,178 / 12,782+1,352 / 13,500+
+  1,775 / 12,194+4,227 / 12,797+3,194 / 12,224+4,075 / 12,039+2,896 /
+  10,727+1,068 / 0); backwards all 9 batches = prediction (batch 8 first: 10
+  orders, 12 items), updates 18,587 both ways; orders and items vs production
+  **(0, 0)**; 12 items from re-sent copies = the 12 units on re-sent `created`
+  events. **Restart without checkpoint:** a MERGE over 99,441 orders, 0 / 0, log
+  9 lines, WRITE commits 9 → 9. Guard refused.
+- **Dims rebuild from empty:** all 15 nights = production's first application;
+  every column of all three tables (lineage included) = production; alarm 0.
+  **Merge log lost:** customer refused, `would delete 43,689 of 43,690 rows
+  (100.0%)`, version 5 → 5; seller `+100 ~98 -0`, then the four golden nights;
+  change feed `insert 100, update_postimage 273, delete 100`; end = production.
+  Guard refused both; production's three dimensions pass. `RESTORE` the log →
+  15 files restored, "nothing new" ×3, versions `{customer 5, product 6, seller
+  13}` unchanged.
+- **Old night corrected** (seller 2017-01-02, one city): first run → `NOT
+  applied`, version 13 → 13, alarm **0**. New query: `dims_behind 0,
+  old_nights_changed 1, sources_behind 1`. Rebuild from empty (`TRUNCATE` + log
+  lines deleted): merge log `(0, 26, 0)` and `(0, 51, 0)` against production's
+  25 and 50; every business value = production; **one row's lineage moved** —
+  seller `0015a82c…`, `_last_changed_dump_date` 2016-09-04 → 2017-05-02; alarm
+  0. The new query on production: 0.
+- **Reconciliation:** CDC 158,725 rows / 112,806 units − denylisted 159 / **93**
+  (53 events) − duplicate copies 120 / **63** = 158,446 / 112,650 = Silver's
+  event log. Orders 394,164 / 112,674 − duplicates 74 / 24 = 394,090 / 112,650;
+  Silver 99,441 orders (= created events), 112,650 items. Per SKU 34,448 SKUs, 0
+  mismatched.
+- **Alarm regression — the orders refusal in a real stream:** Job
+  `ledgerline-drill2-alarm` failed (2 attempts — "Retry: 1st, Launched: By retry
+  scheduler", 2 m 42 s); output `[STREAM_FAILED] … [PYTHON_EXCEPTION] … Found
+  error inside foreachBatch Python process`, the cell's fallback
+  `AssertionError` never reached; **one email** from `prod-monitoring@
+  databricks.com` naming `refuse_in_stream`. After it: `orders 0, items 0, log
+  0`, checkpoint `offsets ['0'], commits []`. Denylisting the moved copy
+  (`ebed731a…`) and re-running the same checkpoint: `batch 0 · 2 rows · 1 event
+  · 1 inserted · 0 duplicates`, `created_at` = the real event's, 1 item,
+  `commits ['0']`.
+- **Regression Job:** all five experiments green against today's code, 23 m
+  48 s (exp_01 23 m 47 s, exp_04 20 m 51 s, exp_03 9 m 33 s, concurrency 5 m
+  48 s, exp_02 4 m 55 s).
+- **Lineage:** Catalog Explorer → `silver.orders` → upstream `bronze.orders`
+  (table), `ledgerline-silver`, `merge_orders`; downstream `dx_orders`, the
+  regression Job, `delta_concurrency_constraints`, `drill2_orders`,
+  `merge_orders`. Unity Catalog follows the `foreachBatch` → temp view → MERGE
+  pattern.
+- **Alert:** new query saved; Run alert → **OK**, condition
+  `FIRST_ROW(sources_behind) 0 > 0`.
+- `ruff` clean; `pytest` 155 passed.
+
+### Built but NOT verified
+- **The guards inside the daily Job** — the next 06:00 run after the pull is
+  the first production run with them. Expected to pass (checked read-only by
+  the drill: both checkpoints have history; `refuse_lost_log` passed for all
+  three dimensions).
+- **The new alarm part on production** — fired only on scratch tables.
+- **The refusal's own text** — the traceback was collapsed; `BatchRefused`
+  itself was not read. Pinned instead by its effects (nothing written; removing
+  only the duplicate step fixed the same batch).
+
+### Not done
+Nothing bound to Drill 2 is left. Bronze incidents were not re-triggered (code
+unchanged since Drill 1 but for one check; their guards run daily).
+
+### Incidents (5 new, 3 deliberate)
+1. **DELIBERATE:** a Silver checkpoint deleted — no data lost, the lag alarm
+   lied loudly, then went blind.
+2. Drill 2's "new broken link" counted 0: the input was a query over the table
+   the batch writes (Spark re-ran it after the insert).
+3. **DELIBERATE:** Bronze's history applied newest first — production held;
+   Session 9's code resurrected all 100 delisted SKUs.
+4. **DELIBERATE:** the dims merge log lost — customer stopped by the breaker,
+   seller replayed its history with no error.
+5. A corrected old night was ignored with nobody told.
+
+### Decisions (3 new, plus a correction)
+Silver streams refuse a checkpoint reset into a non-empty log; dims refuse to
+run with a lost merge log; a corrected old night is alarmed, not applied.
+**Correction** under the last: the current row's lineage does move.
+
+### Seen, recorded rather than guessed
+- **The per-batch chain count is exact only in order:** 1,415 summed per batch,
+  newest first, vs the true 1,423 — 8 broken links straddle a batch boundary.
+- **A failed task emails once per run**, after serverless's automatic retry.
+- **Lineage "last activity" is when data last flowed** — `bronze.orders` →
+  `silver.orders` says 3 days ago although the Job runs daily: runs that read
+  nothing write no lineage.
+- `TRUNCATE TABLE` on a scratch dims table is its own commit (`TRUNCATE`,
+  `numRemovedFiles 2`, a deletion vector removed) — deletion vectors are on for
+  tables `create_silver` makes.
+- The regression Job's lineage panel: 55 upstream, 56 downstream tables; query
+  metrics 420 queries, 3,005,141 rows read, 1,072,291 written.
+
+### Cost
+Databricks $0 (Free Edition). Confluent: exp_01 in the regression Job read the
+`orders` topic in full — a few cents. AWS: nothing new.
+
+### Hands-on checks (offered)
+- `DESCRIBE HISTORY` of the drill's `drill2_r_log` (seen: no commit for life 2)
+  and `drill2_silver.seller` (seen: `TRUNCATE`, then the rebuild).
+- Catalog Explorer → `silver.orders` → **See lineage graph** (list seen).
+- Jobs → `ledgerline-regression` → **Timeline**: exp_01's Kafka reads are the
+  critical path.
+- Tomorrow's 06:00 `ledgerline-silver` run: six green tasks with the guards in.
+
+### Learning check
+**Skipped by choice, logged.** The human, 2026-10-05: "skip test, but explain the drill with all the
+details … summary on learning". A plain-words summary of the drill came first; five questions were
+prepared and not answered, parked in `learning.md` as **B38–B42**: the per-SKU reconciliation with a
+FULL OUTER JOIN (SQL), the DataFrame re-run after its own batch's write (PySpark), why a Silver reset
+lost no data but broke the alarm, why the breaker stopped customer but not seller, and what a
+corrected old night does and does not change.
+
+### Next
+**Session 11** — `docs/coverage.md` S11, every row bound here:
+- **Lakeflow Declarative Pipelines (DLT):** expectations (Session 7's carried
+  item: `order_status` never blank) and **`AUTO CDC` / `APPLY CHANGES` as SCD1
+  and SCD2**, against the hand-written CDC MERGE (S9–S10) and the dbt snapshot
+  to come. Stub: `databricks/dlt/inventory_apply_changes.py`. One active
+  pipeline per type on Free Edition.
+- **Windowed streaming:** the stream-stream join of `orders` with
+  `inventory.cdc` with watermarks; **`dropDuplicatesWithinWatermark` vs
+  `MERGE`** (decisions.md, Session 6 addition 2) — only `AvailableNow`.
+- **Delta schema evolution** (`mergeSchema`, column mapping).
+- **AI/BI dashboard — pipeline health:** the merge logs, the alert query's five
+  columns, held rows.
+- **Theory hooks:** continuous / `ProcessingTime` triggers and latency; Lambda
+  vs Kappa; Lakeflow Connect.
+
+**Carried, each a claim to re-check:**
+- **Deadline ~2026-10-27:** a Silver orders rebuild after it must drop
+  `startingVersion` — and, since today, also start from an empty log.
+- **Gold window (S13):** the change feed carries `delete` rows on dims,
+  inventory and after any `RESTORE`; a dims **rebuild** (`TRUNCATE`, then every
+  night) is a new kind of event for the export — what `TRUNCATE` writes into the
+  change feed is not yet read. Old-night corrections change history Gold builds on.
+- **S12 (GDPR erasure):** an erasure `DELETE` racing the daily MERGE —
+  row-level concurrency; the loser retries.
+- Deletion vectors on the *production* Silver tables (`SHOW TBLPROPERTIES`); the
+  OPTIMIZE / stats `userName`.
+- CI: the Actions log for the producer tests — still not seen.
+- Topics delete their oldest messages from ~**2026-12-25**; the Git-folder token
+  expires the same day.
+- Read-only Kafka identity for Bronze; dev-only Kafka credential.
+- Scratch leftovers: `workspace.silver.drill2_{r,b1,b2}_*`, `drill2_ob_*`,
+  `drill2_alarm_*`; schemas `workspace.drill2_bronze`, `workspace.drill2_silver`;
+  checkpoints under `/Volumes/workspace/silver/checkpoints/drill2/`; Jobs
+  `ledgerline-drill2-alarm`, `ledgerline-regression` (kept for Drill 3); plus
+  the Session 10, 9, 8 and Drill 1 lists.
