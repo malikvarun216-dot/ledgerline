@@ -1412,3 +1412,33 @@ events, and asserted the damage before the fix.
   re-runs exp_04 and `merge_inventory_cdc`'s five checks.
 - Lesson: the dangerous failure is the quiet one — A1 threw an error, A2 and C
   wrote wrong rows with none. Test the case where nothing complains.
+
+## [2026-10-04] — exp_04's "bug present" step stopped showing the bug, because the fix for part C also fixed part B
+
+**In plain words:** exp_04 part B removes the `seq` guard and expects an old
+change to overwrite newer stock. On the re-run after production switched to
+"take each SKU's newest event from the event log" (part C's fix), the old change
+no longer overwrote anything — A stayed at its newer stock, and the assertion
+"expected the older event to overwrite" failed. Nothing was broken: the new
+default protects against that case too, so the experiment could no longer see
+the bug it was written to show.
+
+- What happened: `run(b1, seq_guard=False)` → A = `(…3000000000, 26)`, the
+  3rd event's stock, not the late 2nd's 27. "Run all" stopped there; C and D
+  were skipped.
+- What I thought was wrong: briefly, that the guard switch was ignored. It was
+  not: with the log's newest event, the MERGE's source for A *is* the 3rd
+  event (the log holds 1st, 2nd, 3rd; the 3rd has the highest `seq`), so even
+  an unguarded `UPDATE` writes the 3rd's values again.
+- Root cause: part B depended on a default (`newest_from`) without naming it.
+  When the default changed, the experiment silently started testing something
+  else.
+- Fix: B1 names Session 9's path (`newest_from="batch"`) and shows the bug; a
+  new B1b keeps the guard off with the production default and asserts A stays
+  at its 3rd event — this run's accidental finding, kept as a check.
+- Prevention rule: **an experiment step that shows a bug names every switch it
+  depends on**, so a change of production default cannot quietly turn "bug
+  present" into "testing the fix".
+- Lesson: reading the newest event from the log made the `seq` guard a second
+  line of defence for plain out-of-order arrival, not just for deletes — found
+  because a bug-first assertion failed instead of passing for the wrong reason.

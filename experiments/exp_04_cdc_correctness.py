@@ -204,9 +204,11 @@ assert err is None and rows_n == 2, "B25's expectation was wrong — record what
 # MAGIC %md
 # MAGIC ## B — no `seq` guard, an older change arriving after a newer one
 # MAGIC
-# MAGIC Batch 0: A's 1st and 3rd events (dedup keeps the 3rd). Batch 1: A's 2nd, late. **Bug first**, then the
-# MAGIC guard, then a newer change — the UPDATE path and the "older event ignored" path, which live data has
-# MAGIC never exercised (Session 9: one batch of inserts, one of deletes).
+# MAGIC Batch 0: A's 1st and 3rd events (dedup keeps the 3rd). Batch 1: A's 2nd, late. **Bug first** — with
+# MAGIC Session 9's newest-from-the-batch, because since Session 10 the newest event comes from the log, and
+# MAGIC the log already knows the 3rd is newer: B1b shows that, with the guard still off. Then the guard,
+# MAGIC then a newer change — the UPDATE path and the "older event ignored" path, which live data has never
+# MAGIC exercised (Session 9: one batch of inserts, one of deletes).
 
 # COMMAND ----------
 
@@ -215,9 +217,19 @@ land(b1, pick(A, 1, 3))
 run(b1)
 assert stock(b1) == {A: at(A, 3)}
 land(b1, pick(A, 2))
-run(b1, seq_guard=False)
+run(b1, seq_guard=False, newest_from="batch")
 print(f"no guard: A is {stock(b1)[A]}, the 3rd event said {at(A, 3)}, the late 2nd said {at(A, 2)}")
 assert stock(b1) == {A: at(A, 2)}, "expected the older event to overwrite the newer stock"
+
+# B1b: guard still off, newest from the log (production's default). The first run of this notebook after
+# the Session 10 switch did exactly this by accident, and A stayed at its 3rd event (incidents.md 2026-10-04).
+b1b = scratch("b1b")
+land(b1b, pick(A, 1, 3))
+run(b1b)
+land(b1b, pick(A, 2))
+run(b1b, seq_guard=False)
+print(f"no guard, newest from the log: A is {stock(b1b)[A]}")
+assert stock(b1b) == {A: at(A, 3)}, "the log's newest event should already have kept the 3rd"
 
 b2 = scratch("b2")
 land(b2, pick(A, 1, 3))

@@ -2238,3 +2238,13 @@ the delete.
   build, all 34,448 — the same work the batch dedup did). The `seq` guard stays
   on all three clauses: with the log's newest event it should never fire, and
   if it does, something else is wrong.
+
+### Addendum (2026-10-04, same session) — the log's newest event also covers what the `seq` guard covers
+
+exp_04's re-run showed it by accident: with the guard switched off and the
+newest event taken from the log, a late older update for A changed nothing (A
+stayed at its 3rd event, 26), because the log already held the newer event and
+the MERGE's source for A was that newer event. So for out-of-order arrivals the
+`seq` guard is now a second line of defence, not the only one. It stays: it
+costs nothing, and it is what keeps the MERGE correct if anyone ever runs it
+with `newest_from="batch"` again. exp_04 B1b pins this behaviour.
