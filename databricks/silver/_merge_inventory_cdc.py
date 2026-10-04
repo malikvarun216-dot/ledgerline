@@ -17,6 +17,8 @@
 # MAGIC Each micro-batch of new Bronze rows goes through one function, in this order: drop the denylist →
 # MAGIC one copy per `event_id` → refuse the batch if its order cannot be decided → add new events to the
 # MAGIC log → apply the newest event per SKU to the stock → count chain breaks → one line in the CDC log.
+# MAGIC "The newest event per SKU" is read from the whole log, not the batch (since Session 10, exp_04 C): the
+# MAGIC log remembers every delete, so an update arriving after a newer delete cannot bring the SKU back.
 # MAGIC
 # MAGIC The stock `MERGE` is the CDC path, the opposite of the dims. **Absence means nothing here**: a batch
 # MAGIC holds only what changed, so there is no `WHEN NOT MATCHED BY SOURCE` — it would delete every SKU that
@@ -333,15 +335,16 @@ def make_batch_writer(
     dedup=True,
     seq_guard=True,
     refuse=True,
-    newest_from="batch",
+    newest_from="log",
 ):
     """Return the foreachBatch function.
 
     `dedup`, `seq_guard` and `refuse` exist ONLY for exp_04 (Session 10), which removes each guard to
     watch it break. Production never passes them.
 
-    `newest_from`: where the stock MERGE takes each SKU's newest event from — `"batch"` (Session 9) or
-    `"log"` (the whole event log, so a late update cannot resurrect a deleted SKU; `newest_in_log`).
+    `newest_from`: where the stock MERGE takes each SKU's newest event from — `"log"` (production since
+    Session 10: the whole event log, so a late update cannot resurrect a deleted SKU; `newest_in_log`) or
+    `"batch"` (Session 9's behaviour, kept so exp_04 C can show the bug).
 
     Nothing printed in here reaches the notebook on serverless (incidents.md, Drill 1): the evidence is
     the CDC log table and the tables' history.

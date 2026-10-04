@@ -242,7 +242,8 @@ assert (newer.updated, newer.inserted) == (1, 0)
 # MAGIC
 # MAGIC Batch 0: X's 1st and 2nd events. Batch 1: X's delete. Batch 2: X's 3rd event, late — older than the
 # MAGIC delete. The delete removed X's row and its `seq` with it, so the late update matches nothing and is
-# MAGIC inserted. Session 9 named this gap and bound it here. **Bug first**, with production's current code.
+# MAGIC inserted. Session 9 named this gap and bound it here. **Bug first**, with Session 9's code
+# MAGIC (`newest_from="batch"`); production reads the newest event from the log since Session 10.
 
 # COMMAND ----------
 
@@ -261,7 +262,7 @@ def delete_then_late_update(part, **switches):
     return t
 
 
-c1 = delete_then_late_update("c1")
+c1 = delete_then_late_update("c1", newest_from="batch")
 extra, missing = compare_stock(c1["stock"], expected_stock(c1["events"]))
 print(f"newest from the batch: stock {stock(c1)}; vs the log's newest events extra={extra} missing={missing}")
 assert stock(c1) == {X: at(X, 3)}, "expected the deleted SKU to come back"
