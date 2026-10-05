@@ -1895,3 +1895,42 @@ column made the change feed unreadable across the rename.
 - Lesson: schema evolution fails in three different places — at the write, at
   the first value that does not fit, or at the first reader that spans the
   change — and only the first is where the change happened.
+
+## [2026-10-06] — `workspace.silver` reached 80% of Unity Catalog's 100-tables-per-schema quota, almost all of it experiment scratch — found by Databricks' email, not by us
+
+**In plain words:** Unity Catalog allows at most 100 tables in one schema.
+Production Silver is about a dozen tables, but every experiment and drill since
+Session 8 has created its scratch tables in the same schema — exp_04 alone
+makes 36 — and nothing removed them or counted them. Databricks emailed at 80%.
+At 100, the next `CREATE TABLE` in `workspace.silver` would fail, whether a
+production rebuild or an experiment asked for it.
+
+- What happened: email from Databricks, 2026-10-06 02:33 IST, "Databricks
+  account is approaching a Unity Catalog resource quota": *"Your Databricks
+  account has reached 80% of the 100 Table per Schema quota in the following
+  Schema: workspace.silver"*. Counted per prefix: (below, once measured).
+- Why nothing caught it: no check, alert or test counts tables per schema;
+  `progress.md` has carried a growing "scratch leftovers" list since Session 8 as
+  prose, which nobody acts on; each experiment rebuilds its own tables, so no
+  single run ever looks like a lot. The quota is not in CLAUDE.md's verified
+  constraints — it had never been met.
+- Measured (`information_schema.tables`, same hour): **`workspace.silver` 84
+  tables = 11 production + 73 scratch** (exp04 36, drill2 17, s11 10, dx 6,
+  exp03 4); `workspace.bronze` 23 = 8 production + 15 scratch (drill1 6, exp02 5,
+  exp01 4). Experiments that already used schemas of their own (`exp03_*`,
+  `exp03h_*`, `drill2_*` schemas: 3–5 tables each) are nowhere near it.
+  `workspace.silver_dlt` holds 9: our 4 declared tables plus 5 the pipeline made
+  itself (4 with names starting `__`, AUTO CDC's internal storage, and one
+  `event…` table).
+- Root cause: scratch tables were written into the production schemas because
+  that is where the code they exercise reads and writes; the quota was never
+  part of the design.
+- Fix: `databricks/ops/drop_scratch` removes the 88 scratch tables (plan first,
+  production by name, unknown tables stop it); new experiments write to their own
+  schema (decisions.md, same day); the 11 older notebooks move at Drill 3.
+- Prevention rule: **no experiment or drill creates a table in `bronze` or
+  `silver`** — each gets its own schema, dropped as a unit; and tables per schema
+  are on the pipeline-health dashboard against the 100 quota, beside Databricks'
+  own email at 80%.
+- Lesson: a quota nobody has met is not in anyone's checklist — the side effects
+  of experiments pile up in exactly the place production depends on.

@@ -9,7 +9,7 @@
 # MAGIC The Schema Registry contract (`BACKWARD_TRANSITIVE`, Session 7) lets a producer **add a field with a
 # MAGIC default**, **remove a field**, or **widen a type** (`int` → `long`). Bronze decodes every message with
 # MAGIC the newest schema, so each of those reaches a Delta table as a changed batch. Each part below
-# MAGIC makes one change on **scratch copies of real Bronze rows** (`workspace.silver.s11_evo_*`, rebuilt
+# MAGIC makes one change on **scratch copies of real Bronze rows** (`workspace.s11.evo_*`, rebuilt
 # MAGIC every run) with the **production Bronze writer** (`_kafka_bronze.make_batch_writer`), and shows
 # MAGIC the refusal first:
 # MAGIC
@@ -35,7 +35,10 @@
 import uuid
 
 BRONZE_ORDERS = "workspace.bronze.orders"
-S = "workspace.silver.s11_evo"
+# Own schema, never bronze / silver (incidents.md, 2026-10-06: experiment scratch filled 73 of the 100
+# tables Unity Catalog allows in workspace.silver).
+spark.sql("CREATE SCHEMA IF NOT EXISTS workspace.s11")
+S = "workspace.s11.evo"
 TARGET = f"{S}_bronze_orders"  # a scratch Bronze `orders`: same schema, Drill 1's 74 rows
 QUARANTINE = f"{S}_bronze_orders_quarantine"
 APP_ID = f"ledgerline.s11.evo.{uuid.uuid4().hex[:8]}"

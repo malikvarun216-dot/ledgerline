@@ -15,7 +15,7 @@
 # MAGIC Both parts replay Bronze's real history the way Bronze wrote it — from version 0, one Bronze commit
 # MAGIC per micro-batch (9 batches for `orders`: 8 of ~50,000 messages, then Drill 1's 74 re-sends, which
 # MAGIC carry 2016 event times but arrived on 2026-09-28). `Trigger.AvailableNow` only (Free Edition).
-# MAGIC Writes scratch tables `workspace.silver.s11_*` and new checkpoints on every run; production untouched.
+# MAGIC Writes scratch tables `workspace.s11.ws_*` and new checkpoints on every run; production untouched.
 # MAGIC
 # MAGIC - **Part A — drop duplicate order events**, three ways: `dropDuplicatesWithinWatermark` on **event
 # MAGIC   time**, on **arrival time**, and an insert-only `MERGE` on `event_id` (Silver's way).
@@ -34,7 +34,10 @@ import json
 import uuid
 
 BRONZE_ORDERS = "workspace.bronze.orders"
-S = "workspace.silver.s11"  # scratch table prefix
+# Scratch tables live in their own schema, never in bronze / silver: Unity Catalog allows 100 tables per
+# schema, and experiment scratch filled 73 of workspace.silver's (incidents.md, 2026-10-06).
+spark.sql("CREATE SCHEMA IF NOT EXISTS workspace.s11")
+S = "workspace.s11.ws"  # scratch table prefix
 RUN = uuid.uuid4().hex[:8]  # new checkpoints every run: a checkpoint is never reused across runs
 CP = f"/Volumes/workspace/silver/checkpoints/s11/{RUN}"
 COLS = ["event_id", "event_ts", "event_type", "order_id", "_kafka_timestamp", "_batch_id"]

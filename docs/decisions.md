@@ -2556,3 +2556,32 @@ decision stands with that cost stated: when it happens, Bronze's batch fails
 working on Free Edition in the same run (the retry wrote it; the column became
 `bigint`; the row reads 3000000000). Rejected now as before: enabling type
 widening up front — it would let every type change through without a person.
+
+## Experiment and drill scratch tables live in their own schema, never in `bronze` / `silver` (Session 11)
+
+**In plain words:** Unity Catalog allows 100 tables per schema, and experiment
+scratch had filled 73 of `workspace.silver`'s (incidents.md, 2026-10-06). From
+now on each experiment or drill writes its tables into a schema of its own
+(`workspace.s11`, …), so scratch can never use up a production schema's quota,
+and removing an experiment's leftovers is one `DROP SCHEMA … CASCADE`. The 88
+scratch tables already in `bronze` / `silver` are removed by
+`databricks/ops/drop_scratch` — production tables listed by name and kept, any
+unknown table stopping it before a single drop.
+
+- Chosen now: Session 11's two experiments → `workspace.s11` (`ws_*`, `evo_*`);
+  `databricks/ops/drop_scratch` (widget `mode` = `plan` by default, `drop` to
+  act; `UNDROP TABLE` restores a dropped managed table for 7 days).
+- Bound to **Drill 3**, by name: exp_01–exp_04, `delta_concurrency_constraints`
+  and the Drill 1–2 notebooks (11 files) move to schemas of their own, verified
+  by one run of the `ledgerline-regression` Job. Until then, running the
+  regression Job puts ~46 scratch tables back into `silver` (36 exp_04 + 6 dx +
+  4 exp03) and ~9 into `bronze` — under the quota with production's 11 and 8,
+  and visible on the pipeline-health dashboard's quota tile (Session 11).
+- Rejected: **one shared `workspace.scratch` schema.** It would hold the same 88
+  tables today and reach the quota there instead; per-experiment schemas stay
+  far below it and drop as a unit.
+- Rejected: **keep scratch in `silver` and clean up after each run.** It depends
+  on remembering, which is what failed — `progress.md` carried a "scratch
+  leftovers" list for four sessions and nobody acted on it.
+- Rejected: **ask for a higher quota.** Free Edition has no account team, and the
+  quota would only move the day the same pile-up stops something.
