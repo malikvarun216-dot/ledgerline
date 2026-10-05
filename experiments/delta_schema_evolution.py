@@ -15,8 +15,8 @@
 # MAGIC
 # MAGIC - **E1** a new field `channel`: append refused, nothing written → `mergeSchema`: a new column,
 # MAGIC   old rows NULL.
-# MAGIC - **E2** `schema_version` `int` → `long`: refused even with `mergeSchema` →
-# MAGIC   `delta.enableTypeWidening`.
+# MAGIC - **E2** `schema_version` `int` → `long`: what `mergeSchema` does with it, and with a value an
+# MAGIC   `int` cannot hold → `delta.enableTypeWidening`.
 # MAGIC - **E3** the new field reaching a Silver `MERGE`: `INSERT *` drops it with no error →
 # MAGIC   `MERGE WITH SCHEMA EVOLUTION`.
 # MAGIC - **E4** rename / drop a column: refused → **column mapping**, metadata only, no file rewritten.
@@ -62,14 +62,16 @@ def attempt(fn):
     return None
 
 
-def decoded_batch(n=10, extra=None, widen=None):
+def decoded_batch(n=10, extra=None, widen=None, value=None):
     """What `decode()` would hand the batch writer for `n` real messages under a changed schema: the
     record as a struct (`_record`), Kafka's coordinates, no quarantine reason. `extra` = (name, value)
-    adds a field; `widen` = (name, type) changes one field's type."""
+    adds a field; `widen` = (name, type) changes one field's type, and `value` replaces its value."""
     fields = []
     for c in RECORD_FIELDS:
         col = F.col(c)
-        fields.append(col.cast(widen[1]).alias(c) if widen and c == widen[0] else col)
+        if widen and c == widen[0]:
+            col = (F.lit(value) if value is not None else col).cast(widen[1]).alias(c)
+        fields.append(col)
     if extra:
         fields.append(F.lit(extra[1]).alias(extra[0]))
     meta = [c for c in META if c not in ("_batch_id", "_ingested_at")]  # the writer stamps these
@@ -120,16 +122,24 @@ assert spark.table(TARGET).count() == 84, "a replayed batch must not land twice"
 # MAGIC ## E2 — the producer widens a type: `schema_version` `int` → `long`
 # MAGIC
 # MAGIC Avro allows reading an `int` as a `long`, so the registry accepts this change. Delta's `mergeSchema`
-# MAGIC adds columns but does not change a column's type.
+# MAGIC adds columns; what it does to a column whose type grew is measured here (first run, S11: no error,
+# MAGIC the column stayed `int` — so the question became what happens to a value an `int` cannot hold).
 
 # COMMAND ----------
 
+INT_MAX = 2_147_483_647
 wide = decoded_batch(n=5, extra=("channel", "app"), widen=("schema_version", "bigint"))
 before = version(TARGET)
-refused = attempt(lambda: make_batch_writer(TARGET, QUARANTINE, APP_ID)(wide, 101))
-print(f"with mergeSchema, int -> long: {refused}")
-print(f"version {before} -> {version(TARGET)}; schema_version is {columns(TARGET)['schema_version']}")
-assert refused is not None and version(TARGET) == before
+small = attempt(lambda: make_batch_writer(TARGET, QUARANTINE, APP_ID)(wide, 101))
+print(f"long values that fit an int: {small or 'written'}; version {before} -> {version(TARGET)}; "
+      f"schema_version is {columns(TARGET)['schema_version']}")
+
+big = decoded_batch(n=1, extra=("channel", "big"), widen=("schema_version", "bigint"), value=3_000_000_000)
+before = version(TARGET)
+overflow = attempt(lambda: make_batch_writer(TARGET, QUARANTINE, APP_ID)(big, 102))
+landed = spark.table(TARGET).where("channel = 'big'").select("schema_version").collect()
+print(f"a long that does not fit (3,000,000,000): {overflow or 'written'}; version {before} -> "
+      f"{version(TARGET)}; landed as {[r.schema_version for r in landed]}")
 
 # Type widening: a Delta table feature (it upgrades the table's protocol). Not enabled on production
 # Bronze (decisions.md, Session 11) — shown here only to know what it takes.
@@ -137,9 +147,11 @@ widening = attempt(lambda: spark.sql(
     f"ALTER TABLE {TARGET} SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')"))
 print(f"enable type widening: {widening or 'ok'}")
 if widening is None:
-    retried = attempt(lambda: make_batch_writer(TARGET, QUARANTINE, APP_ID)(wide, 101))
-    print(f"retry: {retried or 'written'}; schema_version is now {columns(TARGET)['schema_version']}; "
-          f"rows {spark.table(TARGET).count()}")
+    retried = attempt(lambda: make_batch_writer(TARGET, QUARANTINE, APP_ID)(big, 103))
+    landed = spark.table(TARGET).where("channel = 'big'").select("schema_version").collect()
+    print(f"retry with widening: {retried or 'written'}; schema_version is now "
+          f"{columns(TARGET)['schema_version']}; big rows landed as {[r.schema_version for r in landed]}; "
+          f"INT_MAX {INT_MAX:,}")
 
 # COMMAND ----------
 

@@ -2530,3 +2530,15 @@ contract also allows) still fails the batch, so a person looks at it.
   stream stops once and picks up the new schema on restart. On the daily Job
   that is one failed attempt absorbed by serverless's automatic retry — to be
   seen when a field is first added for real, or in Drill 3.
+
+### Correction (2026-10-06, same session) — a type change does not stop Bronze
+
+The entry above says "a field changing type (`int` → `long`) still fails the
+batch, so a person looks at it". Wrong — `experiments/delta_schema_evolution`
+E2, first run: the production writer (`mergeSchema` on) appended five rows whose
+`schema_version` arrived as `long` with **no error**; the version moved 1 → 2
+and the column **stayed `int`** — Delta kept the table's type and cast the
+values into it. Values that fit an `int` land unchanged, so nothing looks
+wrong. What a value too big for an `int` does is measured next (E2, second run)
+and recorded below; until then the claim "a type change gets a person" has no
+guard behind it.

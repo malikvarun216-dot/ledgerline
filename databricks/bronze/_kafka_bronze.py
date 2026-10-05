@@ -208,9 +208,10 @@ def make_batch_writer(table, quarantine_table, app_id, *, idempotent=True, merge
     `idempotent=False` exists ONLY so exp_01 can show the bug first. Bronze never passes it.
 
     `merge_schema=True` (Session 11): a field the producer adds — which the registry's
-    BACKWARD_TRANSITIVE contract allows — becomes a new column instead of a refused batch. A type
-    change still fails the write (no type widening): that one gets a person. `merge_schema=False`
-    exists ONLY so experiments/delta_schema_evolution can show the refusal first.
+    BACKWARD_TRANSITIVE contract allows — becomes a new column instead of a refused batch. A field
+    whose type widens (`int` -> `long`) is NOT refused: the column keeps its type and the values are
+    cast into it (experiments/delta_schema_evolution E2). `merge_schema=False` exists ONLY so that
+    experiment can show the refusal of a new field first.
 
     One write path, no catalog lookups: on serverless this function runs in a cloned session,
     where `tableExists()` once answered False for a table that existed (incidents.md, 2026-09-26).
