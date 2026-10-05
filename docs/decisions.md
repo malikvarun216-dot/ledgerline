@@ -2542,3 +2542,17 @@ values into it. Values that fit an `int` land unchanged, so nothing looks
 wrong. What a value too big for an `int` does is measured next (E2, second run)
 and recorded below; until then the claim "a type change gets a person" has no
 guard behind it.
+
+**Measured (E2, second run, same day):** a `long` value that fits an `int` is
+written and the column stays `int` (version 4 → 5); **3,000,000,000** is refused:
+`CAST_OVERFLOW_IN_TABLE_INSERT … Fail to assign a value of "BIGINT" type to the
+"INT" type column … due to an overflow`, SQLSTATE 22003, version 5 → 5, nothing
+written. So no wrong value can land — serverless runs SQL in ANSI mode, which
+refuses an overflow instead of wrapping it or writing NULL — but the refusal
+comes at the **first value that does not fit**, not at the schema change. The
+decision stands with that cost stated: when it happens, Bronze's batch fails
+(email, retry, same batch), and the fix is `ALTER TABLE … SET TBLPROPERTIES
+('delta.enableTypeWidening' = 'true')` on that Bronze table and a re-run — shown
+working on Free Edition in the same run (the retry wrote it; the column became
+`bigint`; the row reads 3000000000). Rejected now as before: enabling type
+widening up front — it would let every type change through without a person.

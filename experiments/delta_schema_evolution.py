@@ -168,7 +168,10 @@ spark.sql(f"""
     CREATE OR REPLACE TABLE {SILVER_LIKE} AS
     SELECT event_id, event_type, order_id, event_ts FROM {BRONZE_ORDERS} WHERE false
 """)
-src = f"(SELECT event_id, event_type, order_id, event_ts, channel FROM {TARGET} WHERE channel IS NOT NULL)"
+# One row per event: E1 and E2's batches all took Bronze's first messages, so `channel IS NOT NULL` holds
+# 16 rows for 10 events (first run, S11: the plain MERGE inserted all 16 — exp_04 A2's silent double
+# insert of a new key, again — and the evolving MERGE then refused, three source rows per target row).
+src = f"(SELECT event_id, event_type, order_id, event_ts, channel FROM {TARGET} WHERE channel = 'web')"
 
 plain = attempt(lambda: spark.sql(f"""
     MERGE INTO {SILVER_LIKE} t USING {src} s ON t.event_id = s.event_id

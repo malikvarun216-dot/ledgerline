@@ -1838,3 +1838,60 @@ dropped without a word.
   duplicates, the same as the event-time dedup in part A.
 - `dedup_merge`: watermark null, state 0 in every batch — the MERGE path keeps
   no Spark state; its memory is the target table.
+
+## [2026-10-06] — DELIBERATE (Session 11, `experiments/delta_schema_evolution`): each schema change the registry allows, written into Delta — one silent drop, one late refusal, one broken change feed
+
+**In plain words:** the Schema Registry contract lets a producer add a field,
+remove one, or widen a type. Each was pushed into a scratch copy of Bronze with
+the production writer, then on into a Silver-style MERGE and a change-feed
+reader. A new field was refused by the old Bronze writer (now accepted), a
+widened type was accepted silently until the first value too big for the old
+type, a new field vanished from `MERGE … INSERT *` with no error, and renaming a
+column made the change feed unreadable across the rename.
+
+- What happened (scratch `workspace.silver.s11_evo_*`, 2026-10-06):
+  - **E1, a field added** (`channel`): Bronze's writer as it was
+    (`merge_schema=False`) → `DELTA_METADATA_MISMATCH`, version unchanged. As it
+    is now (`mergeSchema`) → 84 rows: 74 older with `channel` NULL, 10 with
+    `'web'`; the same batch replayed → still 84 (`txnVersion` unaffected).
+  - **E2, `schema_version` `int` → `long`**: values that fit → **written, column
+    stays `int`, no error**; 3,000,000,000 → `CAST_OVERFLOW_IN_TABLE_INSERT`,
+    nothing written. `delta.enableTypeWidening` → the retry wrote it, column
+    `bigint`.
+  - **E3, the field reaching a Silver MERGE**: `MERGE … WHEN NOT MATCHED THEN
+    INSERT *` → **no error, `channel` simply absent** from the target. (The first
+    run's source held 16 rows for 10 events — my mistake — and the plain MERGE
+    inserted all 16: a new key inserted twice, silently, as exp_04 A2 showed.)
+  - **E4, rename and drop**: without column mapping → `DELTA_UNSUPPORTED_RENAME_COLUMN`.
+    With `delta.columnMapping.mode = 'name'`: 2 files / 1,318,323 bytes before
+    and after; `RENAME COLUMN` and `DROP COLUMNS` commits with empty metrics.
+  - **E5, the change feed across them**: `table_changes(t, 1)` →
+    `DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_SCHEMA_CHANGE … between version 1 and 5`;
+    from version 5 on → reads (130 pre-images, 130 post-images).
+- What I thought was wrong: two predictions failed. **E2**: predicted "refused
+  even with `mergeSchema`" — it was accepted (the decision written on that
+  prediction got a correction the same hour). **E3**'s evolving half failed on
+  my own duplicated source, not on Delta.
+- Root cause: `mergeSchema` *adds* columns and otherwise **keeps the table's
+  types, casting incoming values into them**; ANSI mode turns a value that does
+  not fit into an error, so the cast is safe but late. `INSERT *` / `UPDATE SET *`
+  mean "every *target* column, from the source column of the same name" — a
+  source column the target lacks has nowhere to go. A rename or drop changes
+  what a column *is* between two versions, so the change feed refuses to return
+  rows that span it (it cannot give both sides one schema).
+- Why none of it would be seen: the widened type and the dropped field both
+  write successfully, and the rows look right; the overflow arrives with some
+  later value; the change-feed failure arrives only when a reader spans the
+  rename — in Session 13's export, the first run after a rename.
+- Fix: production Bronze appends with `mergeSchema` (decisions.md, Session 11);
+  production Silver already lists its columns by name (a new Bronze column is
+  ignored until mapped, by design).
+- Prevention rule: **a Silver column is never renamed or dropped in place** — a
+  rename is a new column (both kept, then the old one dropped after every reader
+  of the change feed has passed that version), and the S13 export treats any
+  rename / drop version as a new baseline (full reload). A type widening reaching
+  Bronze is fixed by enabling type widening on that table, then re-running the
+  refused batch — never by casting the producer's values down.
+- Lesson: schema evolution fails in three different places — at the write, at
+  the first value that does not fit, or at the first reader that spans the
+  change — and only the first is where the change happened.
