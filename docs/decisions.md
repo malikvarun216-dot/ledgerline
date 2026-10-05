@@ -2427,3 +2427,68 @@ numbers decide what it is good for; nothing in production reads it.
   sit beside production tables of almost the same name, and a full refresh of
   the pipeline drops and rebuilds what it owns. Its own schema keeps a full
   refresh harmless.
+
+### Findings (2026-10-05, same session) — what the side-by-side showed
+
+Four pipeline updates (`3ba4c8a4` normal, `307b9339` `fail` rule, `2109f6e2`
+denylist off, `4e8c32e8` restored) and `databricks/checks/dlt_vs_silver`:
+
+- **AUTO CDC SCD1 = production `silver.inventory`, row for row**: 34,348 SKUs,
+  0 on one side only, 0 with a different stock **or** `seq`, 991,530 units.
+- **AUTO CDC SCD2 = `lead(seq)` over production's event log, version for
+  version**: 158,346 versions, 0 missing / extra / different end / different
+  event, 34,348 open, 100 closed by a delist, 0 duplicate starts.
+- **Exact duplicates are handled for you**: the 120 re-sent copies reached AUTO
+  CDC (158,566 rows, 158,446 events) and made no extra version and no error.
+- **Ties are not**: two different events at one `(sku_key, seq)` were accepted
+  silently (incidents.md, same day). Production's refusal stays the guard.
+- **What the declaration gave for free**: per-expectation pass / fail counts in
+  the pipeline's own event log (`event_log()`), a lineage graph, retries and
+  checkpoints managed. What it took away: time travel on its tables (refused on
+  a pipeline streaming table) — the repair is a re-run from Bronze.
+- So the decision above stands, now on evidence: production Silver stays
+  hand-written; the pipeline stays beside it as the comparison and as the
+  answer to "why not DLT?" — *it equals our MERGE on clean data, and silently
+  decides the one case our MERGE refuses.*
+
+## Windowed streaming is measured on Bronze's own history replayed, as an experiment — not added to production (Session 11)
+
+**In plain words:** a watermark tells a stream "nothing older than *newest time
+seen minus a delay* will come any more", so it can forget old state — and a row
+that still arrives behind that line is dropped without an error. Whether that
+bet is safe depends on how disordered the data really is, so it is measured on
+our real data: Bronze's `orders` and `inventory_cdc` history replayed exactly as
+Bronze wrote it, one commit per micro-batch, and the result compared with the
+batch answer. Production keeps its MERGE-based dedup and batch reconciliation.
+
+- Chosen: `experiments/windowed_streaming.py`, scratch tables
+  `workspace.silver.s11_*`, new checkpoints each run.
+  - **Part A, dedup three ways** on the same replay: `dropDuplicatesWithinWatermark`
+    on **event time** (`event_ts`), on **arrival time** (`_kafka_timestamp`), and
+    an insert-only `MERGE` on `event_id` (Silver orders' way). Then one
+    genuinely new event arrives with a 2016 event time, through a second source.
+  - **Part B, the two topics joined**: order lines `LEFT OUTER JOIN` sale
+    decrements on SKU within 1 hour of the order, watermarks on both sides,
+    the sales side deduplicated with `dropDuplicatesWithinWatermark`; one sale
+    removed on purpose so exactly one line must come out unmatched; run with a
+    tight (1 minute) and a loose (1 day) watermark.
+  - Predictions from Bronze in batch SQL first: per batch, the rows at or behind
+    *(newest time in earlier batches) − delay*.
+- Why replay, not a fresh produce: the disorder that decides a watermark's cost
+  is the one Bronze really holds — three partitions cut into ~50,000-message
+  batches that do not end at the same moment of event time, and Drill 1's 74
+  re-sends that carry 2016 event times but arrived on 2026-09-28. A new produce
+  would cost Confluent money and could only show a disorder we designed.
+- Rejected: **a streaming reconciliation table in production.** Free Edition
+  runs `AvailableNow` once a day, so "real time" is state carried in a checkpoint
+  between daily runs — no fresher than the batch check Silver already runs (per
+  SKU, 0 mismatched, Drill 2). It would add a second checkpoint to guard and a
+  watermark to tune for no gain in freshness.
+- Rejected: **`dropDuplicatesWithinWatermark` in Silver orders instead of
+  `MERGE`** — the Session 6 expectation is that it either drops late genuine
+  events (event time) or keeps late duplicates (arrival time); Part A measures
+  which and how many.
+- Rejected: **`dropDuplicates` with no watermark** — exact, but its state grows
+  with every event ever seen and is never cleaned; on a stream that runs for
+  years that is a memory leak with a checkpoint. `MERGE` keeps the same memory
+  in a Delta table, where it is queryable and costs storage, not executor RAM.

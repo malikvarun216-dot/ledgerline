@@ -1712,3 +1712,49 @@ table, and `VERSION AS OF` is refused. So the repair for a DLT table is **re-run
 the pipeline from its source** — not `RESTORE` or time travel, which repaired
 hand-written Silver in Session 10 (exp_04 D). That holds only while the source
 still holds everything: here Bronze does, and Bronze is append-only.
+
+## [2026-10-05] — DELIBERATE (Session 11, `experiments/dlt_auto_cdc_ties`): AUTO CDC fed two different events at one `(sku_key, seq)` — it kept one, said nothing, and happened to keep the right one
+
+**In plain words:** Bronze still holds 53 contaminated stock events, each sharing
+a SKU and a sequence number with a real event but carrying a different stock.
+Production Silver refuses such a batch before its MERGE and emails a person.
+The same rows were fed to Lakeflow's AUTO CDC on purpose. It accepted them with
+no error and no warning, and at each of the 53 ties kept one event. It kept the
+real one every time — for a reason we can narrow to two candidates but not
+prove, and that nothing in our code decided.
+
+- What happened: pipeline `ledgerline-dlt`, setting `ledgerline.apply_denylist =
+  false`, "Run pipeline with full table refresh" (update `2109f6e2…`): all four
+  tables green, the pipeline's error / warning counters 0, the event log's
+  `WARN` / `ERROR` rows only Run 2's deliberate failure. `inventory_cdc_checked`
+  158,725 rows (159 contaminated copies, 53 events, all let through).
+  `experiments/dlt_auto_cdc_ties`: `53 ties: rows 53, no_real_twin 0,
+  stock_differs 53, kept_real 53, kept_contaminated 0, neither 0`. SCD2
+  `versions 158,346, open 34,348, distinct_starts 158,346` — one version per
+  `(sku_key, seq)`, the same count as the clean run; SCD1 vs production
+  `34,348 SKUs, 0 different`. Which rule picked the winner (SQL Editor, each
+  kept event against the dropped one): `same_partition 53, kept_arrived_first
+  53, kept_higher_stock 53, kept_larger_event_id 31`.
+- What I thought was wrong: nothing — deliberate. **Predicted** "no error, no
+  warning; one version per `(sku, seq)`; one of the two kept, which one not
+  decided by anything we wrote; SCD1 unchanged". Right on all four. The
+  prediction expected a mix of real and contaminated winners; it was 53 real.
+- Root cause: AUTO CDC orders each key's changes by `sequence_by` and needs one
+  distinct change per sequence value — Lakeflow's documentation states this as
+  a requirement, and the run shows it is **not checked**. At a tie it keeps one
+  row by a rule of its own. The data fits two rules equally: every real event
+  **arrived first** (the contamination was published by a test run after the
+  full produce, on 2026-09-26; both copies sit on one partition, since the topic
+  is keyed by SKU) **and** has the **higher stock**. Comparing event ids is ruled
+  out (31 of 53, a coin flip).
+- Fix: none to the pipeline — the denylist is back on (`apply_denylist` removed,
+  update `4e8c32e8…`: 159 dropped again, `databricks/checks/dlt_vs_silver` green).
+- Prevention rule: **a sequence tie is refused before AUTO CDC, never left to
+  it.** If Silver inventory ever moves to AUTO CDC, `find_problems`'
+  `tied_seq_vs_log` check moves with it — as an `expect_or_fail` on a view that
+  counts distinct events per `(sku_key, seq)` over the batch, or as the
+  hand-written check before the flow. Exact copies (same event twice) are safe
+  to leave to it: the 120 re-sent copies made no extra version in any run.
+- Lesson: a declarative tool that is right on your data has not shown you its
+  rule — "it kept the real event 53 of 53" holds only while the real event
+  arrives first, and a replay is exactly when that stops being true.
