@@ -2492,3 +2492,41 @@ batch answer. Production keeps its MERGE-based dedup and batch reconciliation.
   with every event ever seen and is never cleaned; on a stream that runs for
   years that is a memory leak with a checkpoint. `MERGE` keeps the same memory
   in a Delta table, where it is queryable and costs storage, not executor RAM.
+
+## Kafka Bronze accepts an added field as a new column (`mergeSchema`); a type change still stops it (Session 11)
+
+**In plain words:** the Schema Registry contract chosen in Session 7
+(`BACKWARD_TRANSITIVE`) lets a producer add a field with a default. Bronze
+decodes every message with the subject's newest schema, so the next batch would
+carry a new column — and Bronze's plain append would refuse it with a schema
+mismatch, stopping ingestion of a change the contract had already approved.
+Bronze now appends with `mergeSchema`: the new field becomes a column (older
+rows read it as NULL). A field changing type (e.g. `int` → `long`, which the
+contract also allows) still fails the batch, so a person looks at it.
+
+- Chosen: `make_batch_writer(..., merge_schema=True)` in `_kafka_bronze` —
+  `.option("mergeSchema", "true")` on both appends (data and quarantine), beside
+  `txnAppId` / `txnVersion`. `merge_schema=False` exists only for the experiment
+  that shows the refusal first (`experiments/delta_schema_evolution`, same
+  session), like `idempotent=False` for exp_01.
+- Why Bronze and not Silver: Bronze's job is to hold every record the contract
+  allows (it already keeps the raw bytes); the registry is the gate, not
+  Bronze. Silver selects its columns by name, so a new Bronze column changes
+  nothing downstream until someone maps it — the expected order of work.
+- Rejected: **keep failing on any schema change** (fail loud, redeploy). It
+  stops all ingestion — every message behind the new one waits in Kafka (3-month
+  retention) — for a change the contract already checked, and the fix is always
+  the same one-line option. A loud failure is worth it only when a person has a
+  real decision to make.
+- Rejected: **type widening on as well** (`delta.enableTypeWidening`). It would
+  let `int → long` through silently too; a type change touches Silver's typed
+  columns and the Parquet the Gold bridge exports, so it should stop and get a
+  person. Revisit if a widening ever happens for real.
+- Rejected: **Auto Loader-style "fail once, then evolve"** (`addNewColumns`): it
+  is Auto Loader's mode for files; Kafka Bronze has no schema location to
+  update, and a failure email for an approved change is noise.
+- Expected downstream, **not yet verified**: a Delta table gaining a column is
+  a schema change for every stream reading it (Silver orders and CDC): the
+  stream stops once and picks up the new schema on restart. On the daily Job
+  that is one failed attempt absorbed by serverless's automatic retry — to be
+  seen when a field is first added for real, or in Drill 3.

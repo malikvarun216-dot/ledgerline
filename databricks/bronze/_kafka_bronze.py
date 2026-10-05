@@ -202,10 +202,15 @@ def _bad(df):
 # COMMAND ----------
 
 
-def make_batch_writer(table, quarantine_table, app_id, *, idempotent=True):
+def make_batch_writer(table, quarantine_table, app_id, *, idempotent=True, merge_schema=True):
     """Return the foreachBatch function.
 
     `idempotent=False` exists ONLY so exp_01 can show the bug first. Bronze never passes it.
+
+    `merge_schema=True` (Session 11): a field the producer adds — which the registry's
+    BACKWARD_TRANSITIVE contract allows — becomes a new column instead of a refused batch. A type
+    change still fails the write (no type widening): that one gets a person. `merge_schema=False`
+    exists ONLY so experiments/delta_schema_evolution can show the refusal first.
 
     One write path, no catalog lookups: on serverless this function runs in a cloned session,
     where `tableExists()` once answered False for a table that existed (incidents.md, 2026-09-26).
@@ -219,6 +224,8 @@ def make_batch_writer(table, quarantine_table, app_id, *, idempotent=True):
         # first write is skipped and the second goes through.
         for rows, target in ((_good(stamped), table), (_bad(stamped), quarantine_table)):
             writer = rows.write.format("delta").mode("append")
+            if merge_schema:
+                writer = writer.option("mergeSchema", "true")
             if idempotent:
                 writer = writer.option("txnAppId", app_id).option("txnVersion", batch_id)
             writer.saveAsTable(target)

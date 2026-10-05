@@ -1758,3 +1758,83 @@ prove, and that nothing in our code decided.
 - Lesson: a declarative tool that is right on your data has not shown you its
   rule — "it kept the real event 53 of 53" holds only while the real event
   arrives first, and a replay is exactly when that stops being true.
+
+## [2026-10-06] — DELIBERATE (Session 11, `experiments/windowed_streaming`): watermarks on Bronze's replayed history — every table right, and two of three predictions wrong
+
+**In plain words:** Bronze's order history was replayed through three
+deduplication methods and a stream-stream join, with watermarks tight and
+loose. Every output matched the batch answer. The predictions, computed from
+Bronze in SQL first, said a 1-hour event-time watermark would lose 6,718 real
+events and a 1-minute join watermark 1,851 order lines; both lost **0**. The
+predictions were wrong about *which* watermark Spark uses to call a row late,
+and about what moves a watermark. The real cost of a watermark showed up only
+in the one place it was designed to: a genuinely new event arriving late was
+dropped without a word.
+
+- What happened (run `92336d00`, 2026-10-06): Bronze `orders` replays as 9
+  batches — 8 of ~50,000 (each ~3 months of event time; neighbours overlap by
+  ~1.5 days, e.g. batch 0 ends 2017-06-14 14:43, batch 1 starts 2017-06-13
+  03:50) and Drill 1's 74 re-sends (37 events, 2016 event times, arrived
+  2026-09-27 18:43). **All 394,090 originals reached Kafka within 6 seconds**
+  (2026-09-26 08:36:07 → 08:36:13). Dedup, `event_ts` watermark 1 h / arrival
+  (`_kafka_timestamp`) watermark 1 h / insert-only MERGE on `event_id`: each
+  **394,090 rows = 394,090 events, 0 duplicates, 0 Bronze events lost**. One new
+  event with a 2016 event time, arriving now: event-time **dropped it**; arrival
+  and MERGE **kept it** (394,091). Join, order lines ⟕ sale decrements within 1 h,
+  one sale removed on purpose: batch answer 102,425 lines, 102,424 matched, 1
+  unmatched; stream with a 1-minute and with a 1-day watermark: **102,424 / 1 /
+  0 never written**, both. Dedup before the join (two stateful operators
+  chained) ran on serverless with no error.
+- What I thought was wrong (the predictions, written before the run): event
+  time would lose **6,718** first copies (rows at or behind *newest event time in
+  all earlier batches − 1 h*); arrival time would keep **~37** re-sends as
+  duplicates (originals long forgotten); the tight join would never write
+  **1,851** lines.
+- Root cause, two mechanisms:
+  1. **A row is judged late against the previous batch's watermark, not the
+     current one.** Spark (3.4+) keeps two per micro-batch: one to evict state
+     (*newest time through the previous batch − delay*) and one to drop late
+     rows (the previous batch's eviction watermark — one batch older still), so
+     that chained stateful operators do not drop each other's output. The
+     progress report shows it: `dedup_arrival` batch 2 ran under
+     `2026-09-26T07:36:07.85`, batch **0**'s newest arrival (08:36:07.859) − 1 h.
+     Against batches two back — 3 months behind — no row was late. With
+     3-month batches the delay setting (1 minute vs 1 day) made **no difference**:
+     batch size, not delay, decided lateness.
+  2. **A watermark moves only when newer data arrives.** The arrival-time dedup
+     held **all 394,090 ids in state** (state rows 394,090 at batches 7–9): the
+     history arrived in 6 seconds, then nothing for 34 hours but the re-sends,
+     so the watermark never passed the originals and the re-sends met them in
+     state. On a live topic with steady traffic the watermark would have passed
+     them within hours and the re-sends would have come through as duplicates.
+- Why the right answers are partly accidents: the event-time dedup removed the
+  74 re-sends **as late rows, not as duplicates** — the same rule that then
+  dropped the genuinely new late event. The arrival-time dedup was right only
+  because the topic was quiet. MERGE was right by construction: its memory is
+  the target table, and it never forgets.
+- Fix: none to production — Silver orders keeps its MERGE dedup (decisions.md,
+  same session).
+- Prevention rule: **a watermark is sized from live arrival disorder, never from
+  a replay or backfill** — a replay's batches are months wide and its watermark
+  lags two of them; predict lateness against the *previous* batch's watermark.
+  Dedup that must be exact (every genuine event kept, every copy removed) is a
+  MERGE on the event id, not a watermark.
+- Lesson: "1 hour" in a watermark is one hour of *data*, not of clock — a quiet
+  stream never forgets, and a replayed one never calls anything late.
+
+### Follow-up (2026-10-06, same run) — what the progress reports showed
+
+- Join, per micro-batch: `join_loose` batch 2 ran under 2017-06-13 14:43:13 —
+  batch 0's newest order (2017-06-14 14:43:13) − 1 day: the watermark is two
+  batches back here too. **Peak state 194,169 rows (1-day delay) vs 193,661
+  (1-minute)** — 508 apart. The stock stream's batches cover ~9 months of event
+  time against ~3 for orders, so sale rows wait in state for orders to catch
+  up; state then drains to 3 rows by batch 9. The delay barely moved it — the
+  speed difference between the two streams set it.
+- `dropped_by_watermark` **60 at batch 3 and 20 at batch 8, the same in both
+  runs**, while no order line went missing (0 never written): all 80 were
+  re-sent copies (Drill 1's order re-sends in batch 8; the stock feed's re-sends,
+  most likely, in batch 3 — not checked row by row) — removed as late, not as
+  duplicates, the same as the event-time dedup in part A.
+- `dedup_merge`: watermark null, state 0 in every batch — the MERGE path keeps
+  no Spark state; its memory is the target table.

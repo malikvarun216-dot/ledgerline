@@ -50,7 +50,7 @@ session · **X** skip (no honest use here).
 | `RESTORE` / repair by time travel | ★★★ | ✓ S10 (exp_04 D: guard off → 53 bad events → `RESTORE`; the change feed shows it as 53 `delete` rows) |
 | Concurrent writes: optimistic concurrency, conflict exceptions, isolation levels | ★★★ | ✓ S10 (row-level concurrency with deletion vectors; same rows / no deletion vectors → conflict; retry) |
 | Delta constraints (`NOT NULL`, `CHECK`) — enforced; `PRIMARY KEY` informational on both platforms (corrected S10) | ★★ | ✓ S10 (production: `status_known`, `money_not_negative`, `stock_not_negative`; NULL counts as a violation) |
-| Watermarks, stream-stream join, `dropDuplicatesWithinWatermark` vs `MERGE` | ★★★ | B S11 |
+| Watermarks, stream-stream join, `dropDuplicatesWithinWatermark` vs `MERGE` | ★★★ | ✓ S11 (`experiments/windowed_streaming`: three dedups and a left outer join on Bronze's replay = the batch answer; a genuine late event dropped by the event-time watermark only; late rows judged against the previous batch's watermark; a quiet stream's state never shrinks) |
 | Lakeflow Declarative Pipelines (DLT): expectations; `AUTO CDC` / `APPLY CHANGES` as SCD1 (vs the S9 hand-written MERGE) and SCD2 (vs the dbt snapshot) | ★★★ | ✓ S11 (pipeline `ledgerline-dlt`: SCD1 = production row for row, SCD2 = `lead(seq)` over the event log; warn / drop / fail on real rows; a failed full refresh empties the table; ties accepted silently) |
 | Delta schema evolution (`mergeSchema`, column mapping) | ★★ | B S11 |
 | AI/BI dashboard on the SQL warehouse — pipeline health (merge logs, stream progress, held rows) | ★★ | B S11 |
