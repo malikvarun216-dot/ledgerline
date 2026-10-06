@@ -2650,3 +2650,200 @@ corrected old night does and does not change.
   checkpoints under `/Volumes/workspace/silver/checkpoints/drill2/`; Jobs
   `ledgerline-drill2-alarm`, `ledgerline-regression` (kept for Drill 3); plus
   the Session 10, 9, 8 and Drill 1 lists.
+
+---
+
+## Session 11 — Lakeflow beside Silver, watermarks measured, schema evolution, and a quota nobody watched
+Date: 2026-10-05 → 10-06
+
+**In plain words:** Databricks' declarative pipelines (Lakeflow, formerly DLT)
+were built **beside** production Silver on the same Bronze rows: AUTO CDC gave
+the same current stock as the hand-written MERGE row for row, and a stock
+history equal to the event log's own timeline version for version — and, fed
+the 53 contaminated events on purpose, it kept one of each pair with no error
+and no warning, where production refuses. Expectations ran warn / drop / fail
+on 777 real rows; a failed full refresh left a table empty. Watermarks were
+measured on Bronze's replayed history: every method matched the batch answer,
+two predictions failed for reasons now understood, and a genuinely late event
+was silently dropped by the event-time watermark. Schema evolution was pushed
+through the production Bronze writer, which now accepts an added field. An
+email from Databricks showed experiment scratch filling 84 of the 100 tables
+Unity Catalog allows in `workspace.silver`; 88 scratch tables were removed by an
+explicit plan and experiments now get schemas of their own. A pipeline-health
+dashboard, built from git, shows the pipeline healthy on one page.
+
+### Scope, as it actually ran
+Planned (Drill 2's `### Next`, `docs/coverage.md` S11): Lakeflow expectations +
+AUTO CDC as SCD1 and SCD2; windowed streaming (stream-stream join, watermarks,
+`dropDuplicatesWithinWatermark` vs MERGE); Delta schema evolution; an AI/BI
+pipeline-health dashboard; three theory hooks. **All done.** Added: one
+production change (Kafka Bronze appends with `mergeSchema`); two deliberate
+Lakeflow experiments (a tie fed to AUTO CDC; `expect_or_fail` on a full
+refresh); the Unity Catalog quota incident and its fix. Mistakes of mine, each
+caught by a run: a SQL string passed to `count_if` as a column name; `.cache()`
+on serverless; E2 predicted a refusal (the decision written on it was corrected
+the same hour); E3 merged a duplicated source; two watermark predictions; the
+streaming decision left without its outcome until the human asked where it stood.
+
+### Start-of-session re-check
+Docs read in order; git clean at `45e1a8c`; `ruff` clean, `pytest` 155. No
+experiment due (exp_05 / exp_06 are Gold).
+
+### Built
+- **Lakeflow pipeline `ledgerline-dlt`** (serverless, Triggered; catalog
+  `workspace`, schema **`silver_dlt`**; source path the Git folder's
+  `databricks/dlt/`; setting `ledgerline.repo_root`):
+  `inventory_apply_changes.py` (`inventory_cdc_checked` with `not_denylisted`
+  drop / `op_known` fail / `stock_present` warn → `create_auto_cdc_flow` as
+  `inventory_scd1` and `inventory_scd2`, `sequence_by = seq`, deletes `op = 'D'`)
+  and `orders_expectations.py` (`orders_checked`: `order_status_present`,
+  `event_type_known` fail, `created_has_items` warn / drop / fail by setting).
+- **`databricks/checks/dlt_vs_silver`** — predictions from Bronze + production
+  first, then SCD1 vs `silver.inventory`, SCD2 vs `lead(seq)` over the event log,
+  open SCD2 vs SCD1, the pipeline's expectation counts from `event_log()`.
+- **`experiments/dlt_auto_cdc_ties`**, **`experiments/windowed_streaming`**,
+  **`experiments/delta_schema_evolution`** (scratch; the last two now write to
+  `workspace.s11`).
+- **Production:** `_kafka_bronze.make_batch_writer(..., merge_schema=True)` —
+  both Bronze appends with `mergeSchema`.
+- **`databricks/ops/drop_scratch`** — widget `mode` (`plan` default / `drop`),
+  production listed by name, unknown tables stop it.
+- **Dashboard `pipeline_health`**: datasets in
+  `databricks/dashboards/pipeline_health/*.sql` + the two alert queries,
+  `scripts/build_dashboard.py` → `pipeline_health.lvdash.json`,
+  `tests/test_dashboard.py`; imported (draft, not published).
+- Tests 155 → **157**; `pyproject.toml` ruff entries for the four notebooks.
+
+### Verified
+- **Lakeflow, Run 1** (update `3ba4c8a4`): dry run graph as declared; checked
+  **158,566** rows (159 dropped), 158,446 events (the 120 re-sent copies reached
+  AUTO CDC). **SCD1 = production**: 34,348 SKUs, 0 on one side, 0 different stock
+  or `seq`, 991,530 units. **SCD2 = `lead(seq)` over the event log**: 158,346
+  versions, 0 missing / extra / different end / different event, 34,348 open,
+  100 closed by a delist, 0 duplicate starts; open SCD2 = SCD1 (0 different).
+  Event log: `not_denylisted` 158,566 / **159**, `op_known` 158,725 / 0,
+  `stock_present` 158,725 / 0, `created_has_items` 393,387 / **777**,
+  `event_type_known` and `order_status_present` 394,164 / 0. `orders_checked`
+  394,164 rows; 777 rows = **775 events = 775 orders**.
+- **Run 2** (`307b9339`, `items_rule = fail`, full refresh of `orders_checked`
+  only): `EXPECTATION_VIOLATION`, order `809a282b…` (partition 2, offset 130446);
+  table **0 rows**; history v3 `DLT REFRESH`, v4 `DLT SETUP`, v5
+  `SET TBLPROPERTIES` (row tracking), no write; `VERSION AS OF 2` **refused**.
+- **Run 3** (`2109f6e2`, denylist off, full refresh all): green, 0 errors / 0
+  warnings; 158,725 rows; **53 ties: kept_real 53, kept_contaminated 0**; SCD2
+  158,346 versions = 158,346 distinct starts; SCD1 vs production 0 different;
+  tie rule: same partition 53, arrived first 53, higher stock 53, larger event
+  id 31. **Run 4** (`4e8c32e8`, restored): 159 dropped; check notebook green.
+- **Windowed streaming** (run `92336d00`): Bronze `orders` 9 batches, the
+  394,090 originals produced within 6 s; dedup by event time / arrival time /
+  MERGE: **394,090 events each, 0 duplicates, 0 lost**; a new late event: event
+  time **dropped**, arrival and MERGE kept (394,091). Join: batch 102,425 lines,
+  102,424 matched, 1 unmatched; stream with 1 minute and 1 day watermarks
+  **102,424 / 1 / 0 never written**. Progress: batch k runs under *newest through
+  batch k−2 − delay*; peak join state 194,169 (1 day) vs 193,661 (1 minute);
+  `dropped_by_watermark` 60 + 20 (re-sent copies) in both; MERGE path state 0.
+  Predictions from SQL said 6,718 events / 1,851 lines lost — wrong (incident).
+- **Schema evolution** (production writer on scratch): E1 refused without
+  `mergeSchema` (`DELTA_METADATA_MISMATCH`), 84 = 74 NULL + 10 with it, replay
+  no-op; E2 `long` into `int` written as `int`, 3,000,000,000 →
+  `CAST_OVERFLOW_IN_TABLE_INSERT`, type widening → `bigint`, 3000000000; E3
+  `INSERT *` dropped `channel` silently, `MERGE WITH SCHEMA EVOLUTION` added it
+  (10 of 10); E4 rename refused without column mapping, with it 2 files /
+  1,318,323 bytes before and after; E5 change feed across the rename →
+  `DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_SCHEMA_CHANGE`, after it reads fine.
+- **Quota:** `workspace.silver` 84 = 11 + 73 scratch, `workspace.bronze` 23 = 8 +
+  15; plan checked name by name; drop → **11 and 8 left**, the production names.
+- **Dashboard:** imported; sources behind 0, rows held 0, SKUs mismatched 0,
+  reconciliation 34,448 / 0 / 112,650 / 112,650; lag parts 0; merge logs,
+  expectations, Bronze micro-batches shown.
+- `ruff` clean; `pytest` **157** passed.
+
+### Built but NOT verified
+- **Bronze `mergeSchema` in a real stream**, and what Silver's streams do when a
+  Bronze table gains a column (expected: stop once, resume on restart — the
+  serverless retry). The daily Job runs the new writer from the next pull with
+  nothing to read.
+- `windowed_streaming` and `delta_schema_evolution` from `workspace.s11` (moved
+  after their last runs).
+- The dashboard's filtered Bronze tile (rebuilt, not re-imported); not published.
+- AUTO CDC's tie rule — "first to arrive" and "higher stock" not separated.
+- Continuous pipeline mode on Free Edition — not tried.
+
+### Not done
+Nothing bound to Session 11 is left. Bound to Drill 3 by name: the 11 older
+experiment / drill notebooks move to schemas of their own, and exp_01 stops
+writing into `bronze.stream_progress`.
+
+### Incidents (5 new, 4 deliberate)
+1. **DELIBERATE:** `expect_or_fail` on a full refresh — stopped at the first bad
+   row, left the table empty; time travel refused on a pipeline table.
+2. **DELIBERATE:** AUTO CDC fed two different events at one `(sku_key, seq)` —
+   kept one, said nothing.
+3. **DELIBERATE:** watermarks on Bronze's replay — every table right, two of
+   three predictions wrong (late = previous batch's watermark; watermarks move
+   only with data).
+4. **DELIBERATE:** each schema change the registry allows, into Delta — a silent
+   drop, a late refusal, a broken change feed.
+5. `workspace.silver` at 80% of Unity Catalog's 100-tables-per-schema quota,
+   almost all experiment scratch.
+
+### Decisions (5 new, plus a correction and two addenda)
+Lakeflow beside Silver, not replacing it (+ findings); windowed streaming as an
+experiment on Bronze's replay (+ outcome: Silver keeps MERGE dedup); Kafka
+Bronze appends with `mergeSchema` (+ correction: a type change does not stop
+Bronze, measured); experiment scratch in schemas of its own; the dashboard
+built from git, reusing the alerts' SQL.
+
+### Seen, recorded rather than guessed
+- The pipeline made 5 tables of its own in `silver_dlt` (4 named `__…`, AUTO
+  CDC's storage; one event table) and turns on row tracking.
+- `event_log(TABLE(t))` returns the whole pipeline's log.
+- `CREATE OR REPLACE TABLE` keeps the table's history (versions continue).
+- A notebook's first data cell on serverless took minutes (start-up), the same
+  query 2 s on the next run.
+- exp_01 writes its progress rows into production's `bronze.stream_progress`.
+- Databricks emails at 80% of a Unity Catalog quota.
+
+### Cost
+Databricks $0. Confluent: nothing read (every stream read Bronze). AWS: nothing new.
+
+### Hands-on checks (offered)
+- Jobs & Pipelines → `ledgerline-dlt` → graph, and each update's expectation
+  counts; `DESCRIBE HISTORY workspace.silver_dlt.orders_checked` (`DLT REFRESH`).
+- Catalog Explorer → `workspace.silver_dlt` → the `__…` tables the pipeline made.
+- Dashboards → `pipeline_health` (draft): Publish vs draft.
+- Query History: `windowed_streaming`'s streaming queries.
+
+### Learning check
+**Skipped by choice, logged.** The human, 2026-10-06: *"skip test, skip
+explanation here, just write all the patterns new decision we did"*. Five
+questions parked in `learning.md` as **B46–B50**; theory questions **B43–B45**
+added, not yet asked.
+
+### Next
+**Session 12** — `docs/coverage.md` S12: GDPR, lakehouse half (synthetic PII,
+pseudonymise in Silver, erasure) + **Unity Catalog grants, groups and service
+principals, column masks, row filters, tags, Asset Bundles from CI** — every one
+**B?**: verify on Free Edition first, else theory with the finding recorded.
+Theory hooks: account console; networking; Terraform; customer-managed keys.
+Also bound to S12: an erasure `DELETE` racing the daily MERGE (row-level
+concurrency; the loser retries).
+
+**Carried, each a claim to re-check:**
+- **Deadline ~2026-10-27:** a Silver orders rebuild and any re-run of
+  `windowed_streaming` need Bronze's replaced files (`startingVersion = 0`).
+- **Gold window (S13):** the change feed cannot be read across a rename or drop
+  (E5) — never rename a Silver column in place, and the export treats such a
+  version as a new baseline; it carries `delete` rows (dims, inventory, any
+  `RESTORE`); the Lakeflow SCD2 (`__START_AT` / `__END_AT` from `seq`) is the
+  comparison for exp_05's dbt snapshot.
+- **Drill 3:** the 11 older notebooks to their own schemas, one regression-Job
+  run; exp_01 out of `bronze.stream_progress`; a real added field through Bronze
+  `mergeSchema` and Silver's streams.
+- **Dashboard:** re-import the rebuilt file; decide whether to publish.
+- **Clean-up in the workspace:** the spare empty pipeline "New Pipeline
+  2026-10-05 00:37" and its folder; the `ledgerline-dlt` root folder's empty
+  `my_transformation.py`; `drop_scratch`'s widget back on `plan`.
+- Deletion vectors on the production Silver tables; the OPTIMIZE `userName`;
+  CI's Actions log for the producer tests; topics empty and the Git-folder token
+  expires ~2026-12-25; read-only Kafka identity for Bronze; dev-only Kafka key.

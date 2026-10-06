@@ -2613,3 +2613,25 @@ own file format (`.lvdash.json`), which is imported into Databricks in one step.
 - Not built: a separate SQL Alert on the quota — Databricks itself emails at 80%
   (that is how the 2026-10-06 incident was found); the dashboard tile shows the
   number between those emails.
+
+### Outcome (2026-10-06) — the windowed-streaming entry above, closed on its numbers
+
+The entry "Windowed streaming is measured on Bronze's own history replayed …"
+left two questions to the experiment. Answered (incidents.md, 2026-10-06,
+`windowed_streaming`):
+
+- **Silver orders keeps its MERGE dedup; `dropDuplicatesWithinWatermark` is not
+  adopted.** On the replay all three methods gave 394,090 events, but for
+  different reasons: the event-time watermark removed Drill 1's re-sends as
+  *late rows*, and the same rule dropped a genuinely new late event; the
+  arrival-time watermark caught the re-sends only because the topic was quiet
+  for 34 hours, so its state held all 394,090 ids and never shrank. MERGE was
+  right by construction — the table is its memory. Production unchanged.
+- **The stream-stream join stays an experiment.** With a 1-minute and a 1-day
+  watermark it matched the batch answer (102,424 matched, exactly the 1 injected
+  unmatched line, 0 lost), and dedup chained before it works on serverless. The
+  production cross-source check stays the batch per-SKU reconciliation — now
+  also a dashboard tile (decisions.md, same session).
+- The scratch tables it wrote (`s11_*` in `workspace.silver`) were among the 88
+  removed after the quota incident; the notebook now writes to
+  `workspace.s11.ws_*` and rebuilds them on its next run.

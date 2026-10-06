@@ -52,8 +52,8 @@ session · **X** skip (no honest use here).
 | Delta constraints (`NOT NULL`, `CHECK`) — enforced; `PRIMARY KEY` informational on both platforms (corrected S10) | ★★ | ✓ S10 (production: `status_known`, `money_not_negative`, `stock_not_negative`; NULL counts as a violation) |
 | Watermarks, stream-stream join, `dropDuplicatesWithinWatermark` vs `MERGE` | ★★★ | ✓ S11 (`experiments/windowed_streaming`: three dedups and a left outer join on Bronze's replay = the batch answer; a genuine late event dropped by the event-time watermark only; late rows judged against the previous batch's watermark; a quiet stream's state never shrinks) |
 | Lakeflow Declarative Pipelines (DLT): expectations; `AUTO CDC` / `APPLY CHANGES` as SCD1 (vs the S9 hand-written MERGE) and SCD2 (vs the dbt snapshot) | ★★★ | ✓ S11 (pipeline `ledgerline-dlt`: SCD1 = production row for row, SCD2 = `lead(seq)` over the event log; warn / drop / fail on real rows; a failed full refresh empties the table; ties accepted silently) |
-| Delta schema evolution (`mergeSchema`, column mapping) | ★★ | B S11 |
-| AI/BI dashboard on the SQL warehouse — pipeline health (merge logs, stream progress, held rows) | ★★ | B S11 |
+| Delta schema evolution (`mergeSchema`, column mapping) | ★★ | ✓ S11 (`experiments/delta_schema_evolution` with the production Bronze writer: a new field refused → `mergeSchema` (now production); `int`→`long` kept as `int` until a value overflows; type widening; `INSERT *` drops new columns silently; column mapping renames without rewriting files; the change feed cannot span a rename) |
+| AI/BI dashboard on the SQL warehouse — pipeline health (merge logs, stream progress, held rows) | ★★ | ✓ S11 (`pipeline_health`, built from git by `scripts/build_dashboard.py`, imported; 12 tiles incl. the alerts' own SQL, per-SKU reconciliation, UC table quota, Lakeflow expectations) |
 | Unity Catalog grants, groups, service principals | ★★★ | B? S12 |
 | Column masks, row filters, tags | ★★ | B? S12 |
 | Asset Bundles deployed from CI | ★★★ | B? S12 |
@@ -112,7 +112,7 @@ session · **X** skip (no honest use here).
 | Topic | Weight | Status |
 |---|---|---|
 | Classic clusters: sizing, autoscaling, spot instances, job vs all-purpose clusters, pools, policies | ★★★ | T ✓ S10 |
-| Continuous / `ProcessingTime` triggers, latency tuning | ★★★ | T S11 |
+| Continuous / `ProcessingTime` triggers, latency tuning | ★★★ | T ✓ S11 |
 | Spark UI and most Spark settings (serverless manages them) | ★★★ | T S21 |
 | Photon on vs off (serverless always runs it) | ★★ | T S21 |
 | Account console: SCIM, account groups, multiple workspaces | ★★ | T S12 |
@@ -120,7 +120,7 @@ session · **X** skip (no honest use here).
 | Terraform provider | ★★ | T S12 |
 | Disaster recovery: deep-clone replication, multi-region | ★★ | T S16 |
 | Customer-managed keys | ★ | T S12 |
-| Lakeflow Connect managed connectors | ★ | T S11 |
+| Lakeflow Connect managed connectors | ★ | T ✓ S11 |
 
 **Blocked by the Snowflake trial** (one account, 30 days).
 
@@ -139,7 +139,7 @@ session · **X** skip (no honest use here).
 |---|---|---|
 | Kafka internals: partitions, consumer groups, rebalancing, **log compaction** (a natural fit for a CDC topic) | ★★★ | T ✓ S10 |
 | Debezium in operation: initial snapshot, log positions, schema history, tombstones (we copy its message shape, not its operations) | ★★★ | T ✓ S10 |
-| Lambda vs Kappa architecture; real-time latency trade-offs | ★★ | T S11 |
+| Lambda vs Kappa architecture; real-time latency trade-offs | ★★ | T ✓ S11 |
 | Model serving, vector search | ★ | X |
 
 ## 5. Production patterns — what the project covers
@@ -164,7 +164,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 |---|---|---|
 | **S10** ✓ | Silver orders (`MERGE INTO` on `order_id`); **exp_04** (CDC correctness: dedup, `seq` guard, late update after a delete, contamination → tie guard in the stream → repair); **`RESTORE` repair, a concurrent-write conflict, `CHECK` constraints** | classic clusters; Kafka internals + log compaction; Debezium in operation |
 | **Drill 2** ✓ | attacks on Silver (dedup, MERGE correctness, out-of-order, reconciliation 112,806 → 112,650), incident regression, **lineage check, alarm regression** — done 2026-10-04: Silver reset guards, old-night alarm, the refusal in a real stream + email, a regression Job for every experiment; Unity Catalog lineage follows the `foreachBatch` MERGE | — |
-| **S11** | Lakeflow expectations + **`AUTO CDC` as SCD1 and SCD2**; windowed streaming (stream-stream join, watermarks, `dropDuplicatesWithinWatermark` vs `MERGE`); **schema evolution; pipeline-health dashboard** | continuous triggers / latency; Lambda vs Kappa; Lakeflow Connect |
+| **S11** ✓ | Lakeflow expectations + **`AUTO CDC` as SCD1 and SCD2**; windowed streaming (stream-stream join, watermarks, `dropDuplicatesWithinWatermark` vs `MERGE`); **schema evolution; pipeline-health dashboard** | continuous triggers / latency; Lambda vs Kappa; Lakeflow Connect |
 | **S12** | GDPR, lakehouse half (synthetic PII, pseudonymise, erasure) + **UC grants, column masks, row filters, tags, Asset Bundles from CI** (all B?) | account console; networking; Terraform; customer-managed keys |
 | S12b (optional) | **ML point-in-time features, MLflow, model in UC** | — |
 | — | **Gate: every Databricks-only row above done before the Snowflake trial starts** | — |

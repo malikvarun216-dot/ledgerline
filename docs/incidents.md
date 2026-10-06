@@ -1934,3 +1934,8 @@ production rebuild or an experiment asked for it.
   own email at 80%.
 - Lesson: a quota nobody has met is not in anyone's checklist — the side effects
   of experiments pile up in exactly the place production depends on.
+- Verified (same morning, `databricks/ops/drop_scratch`): plan — silver `84 tables
+  of 100 — keep 11, scratch 73, unknown [], production missing []`, bronze `23 —
+  keep 8, scratch 15, unknown []`; every name in both drop lists checked before
+  acting. Drop (mode `drop`, ~1 min) → **silver 11 left, bronze 8 left**, exactly
+  the production names.

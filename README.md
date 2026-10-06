@@ -55,12 +55,13 @@ deletes arrive in-band as `op = 'D'`.
 
 ## Status
 
-**Drill 2 done; Session 11 next** (2026-10-04). Live on Confluent Cloud
+**Session 11 done; Session 12 next** (2026-10-06). Live on Confluent Cloud
 (`orders`, `inventory.cdc`), S3 (nightly dimension dumps) and Databricks Free
 Edition:
 
 - **Bronze** — every source, exactly once (Kafka offsets + `txnVersion`;
-  Auto Loader + `replaceWhere`), with quarantine and provenance headers.
+  Auto Loader + `replaceWhere`), with quarantine and provenance headers; a field
+  the producer adds becomes a column (`mergeSchema`).
 - **Silver** — dimensions by snapshot MERGE with delete-by-absence (a bad row is
   held, not the night); inventory by CDC MERGE (op flags, in-batch dedup, `seq`
   guard, a tie guard, the newest event read from the log so a delete is never
@@ -68,7 +69,13 @@ Edition:
   Delta `CHECK` constraints on orders, order items and stock; per SKU, units ordered = units the
   stock feed decremented (34,448 SKUs, 0 mismatched).
 - **Alarms** — a daily Databricks Job (three Bronze → Silver chains) with a
-  failure email and two SQL alerts, each seen firing.
+  failure email and two SQL alerts, each seen firing; a pipeline-health AI/BI
+  dashboard built from git that reuses the alerts' SQL.
+- **Beside Silver (comparison)** — a Lakeflow declarative pipeline: AUTO CDC as
+  SCD1 (equal to the hand-written MERGE row for row) and SCD2, expectations with
+  warn / drop / fail on real rows; watermarked dedup and a stream-stream join
+  measured on Bronze's replay; Delta schema evolution through the production
+  writer.
 - **Drills** — Bronze (Drill 1) and Silver (Drill 2) attacked on purpose: replays,
   checkpoint resets, history applied backwards, lost logs; every guard seen
   firing, and a regression Job that re-runs every experiment.
