@@ -2742,3 +2742,14 @@ was built and measured beside it, and not adopted for these tables.
 - Trade-off: for up to 7 days (plus one run) the erased person's bytes exist in
   files no current version uses, readable only by time travel to an older
   version; the PII tables get a 7-day time-travel window instead of 30.
+
+### Addendum (2026-10-06, same session) — VACUUM's deletion confirmed, and where erasure is verified
+
+Run 2 confirmed that `VACUUM` removed the old files from storage: the SQL
+warehouse's time-travel read failed with `FAILED_READ_FILE.DBR_FILE_NOT_EXIST`.
+The notebook that had read the same files minutes earlier still answered from
+its cache (incidents.md, correction under 2026-10-06 `gdpr_erasure`). So step 3
+stands, with one rule added: **an erasure is verified on fresh compute** (a SQL
+warehouse or a new job run), never in the session that read the data. A
+production run of `databricks/pii/erase` (`REQ-2026-10-06-001`) removed 2 raw
+rows and 1 vault row; VACUUM is due from 2026-10-13.

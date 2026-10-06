@@ -62,6 +62,13 @@ COLUMN_TAGS = {
     "email_hash": {"pii": "pseudonym"},
 }
 
+# Masks and the row filter on the vault apply to every reader, the owner included (governance
+# notebook). A writer outside `pii_readers` would see only SP customers and masked values: the
+# MERGE would insert the hidden people again, and an erasure DELETE would remove nothing while its
+# own check, reading through the same filter, passed. So the writer must see every row.
+_writer = spark.sql("SELECT current_user() AS me, is_account_group_member('pii_readers') AS ok").first()
+assert _writer.ok, f"{_writer.me} is not in pii_readers: under the row filter this run would write blind"
+
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {PII} COMMENT 'Personal data (synthetic). Grants here only.'")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {PII}.checkpoints")
 spark.sql(

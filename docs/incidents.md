@@ -2013,3 +2013,34 @@ no error, no conflict.
   destroy it — destruction is `REORG PURGE` plus `VACUUM` after the retention
   window, and every other copy (change feed, key tables, a concurrent MERGE's
   source) has to be found and closed separately.
+
+### Correction (2026-10-06, same session) — run 2: VACUUM did remove the bytes; the notebook that "proved" otherwise was reading its own cache
+
+Run 2 (a new person X, `0005e186…`) added the proof run 1 lacked: after VACUUM,
+set the window back to 7 days and read the old version again. In the **notebook**,
+all three came back — A4 X's email at v0, B4 the change-feed `delete` row, C3
+decryption with the key table at v0 — although each VACUUM reported
+`numDeletedFiles=2`. The same three reads on the **SQL warehouse** (separate
+compute, never ran them) failed: `FAILED_READ_FILE.DBR_FILE_NOT_EXIST … part-00000-17f840b1…
+referenced in the transaction log cannot be found`.
+
+- Root cause: the serverless notebook had read those exact files minutes earlier
+  (A1/A2, B1/B2, C1) and answered the old version from a local copy (Databricks'
+  disk cache, or a result cache — which one was not separated) without going to
+  storage. VACUUM deletes from storage; it does not reach a cache on compute that
+  has already read the file.
+- Why it matters for erasure: an erasure verified in the session that read the
+  person's data proves nothing — it can pass or fail on cached bytes. And caches
+  are copies: they live as long as that compute does (serverless recycles it;
+  a long-running classic cluster would not).
+- Prevention rule (added): **verify an erasure on fresh compute** — a SQL
+  warehouse query or a new job run, never the notebook session that read the
+  data before the VACUUM. The erasure notebook's VACUUM step runs as a later,
+  separate run (7 days on), so its own reads are not from that session.
+- Also measured in run 2: production erasure `REQ-2026-10-06-001` — raw 2 rows,
+  vault 1, deleted and purged (vault v2 `DELETE` with a deletion vector and no
+  file removed, v3 `REORG` removed the 3,035,491-byte file); `contact_vault`
+  after it: raw 22,496 / 43,689, vault 43,689, 0 forget-listed present. **E, a
+  rebuild from S3** with a fresh checkpoint and the production forget list: the
+  erased person still in the landed files (2 rows, until the 30-day expiry), 0
+  rows in the rebuilt table, nights 22,496 / 43,689.
