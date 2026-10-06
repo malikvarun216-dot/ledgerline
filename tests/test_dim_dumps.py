@@ -549,3 +549,83 @@ def olist_orders_for(customers: pd.DataFrame) -> pd.DataFrame:
             "order_purchase_timestamp": pd.Timestamp("2017-06-01 10:00:00"),
         }
     )
+
+
+# --------------------------------------------------------------------------
+# Customer contact lane — synthetic PII (Session 12)
+# --------------------------------------------------------------------------
+
+
+def test_contact_lane_is_off_unless_asked_for(olist_frames, sink):
+    run(olist_frames, sink, start=START, nights=3, stride_days=STRIDE)
+
+    assert sink.list_keys("pii/") == []
+
+
+def test_turning_the_contact_lane_on_leaves_every_dims_file_byte_identical(olist_frames, counting):
+    """The live landing zone already holds five nights. Adding the lane must write only pii/ files —
+    a dims night that changed would be refused, and Bronze would follow it if it were not."""
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE)
+    before = snapshot_of(counting)
+    counting.puts.clear()
+
+    second = nights(3)[1]
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE, pii_from=second)
+
+    assert snapshot_of(counting) == before, "no dims file may move"
+    assert sorted(counting.puts) == sorted(dump_key("customer_contact", n) for n in nights(3)[1:])
+    assert dump_key("customer_contact", second).startswith("pii/customer_contact/dump_date=")
+
+
+def test_contact_rows_are_exactly_tonights_customers(olist_frames, sink):
+    last = nights(4)[3]
+    run(
+        olist_frames, sink, start=START, nights=4, stride_days=STRIDE,
+        delete_per_night=1, delete_from=last, pii_from=START,
+    )
+
+    for night in nights(4):
+        customers = read_dump(sink, "customer", night)
+        contacts = read_dump(sink, "customer_contact", night)
+        assert sorted(contacts["customer_unique_id"]) == sorted(customers["customer_unique_id"])
+        assert contacts["customer_unique_id"].is_unique
+
+
+def test_contact_values_are_synthetic_on_their_face_and_never_change(olist_frames, sink):
+    run(olist_frames, sink, start=START, nights=4, stride_days=STRIDE, pii_from=START)
+    first = read_dump(sink, "customer_contact", nights(4)[0])
+    last = read_dump(sink, "customer_contact", nights(4)[3])
+
+    assert last["customer_email"].str.endswith("@example.com").all(), "RFC 2606: delivers nowhere"
+    assert last["customer_phone"].str.startswith("+55 00 9").all(), "area code 00 does not exist"
+    assert last["customer_email"].is_unique
+
+    # A person's contact row is the same every night, timestamp included: nothing changed.
+    common = first.merge(last, on="customer_unique_id", suffixes=("_1", "_4"))
+    assert not common.empty
+    for column in ("customer_name", "customer_email", "customer_phone", UPDATED_AT):
+        assert (common[f"{column}_1"] == common[f"{column}_4"]).all(), column
+
+
+def test_contact_dim_updated_at_is_the_first_order_not_the_latest(olist_frames, sink):
+    """CU_MOVER changes city over time: the customer row's timestamp moves, the contact row's must not."""
+    run(olist_frames, sink, start=START, nights=4, stride_days=STRIDE, pii_from=START)
+    last = nights(4)[3]
+
+    customer = read_dump(sink, "customer", last).set_index("customer_unique_id")
+    contact = read_dump(sink, "customer_contact", last).set_index("customer_unique_id")
+    timeline = customer_timeline(olist_frames["customers"], olist_frames["orders"])
+    first_order = timeline[timeline["customer_unique_id"] == CU_MOVER]["observed_at"].min()
+
+    assert contact.loc[CU_MOVER, UPDATED_AT] == first_order
+    assert customer.loc[CU_MOVER, UPDATED_AT] > first_order, "the fixture must really move"
+
+
+def test_synthetic_contact_is_deterministic_and_ascii_in_the_address():
+    from generators.dim_dumps import synthetic_contact
+
+    assert synthetic_contact("abc") == synthetic_contact("abc")
+    assert synthetic_contact("abc") != synthetic_contact("abd")
+    for person in (f"p{i}" for i in range(500)):
+        _, email, _ = synthetic_contact(person)
+        assert email.isascii(), email

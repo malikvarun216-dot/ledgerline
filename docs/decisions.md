@@ -2655,3 +2655,42 @@ trial starts, so it costs no trial days.
   30-day clock or slip behind it.
 - S20 (sharing, federation, Iceberg / UniForm) stays optional; decided when S19
   ends.
+
+## Synthetic PII arrives in a lane of its own (`pii/customer_contact`), not as new columns in the customer dump (Session 12)
+
+**In plain words:** to make GDPR erasure real, the source now also sends each
+customer's name, email and phone — invented, deterministic, and marked as fake
+(`@example.com` addresses, phone area code `00`). They arrive as a **separate
+nightly file** under `ledgerline/pii/customer_contact/dump_date=…/`, keyed on
+`customer_unique_id`, beside the customer dump rather than inside it. The
+existing customer files do not change by a single byte.
+
+- Chosen: a second nightly full snapshot from the same generator, its own prefix,
+  switched on by `--pii-from DATE` (the first night that carries it; earlier
+  nights get no contact file — the same mechanism as `--delete-from`). Rows exist
+  for exactly the customers in that night's customer dump, so a deleted customer
+  loses their contact row too. `dim_updated_at` = the person's first order (the
+  account's creation), carried forward like every dimension.
+- Why a lane of its own: the dims landing zone is **write-once and kept forever**
+  (decisions.md S8) — it is what makes Bronze rebuildable from S3. PII inside
+  those files would make every landed night a permanent copy of every person's
+  email, and erasing one person would mean rewriting landed history (which the
+  generator refuses, and which Silver dims alarm on as "a corrected old night",
+  Drill 2). In its own prefix the PII copy can have **its own retention** (an S3
+  lifecycle rule; it is not rebuildable on purpose), **its own access** and **its
+  own erasure path**, while the customer dims keep every guarantee they had.
+- Rejected: **three new columns in the customer dump** (from a new night on). The
+  more common raw shape — a CRM export carries the email beside the address — and
+  it would have exercised Auto Loader's schema evolution on the dims. Rejected
+  for the reason above: PII would then live in permanent, write-once files. The
+  production answer to that shape is the same split, done at ingest; here the
+  source does it.
+- Rejected: **generate PII inside Databricks** from `customer_unique_id`. Then
+  nothing upstream would hold it, and erasure would only ever touch tables we
+  created ourselves — the hard part (copies we did not create) would be missing.
+- Rejected: **leave the data PII-free** — already rejected in Session 6.
+- Trade-off: the lane is read through the same external location as the dims
+  (`ledgerline_landing` covers `ledgerline/`), so anyone granted `READ FILES` on
+  it can read the PII files. In production the lane would be a separate bucket or
+  prefix with its own IAM role and external location; recorded as the gap, not
+  built (one more role policy for one reader).

@@ -60,8 +60,10 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import random
 import sys
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -78,6 +80,9 @@ from generators._common import BlobSink, LocalBlobSink, deterministic_id, load_l
 
 SOURCE = "dim_dumps"
 ROOT_PREFIX = "dims"
+# Personal data lands in a lane of its own, never inside the write-once dims files
+# (decisions.md, Session 12): its copy can then have its own retention and erasure path.
+PII_ROOT = "pii"
 UPDATED_AT = "dim_updated_at"
 DUMP_DATE = "dump_date"
 
@@ -94,6 +99,7 @@ class DimensionSpec:
     name: str
     key: str
     attributes: tuple[str, ...]
+    root: str = ROOT_PREFIX
 
     @property
     def columns(self) -> list[str]:
@@ -124,6 +130,18 @@ SELLER = DimensionSpec(
 )
 
 DIMENSIONS = {spec.name: spec for spec in (CUSTOMER, PRODUCT, SELLER)}
+
+# SYNTHETIC personal data — invented here, never taken from anywhere. Olist was anonymised before
+# publication, so without this there would be nothing to protect and every GDPR claim would be
+# theory (decisions.md, Session 6). Marked as fake on its face: every address is @example.com
+# (reserved by RFC 2606, delivers nowhere), every phone has area code 00 (none exists in Brazil).
+CONTACT = DimensionSpec(
+    name="customer_contact",
+    key="customer_unique_id",
+    attributes=("customer_name", "customer_email", "customer_phone"),
+    root=PII_ROOT,
+)
+ALL_SPECS = {**DIMENSIONS, CONTACT.name: CONTACT}
 
 
 # --------------------------------------------------------------------------
@@ -167,6 +185,60 @@ def customer_snapshot(timeline: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
         .sort_values(CUSTOMER.key, kind="stable")
         .reset_index(drop=True)
     )
+
+
+# --------------------------------------------------------------------------
+# Customer contact: synthetic PII, one row per person in tonight's customer dump
+# --------------------------------------------------------------------------
+
+FIRST_NAMES = (
+    "Ana", "Beatriz", "Camila", "Daniela", "Fernanda", "Gabriela", "Helena", "Isabela", "Juliana",
+    "Larissa", "Mariana", "Natália", "Patrícia", "Renata", "Sofia", "Vitória", "André", "Bruno",
+    "Carlos", "Diego", "Eduardo", "Felipe", "Gustavo", "Henrique", "João", "Lucas", "Marcelo",
+    "Paulo", "Rafael", "Rodrigo", "Thiago", "Vinícius",
+)
+LAST_NAMES = (
+    "Almeida", "Alves", "Araújo", "Barbosa", "Cardoso", "Carvalho", "Castro", "Costa", "Dias",
+    "Fernandes", "Ferreira", "Gomes", "Gonçalves", "Lima", "Lopes", "Martins", "Melo", "Mendes",
+    "Moreira", "Nascimento", "Oliveira", "Pereira", "Ribeiro", "Rocha", "Rodrigues", "Santos",
+    "Silva", "Soares", "Souza", "Teixeira",
+)
+
+
+def _ascii(text: str) -> str:
+    """'Gonçalves' -> 'goncalves': accents dropped for the email's local part."""
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+
+
+def synthetic_contact(person: str) -> tuple[str, str, str]:
+    """(name, email, phone) for one person — the same values on every run, every machine.
+
+    Seeded by ``customer_unique_id`` alone, so a person's contact data never changes from
+    night to night and two runs of the generator produce identical files (write-once landing
+    depends on it). Six hex characters in the address keep two "Ana Silva"s apart.
+    """
+    digest = hashlib.sha256(f"contact:{person}".encode()).digest()
+    first = FIRST_NAMES[digest[0] % len(FIRST_NAMES)]
+    last = LAST_NAMES[digest[1] % len(LAST_NAMES)]
+    email = f"{_ascii(first)}.{_ascii(last)}.{digest[2:5].hex()}@example.com"
+    number = int.from_bytes(digest[5:9], "big") % 100_000_000
+    phone = f"+55 00 9{number // 10_000:04d}-{number % 10_000:04d}"
+    return f"{first} {last}", email, phone
+
+
+def contact_snapshot(customers_tonight: pd.DataFrame, first_seen: pd.Series) -> pd.DataFrame:
+    """Contact rows for exactly the people in tonight's customer dump.
+
+    A customer deleted from the dump has no contact row either: the source no longer holds
+    them. ``dim_updated_at`` is the person's first order — when the account, and its contact
+    data, came into being — then carried forward like every other dimension.
+    """
+    keys = customers_tonight[CUSTOMER.key].tolist()
+    values = [synthetic_contact(key) for key in keys]
+    frame = pd.DataFrame(values, columns=list(CONTACT.attributes))
+    frame.insert(0, CONTACT.key, keys)
+    frame[UPDATED_AT] = pd.to_datetime(first_seen.reindex(keys).to_numpy())
+    return frame
 
 
 # --------------------------------------------------------------------------
@@ -381,8 +453,13 @@ def carry_forward_updated_at(
 # --------------------------------------------------------------------------
 
 
+def _root(dimension: str) -> str:
+    spec = ALL_SPECS.get(dimension)
+    return spec.root if spec else ROOT_PREFIX
+
+
 def dump_key(dimension: str, dump_date: date) -> str:
-    return f"{ROOT_PREFIX}/{dimension}/{DUMP_DATE}={dump_date.isoformat()}/{dimension}.csv"
+    return f"{_root(dimension)}/{dimension}/{DUMP_DATE}={dump_date.isoformat()}/{dimension}.csv"
 
 
 def read_previous(sink: BlobSink, dimension: str, before: date) -> tuple[pd.DataFrame | None, date | None]:
@@ -393,7 +470,7 @@ def read_previous(sink: BlobSink, dimension: str, before: date) -> tuple[pd.Data
     """
     import io
 
-    prefix = f"{ROOT_PREFIX}/{dimension}/"
+    prefix = f"{_root(dimension)}/{dimension}/"
     candidates: list[tuple[date, str]] = []
     for key in sink.list_keys(prefix):
         marker = f"{DUMP_DATE}="
@@ -481,7 +558,7 @@ def land(sink: BlobSink, planned: dict[str, str], redeliver: Iterable[date] = ()
     Checks every key before writing any: one refused night means nothing lands.
     """
     allowed = set(redeliver)
-    landed = set(sink.list_keys(f"{ROOT_PREFIX}/"))
+    landed = set(sink.list_keys(f"{ROOT_PREFIX}/")) | set(sink.list_keys(f"{PII_ROOT}/"))
     status: dict[str, str] = {}
     changed: list[str] = []
     for key, text in sorted(planned.items()):
@@ -516,13 +593,17 @@ def run(
     seed: int = 20260919,
     delete_from: date | None = None,
     redeliver: Iterable[date] = (),
+    pii_from: date | None = None,
 ) -> list[dict[str, Any]]:
     """Generate ``nights`` consecutive dumps, ``stride_days`` apart, and land them write-once.
 
     ``delete_from``: deletions begin on the first night on or after this date
     (default: the second night). ``redeliver``: landed nights this run may rewrite.
+    ``pii_from``: the customer-contact lane (synthetic PII) is written for every night on or
+    after this date; ``None`` = no contact files at all. The dims files are the same either way.
     """
     timeline = customer_timeline(frames["customers"], frames["orders"])
+    first_seen = timeline.groupby(CUSTOMER.key)["observed_at"].min()
     report: list[dict[str, Any]] = []
     plan = PlannedSink(sink)
 
@@ -576,6 +657,19 @@ def run(
             )
             report.append(stats)
 
+            if name == "customer" and pii_from is not None and dump_date >= pii_from:
+                contact = contact_snapshot(frame, first_seen)
+                stats = write_night(plan, CONTACT, contact, dump_date)
+                stats.update(
+                    {
+                        "dimension": CONTACT.name,
+                        DUMP_DATE: dump_date.isoformat(),
+                        "synthetic_changes": 0,
+                        "removed_cumulative": len(removed),
+                    }
+                )
+                report.append(stats)
+
     status = land(sink, plan.planned, redeliver)
     for stats in report:
         stats["landed"] = status[dump_key(stats["dimension"], date.fromisoformat(stats[DUMP_DATE]))]
@@ -612,6 +706,12 @@ def main() -> int:
         default=[],
         help="a landed night this run may rewrite (a correction); repeat for several",
     )
+    parser.add_argument(
+        "--pii-from",
+        type=date.fromisoformat,
+        default=None,
+        help="write the synthetic customer-contact lane (pii/...) for nights on or after this date",
+    )
     parser.add_argument("--seed", type=int, default=20260919)
     args = parser.parse_args()
 
@@ -628,10 +728,10 @@ def main() -> int:
         from generators._common import S3BlobSink
 
         sink: BlobSink = S3BlobSink(args.bucket, args.prefix)
-        destination = f"s3://{args.bucket}/{args.prefix}/{ROOT_PREFIX}/"
+        destination = f"s3://{args.bucket}/{args.prefix}/"
     else:
         sink = LocalBlobSink(args.out_dir)
-        destination = str(args.out_dir / ROOT_PREFIX)
+        destination = str(args.out_dir)
 
     try:
         report = run(
@@ -645,19 +745,20 @@ def main() -> int:
             seed=args.seed,
             delete_from=args.delete_from,
             redeliver=args.redeliver,
+            pii_from=args.pii_from,
         )
     except LandedNightChanged as refused:
         raise SystemExit(f"refused: {refused}") from None
 
     header = (
-        f"  {'dump_date':<12} {'dimension':<9} {'rows':>8} {'new':>7} "
+        f"  {'dump_date':<12} {'dimension':<16} {'rows':>8} {'new':>7} "
         f"{'changed':>8} {'unchanged':>10} {'gone':>6}  {'landed':<11}"
     )
     print(header)
-    print(f"  {'-' * 12} {'-' * 9} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 6}  {'-' * 11}")
+    print(f"  {'-' * 12} {'-' * 16} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 6}  {'-' * 11}")
     for row in report:
         print(
-            f"  {row[DUMP_DATE]:<12} {row['dimension']:<9} {row['rows']:>8,} {row['new']:>7,} "
+            f"  {row[DUMP_DATE]:<12} {row['dimension']:<16} {row['rows']:>8,} {row['new']:>7,} "
             f"{row['changed']:>8,} {row['unchanged']:>10,} {row['deleted_vs_previous']:>6,}  "
             f"{row['landed']:<11}"
         )

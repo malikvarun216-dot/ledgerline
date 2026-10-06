@@ -34,28 +34,31 @@ PATH_DATE = r"dump_date=(\d{4}-\d{2}-\d{2})"
 FILE_RETENTION = "interval 30 days"
 
 
-def ensure_retention(table):
+def ensure_retention(table, retention=FILE_RETENTION):
     """Set the time-travel window once. Checked first, because every ALTER is a new commit."""
     props = {r.key: r.value for r in spark.sql(f"SHOW TBLPROPERTIES {table}").collect()}
-    if props.get("delta.deletedFileRetentionDuration") != FILE_RETENTION:
+    if props.get("delta.deletedFileRetentionDuration") != retention:
         spark.sql(
             f"ALTER TABLE {table} SET TBLPROPERTIES "
-            f"('delta.deletedFileRetentionDuration' = '{FILE_RETENTION}')"
+            f"('delta.deletedFileRetentionDuration' = '{retention}')"
         )
-        print(f"{table}: old data files now kept {FILE_RETENTION}")
+        print(f"{table}: old data files now kept {retention}")
 
 
-def write_batch(batch_df, batch_id, table):
+def write_batch(batch_df, batch_id, table, keep=None):
     # The file carries dump_date as a column AND the folder is named dump_date=...
     # They must agree, or replaceWhere would replace the wrong night.
     mismatched = batch_df.where(F.col("dump_date") != F.col("_path_dump_date")).limit(1)
     if not mismatched.isEmpty():
         raise ValueError(f"{table}: dump_date column disagrees with its folder name")
 
+    # Nights are read before `keep` filters: a night is replaced even if every row is filtered.
     dates = sorted(r.dump_date for r in batch_df.select("dump_date").distinct().collect())
     if not dates:
         return
-    rows = batch_df.drop("_path_dump_date")
+    # `keep`: the one filter Bronze may apply — the PII lane drops people with an erasure request
+    # (decisions.md, Session 12). The dims never pass one: Bronze keeps what was delivered.
+    rows = (keep(batch_df) if keep else batch_df).drop("_path_dump_date")
 
     # replaceWhere is a predicate, not a partition operation: the table is not
     # partitioned (~100K rows would be thousands of tiny files). Delta also
@@ -77,12 +80,15 @@ def write_batch(batch_df, batch_id, table):
     print(f"{table}: batch {batch_id} replaced dump_date {dates}")
 
 
-def ingest(source, table, state, *, allow_overwrites=False):
+def ingest(source, table, state, *, allow_overwrites=False, keep=None, retention=FILE_RETENTION):
     """One AvailableNow pass over `source`. State (schema + checkpoint) lives under `state`.
 
     `allow_overwrites`: whether a file rewritten in place (same path, newer modification time) is
     read again. Auto Loader's default is no — it tracks files by path, so a corrected re-delivery
     of a night is skipped without a word. Drill 1 tests exactly that.
+
+    `keep`: optional `DataFrame -> DataFrame` applied to each batch before it is written.
+    `retention`: how long replaced files stay for time travel — shorter for personal data.
     """
     stream = (
         spark.readStream.format("cloudFiles")
@@ -107,10 +113,10 @@ def ingest(source, table, state, *, allow_overwrites=False):
     if not spark.catalog.tableExists(table):
         empty = spark.createDataFrame([], stream.drop("_path_dump_date").schema)
         empty.write.format("delta").saveAsTable(table)
-    ensure_retention(table)
+    ensure_retention(table, retention)
 
     query = (
-        stream.writeStream.foreachBatch(lambda df, bid: write_batch(df, bid, table))
+        stream.writeStream.foreachBatch(lambda df, bid: write_batch(df, bid, table, keep))
         .option("checkpointLocation", f"{state}/checkpoint")
         .trigger(availableNow=True)
         .start()
