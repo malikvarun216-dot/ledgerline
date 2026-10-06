@@ -28,6 +28,9 @@ variables:
   runner:
     description: the service principal jobs run as (ledgerline-jobs; an id, not a secret)
     default: 18160145-ee5d-427a-8553-ef099e1ec870
+  deployer:
+    description: the service principal CI deploys as (ledgerline-ci; an id, not a secret)
+    default: b21c5575-7fbe-433a-8d88-0c1f515f6ded
 
 resources:
   jobs:
@@ -64,8 +67,14 @@ targets:
     mode: production
     workspace:
       host: https://dbc-7ce3c403-9521.cloud.databricks.com
+      # Pinned to the deployer's folder: a different deploying identity would otherwise create a
+      # second copy of every job (validate's recommendation, first deploy, Session 12).
+      root_path: /Workspace/Users/${var.deployer}/.bundle/${bundle.name}/${bundle.target}
     run_as:
       service_principal_name: ${var.runner}
     permissions:
+      # The deployer named explicitly: its CAN_MANAGE then holds whoever deploys next.
+      - service_principal_name: ${var.deployer}
+        level: CAN_MANAGE
       - group_name: admins
         level: CAN_MANAGE
