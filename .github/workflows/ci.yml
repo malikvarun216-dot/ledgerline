@@ -6,11 +6,11 @@ on:
   pull_request:
     branches: [dev, main]
 
-# A second push to the same branch cancels the first. Nothing here is
-# deployment; a superseded run has no value.
+# A second push to the same branch cancels the first — except on dev, where the run ends in a
+# deploy (Session 12): a deploy cut off half-way leaves the bundle's workspace lock held.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' }}
 
 jobs:
   lint-and-test:
@@ -80,3 +80,11 @@ jobs:
         run: |
           python generators/order_events.py --print-schema > /dev/null
           python generators/inventory_cdc.py --print-schema > /dev/null
+
+  # Session 12: the Databricks Asset Bundle, deployed only after lint and tests pass, only from a
+  # push to dev — never from a pull request (its code is not reviewed yet, and forks get no secrets).
+  deploy:
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    uses: ./.github/workflows/deploy.yml
+    secrets: inherit

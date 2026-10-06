@@ -1,0 +1,71 @@
+# Databricks Asset Bundle — the jobs, as code (decisions.md, Session 12).
+#
+# Deployed only by CI (.github/workflows/deploy.yml), after the `ci` workflow is green, signed in
+# as the `ledgerline-ci` service principal. Jobs RUN as a different robot, `ledgerline-jobs`: the
+# deployer's secret lives in GitHub and can read no personal data; the runner can, and has no
+# secret anywhere outside Databricks.
+#
+# Hand-made jobs (`ledgerline-silver`, `ledgerline-regression`) are not in here yet: they still
+# run notebooks from the Git folder. This bundle starts with the PII lane, built bundle-first.
+bundle:
+  name: ledgerline
+
+# Only what jobs run is uploaded; the rest of the repo stays in git.
+sync:
+  exclude:
+    - "data/**"
+    - "docs/**"
+    - "tests/**"
+    - "generators/**"
+    - "scripts/**"
+    - "dbt_project/**"
+    - "ops/**"
+    - ".github/**"
+
+variables:
+  alert_email:
+    description: where job failures are emailed — a GitHub secret (ALERT_EMAIL), never committed
+  runner:
+    description: the service principal jobs run as (ledgerline-jobs; an id, not a secret)
+    default: 18160145-ee5d-427a-8553-ef099e1ec870
+
+resources:
+  jobs:
+    ledgerline_pii:
+      name: ledgerline-pii
+      description: >-
+        PII lane, daily: the newest contact night into the vault (forget list read inside the
+        MERGE), then pending erasures — delete, purge, and VACUUM once the 7-day window has passed.
+      schedule:
+        quartz_cron_expression: "0 30 6 * * ?"  # 06:30 IST, after ledgerline-silver's 06:00
+        timezone_id: Asia/Kolkata
+        pause_status: UNPAUSED
+      max_concurrent_runs: 1  # the vault MERGE and the erasure must never overlap (gdpr_erasure D)
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+      tasks:
+        - task_key: contact_vault
+          notebook_task:
+            notebook_path: ./databricks/pii/contact_vault.py
+        - task_key: erase
+          depends_on:
+            - task_key: contact_vault
+          notebook_task:
+            notebook_path: ./databricks/pii/erase.py
+            base_parameters:
+              mode: erase
+              customer_unique_id: ""
+              request_id: ""
+
+targets:
+  free:
+    default: true
+    mode: production
+    workspace:
+      host: https://dbc-7ce3c403-9521.cloud.databricks.com
+    run_as:
+      service_principal_name: ${var.runner}
+    permissions:
+      - group_name: admins
+        level: CAN_MANAGE

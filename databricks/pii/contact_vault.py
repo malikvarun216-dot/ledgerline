@@ -220,7 +220,13 @@ def ensure_tags(table):
             pairs = ", ".join(f"'{k}' = '{v}'" for k, v in missing.items())
             spark.sql(f"ALTER TABLE {table} ALTER COLUMN {column} SET TAGS ({pairs})")
             print(f"{table}.{column}: tagged {missing}")
-    spark.sql(f"ALTER TABLE {table} SET TAGS ('contains_pii' = 'true')")
+    table_tags = spark.sql(
+        f"""SELECT tag_name FROM {catalog}.information_schema.table_tags
+        WHERE schema_name = '{schema}' AND table_name = '{name}' AND tag_name = 'contains_pii'"""
+    )
+    if table_tags.isEmpty():
+        # Only when missing: the job identity (ledgerline-jobs) then needs no APPLY TAG on a normal run.
+        spark.sql(f"ALTER TABLE {table} SET TAGS ('contains_pii' = 'true')")
 
 
 for table in (RAW, VAULT):

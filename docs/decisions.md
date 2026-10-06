@@ -2753,3 +2753,79 @@ stands, with one rule added: **an erasure is verified on fresh compute** (a SQL
 warehouse or a new job run), never in the session that read the data. A
 production run of `databricks/pii/erase` (`REQ-2026-10-06-001`) removed 2 raw
 rows and 1 vault row; VACUUM is due from 2026-10-13.
+
+## The PII vault is governed by groups, column masks and a lookup row filter — and is tested from the outside, as a service principal (Session 12)
+
+**In plain words:** access to personal data is decided by two account groups, not
+by naming people: `pii_readers` (sees real values; the identity every PII
+*writer* runs as) and `analysts` (may read the vault, but sees an initial, the
+email's salted hash and the phone's last four digits, and only São Paulo
+customers). Because the owner of a table always passes its grants, every check
+is run as a service principal (`ledgerline-ci`, a member of `analysts`) from the
+laptop (`scripts/query_as.py`).
+
+- Chosen (`databricks/pii/governance`): `SELECT` on the vault only — not the raw
+  table, not the forget list; masks as SQL functions on `is_account_group_member`;
+  the email mask returns `email_hash` (`USING COLUMNS`), so an analyst can still
+  count and join on email; a row filter that looks the person's state up in
+  `silver.customer`. Writers (`contact_vault`, `erase`) refuse to run outside
+  `pii_readers`: masks and filters apply to the owner too.
+- Measured as `ledgerline-ci` (2026-10-06): `analyst true, pii_reader false`;
+  names `B***`, email = its hash, phone `+55 ** *****-6419`; **17,166 of 43,689**
+  rows (SP only); raw table, forget list, `silver.customer` →
+  `INSUFFICIENT_PERMISSIONS`; `DELETE` → `User does not have DELETE`. The row
+  filter's lookup into `silver.customer` worked although the reader has **no**
+  grant on it, and the reader's own query of that table was refused: a filter
+  function runs with its owner's rights.
+- Seen on Free Edition (the B? rows): groups made in workspace settings are
+  **account** groups (Source = Account) and take UC grants;
+  `is_account_group_member` and `is_member` both saw them; service principals
+  with **scoped, expiring OAuth secrets** (1–730 days; this one 90 days,
+  `all-apis`); grants, masks, row filters and tags all make **no Delta commit**.
+- Rejected: **grant to users by name.** Grants outlive people; groups are where
+  people come and go.
+- Rejected: **a dynamic view instead of masks** (`CASE WHEN is_member(...)` in a
+  view, table locked away). It works and is the older pattern, but every reader
+  must be pointed at the view, and the table itself stays unmasked for anyone
+  granted it later; a mask travels with the table.
+- Rejected: **test as the owner, toggling own group membership.** It tests the
+  functions, not the grants — the owner passes every grant.
+- Trade-off: the secret is `all-apis` (it also deploys bundles), broader than the
+  SQL checks need; what it can touch is still bounded by its grants. The CI
+  identity is an `analysts` member so it can be the outside reader — it can
+  read masked, SP-filtered contact data. Acceptable for a test identity; a
+  production CI deployer would read nothing.
+
+## Jobs as code: an Asset Bundle deployed by CI as one service principal, run as another (Session 12)
+
+**In plain words:** the new PII job is declared in `databricks.yml` (which
+notebooks, in what order, on what schedule, as which identity) and created in
+the workspace by GitHub Actions — never by clicking. CI signs in as the robot
+`ledgerline-ci` and deploys only after lint and tests pass, only from a push to
+`dev`. The job then runs as a second robot, `ledgerline-jobs`, which can read
+personal data; the one whose secret sits in GitHub cannot.
+
+- Chosen: bundle at the repo root, target `free` in `mode: production`; job
+  `ledgerline-pii` (06:30 IST: `contact_vault` → `erase`, `max_concurrent_runs: 1`
+  so the vault MERGE and an erasure never overlap); `run_as` = `ledgerline-jobs`
+  (in `pii_readers`; grants on schema `pii` and `READ FILES` on the landing
+  location only — `governance` §5); `ledgerline-ci` holds **Use** on it, which is
+  what lets a deployer name it as the runner. The failure email is a bundle
+  variable from a GitHub secret, so no address is committed. CLI pinned to
+  1.19.0; the `setup-cli` action has no release tags and is taken from `main`.
+  `ci` no longer cancels a superseded run on `dev`: a deploy cut off half-way
+  leaves the bundle's workspace lock held.
+- Rejected: **one robot that deploys and runs.** Simpler (no Use grant, no second
+  identity), but the GitHub secret would then read PII — a leaked CI secret
+  becomes a data breach instead of an unwanted deploy.
+- Rejected: **deploy with a person's token** (a PAT in GitHub). Deploys would act
+  as whoever owned the token, stop when they leave, and carry all their rights.
+- Rejected: **move `ledgerline-silver` / `ledgerline-regression` into the bundle
+  now.** They work and run notebooks from the Git folder; moving them means
+  re-pointing every task and re-proving each run. The PII lane is built
+  bundle-first; the other two are carried to Drill 3 by name.
+- Rejected: **a separate `workflow_run`-triggered deploy workflow.** GitHub fires
+  `workflow_run` only for workflow files on the default branch; a reusable
+  workflow called as `ci`'s last job (`needs: lint-and-test`) has no such catch.
+- Trade-off: one more identity to look after, and an OAuth secret that expires
+  (90 days, so ~2027-01-04) — CI deploys fail loudly on that day.

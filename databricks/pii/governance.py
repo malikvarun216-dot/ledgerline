@@ -128,3 +128,27 @@ display(spark.sql(f"DESCRIBE TABLE EXTENDED {VAULT}").where(
     "col_name IN ('Row Filter', 'Column Masks') OR data_type LIKE '%mask%' OR col_name LIKE '%Mask%'"
 ))
 display(spark.sql(f"DESCRIBE HISTORY {VAULT}").select("version", "timestamp", "operation"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. The job identity — `ledgerline-jobs` runs the PII job (decisions.md, Session 12)
+# MAGIC
+# MAGIC The bundle job `ledgerline-pii` runs as this service principal, deployed by `ledgerline-ci`. It
+# MAGIC is in `pii_readers` (it must see every row it writes) and gets exactly what the two notebooks
+# MAGIC touch: the `pii` schema's tables and checkpoint volume, and reading the landing files. Nothing
+# MAGIC in `bronze` or `silver`. Deliberately not granted up front: `CREATE …` on the catalog and the
+# MAGIC salt secret — the notebooks only `CREATE … IF NOT EXISTS` objects that exist, and read the salt
+# MAGIC only when a new night arrives. The first job run shows whether Free Edition agrees.
+
+# COMMAND ----------
+
+RUNNER = "18160145-ee5d-427a-8553-ef099e1ec870"  # ledgerline-jobs — an id, not a secret
+for statement in (
+    f"GRANT USE CATALOG ON CATALOG workspace TO `{RUNNER}`",
+    f"GRANT USE SCHEMA, SELECT, MODIFY, READ VOLUME, WRITE VOLUME ON SCHEMA workspace.pii TO `{RUNNER}`",
+    f"GRANT READ FILES ON EXTERNAL LOCATION ledgerline_landing TO `{RUNNER}`",
+):
+    spark.sql(statement)
+    print(statement)
+display(spark.sql("SHOW GRANTS ON SCHEMA workspace.pii"))

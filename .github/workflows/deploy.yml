@@ -1,15 +1,60 @@
-# Placeholder. Deployment (Databricks Asset Bundles -> workspace) lands in a
-# later session. It is declared with `workflow_dispatch` only, so it never
-# fires on push -- an EMPTY workflow file is rejected by GitHub Actions with
-# "No event triggers defined in `on`" and shows up as a failed run, which
-# would have made the first-ever CI result unreadable.
 name: deploy
 
+# Deploys the Databricks Asset Bundle (databricks.yml) — decisions.md, Session 12.
+#
+# Two ways in, one set of steps:
+#   * called by `ci` as its last job, only after lint + tests pass, only on a push to dev;
+#   * by hand from the Actions tab (workflow_dispatch) — a redeploy without a commit.
+#
+# Signs in as the `ledgerline-ci` service principal (OAuth M2M: client id + secret, GitHub
+# encrypted secrets). Never a person's token: a deploy must not depend on, or act as, whoever
+# last pushed.
 on:
+  workflow_call:
+    secrets:
+      DATABRICKS_HOST:
+        required: true
+      DATABRICKS_CLIENT_ID:
+        required: true
+      DATABRICKS_CLIENT_SECRET:
+        required: true
+      ALERT_EMAIL:
+        required: true
   workflow_dispatch:
 
+# One deploy at a time, and never cancelled half-way: a bundle deploy holds a lock in the
+# workspace, and a run killed mid-deploy leaves it held.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
 jobs:
-  noop:
-    runs-on: ubuntu-latest
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      # databricks.yml's ${var.alert_email}: kept out of the public repo
+      BUNDLE_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
-      - run: echo "Deployment not implemented yet."
+      - uses: actions/checkout@v5
+
+      # The action has no release tags, so it is taken from main; the CLI it installs is pinned.
+      # Bump deliberately, like the runner image in ci.yml.
+      - uses: databricks/setup-cli@main
+        with:
+          version: 1.19.0
+
+      - name: Who is deploying (must be ledgerline-ci, never a person)
+        run: databricks current-user me --output json | python -c "import json,sys; print(json.load(sys.stdin)['userName'])"
+
+      - name: Validate
+        run: databricks bundle validate -t free
+
+      - name: Deploy
+        run: databricks bundle deploy -t free
+
+      - name: What is deployed
+        run: databricks bundle summary -t free
