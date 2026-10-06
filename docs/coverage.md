@@ -54,9 +54,9 @@ session · **X** skip (no honest use here).
 | Lakeflow Declarative Pipelines (DLT): expectations; `AUTO CDC` / `APPLY CHANGES` as SCD1 (vs the S9 hand-written MERGE) and SCD2 (vs the dbt snapshot) | ★★★ | ✓ S11 (pipeline `ledgerline-dlt`: SCD1 = production row for row, SCD2 = `lead(seq)` over the event log; warn / drop / fail on real rows; a failed full refresh empties the table; ties accepted silently) |
 | Delta schema evolution (`mergeSchema`, column mapping) | ★★ | ✓ S11 (`experiments/delta_schema_evolution` with the production Bronze writer: a new field refused → `mergeSchema` (now production); `int`→`long` kept as `int` until a value overflows; type widening; `INSERT *` drops new columns silently; column mapping renames without rewriting files; the change feed cannot span a rename) |
 | AI/BI dashboard on the SQL warehouse — pipeline health (merge logs, stream progress, held rows) | ★★ | ✓ S11 (`pipeline_health`, built from git by `scripts/build_dashboard.py`, imported; 12 tiles incl. the alerts' own SQL, per-SKU reconciliation, UC table quota, Lakeflow expectations) |
-| Unity Catalog grants, groups, service principals | ★★★ | B? S12 |
-| Column masks, row filters, tags | ★★ | B? S12 |
-| Asset Bundles deployed from CI | ★★★ | B? S12 |
+| Unity Catalog grants, groups, service principals | ★★★ | ✓ S12 (account groups `pii_readers` / `analysts`; two service principals — `ledgerline-ci` deploys, `ledgerline-jobs` runs; grants tested from the outside as the service principal: 5 refusals, 1 masked and filtered read) |
+| Column masks, row filters, tags | ★★ | ✓ S12 (three masks on the vault, the email masked to its salted hash; a row filter looking state up in `silver.customer` — 17,166 of 43,689 rows, run with the function owner's rights; column tags drive the erasure inventory; none makes a Delta commit) |
+| Asset Bundles deployed from CI | ★★★ | ✓ S12 (`databricks.yml` job `ledgerline-pii`, deployed by GitHub Actions after lint + tests as `ledgerline-ci`, run as `ledgerline-jobs`; first run failed — the runner could not read the deployer's files — fixed by bundle permissions) |
 | ML: feature table with point-in-time joins, MLflow experiment, model in UC (no serving) | ★★ (point-in-time ★★★) | B? S12b — kept (decided 2026-10-06, no longer optional) |
 | `SHALLOW` / `DEEP CLONE` (vs Snowflake's zero-copy clone) | ★★ | B S16 |
 | Liquid clustering vs partitioning vs Z-order; data skipping | ★★★ | B S21 — on a large sample table, never Olist (Session 0: Olist is too small, "that session would be theater") |
@@ -115,11 +115,11 @@ session · **X** skip (no honest use here).
 | Continuous / `ProcessingTime` triggers, latency tuning | ★★★ | T ✓ S11 |
 | Spark UI and most Spark settings (serverless manages them) | ★★★ | T S21 |
 | Photon on vs off (serverless always runs it) | ★★ | T S21 |
-| Account console: SCIM, account groups, multiple workspaces | ★★ | T S12 |
-| Networking: PrivateLink, customer VPC, IP access lists, NAT (the S4 cost lesson) | ★★ | T S12 |
-| Terraform provider | ★★ | T S12 |
+| Account console: SCIM, account groups, multiple workspaces | ★★ | T ✓ S12 |
+| Networking: PrivateLink, customer VPC, IP access lists, NAT (the S4 cost lesson) | ★★ | T ✓ S12 |
+| Terraform provider | ★★ | T ✓ S12 |
 | Disaster recovery: deep-clone replication, multi-region | ★★ | T S16 |
-| Customer-managed keys | ★ | T S12 |
+| Customer-managed keys | ★ | T ✓ S12 |
 | Lakeflow Connect managed connectors | ★ | T ✓ S11 |
 
 **Blocked by the Snowflake trial** (one account, 30 days).
@@ -148,10 +148,14 @@ session · **X** skip (no honest use here).
   table), delete circuit breaker, write-once landing, merge log, provenance
   headers, schema-registry contract, denylist repair, answer-key reconciliation,
   chain check, hold-the-row, alarms; **S10:** accumulating snapshot (Silver orders), newest event from the log (no resurrected deletes), CHECK constraints, repair by `RESTORE`, conflict + retry; **Drill 2:** "a writer with no memory only writes into an empty target" (checkpoint reset and lost merge log refused), an alarm for every "not applied" path, end-to-end row-and-unit reconciliation, a one-click regression Job, refuse → email → denylist → retry seen end to end.
+- **Built S12:** a PII lane with its own retention (S3 lifecycle), a pseudonymised
+  vault, right to erasure driven by tags and a forget list read inside every PII
+  write, physical delete proven on fresh compute, governance by groups / masks /
+  row filter, jobs as code deployed by CI as one robot and run as another.
 - **Planned:** SCD2 (S14), late data with lookback (S17), backfill (Airflow,
-  S15–S16), write-audit-publish (clone gating, S16), GDPR erasure with
-  crypto-shredding (S12, S18), cost guards (S13), governance — grants and masks
-  (S12, S18).
+  S15–S16), write-audit-publish (clone gating, S16), GDPR Snowflake half (S18 —
+  crypto-shredding decided again there), cost guards (S13), governance in
+  Snowflake — masks and row access (S18).
 - **Theory only:** disaster recovery, multi-region, network isolation.
 
 ## 6. Session by session — the full plan
@@ -165,7 +169,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S10** ✓ | Silver orders (`MERGE INTO` on `order_id`); **exp_04** (CDC correctness: dedup, `seq` guard, late update after a delete, contamination → tie guard in the stream → repair); **`RESTORE` repair, a concurrent-write conflict, `CHECK` constraints** | classic clusters; Kafka internals + log compaction; Debezium in operation |
 | **Drill 2** ✓ | attacks on Silver (dedup, MERGE correctness, out-of-order, reconciliation 112,806 → 112,650), incident regression, **lineage check, alarm regression** — done 2026-10-04: Silver reset guards, old-night alarm, the refusal in a real stream + email, a regression Job for every experiment; Unity Catalog lineage follows the `foreachBatch` MERGE | — |
 | **S11** ✓ | Lakeflow expectations + **`AUTO CDC` as SCD1 and SCD2**; windowed streaming (stream-stream join, watermarks, `dropDuplicatesWithinWatermark` vs `MERGE`); **schema evolution; pipeline-health dashboard** | continuous triggers / latency; Lambda vs Kappa; Lakeflow Connect |
-| **S12** | GDPR, lakehouse half (synthetic PII, pseudonymise, erasure) + **UC grants, column masks, row filters, tags, Asset Bundles from CI** (all B?) | account console; networking; Terraform; customer-managed keys |
+| **S12** ✓ | GDPR, lakehouse half (synthetic PII, pseudonymise, erasure) + **UC grants, column masks, row filters, tags, Asset Bundles from CI** (all B?) — done 2026-10-06: every B? verified on Free Edition and built; physical delete vs crypto-shredding measured; the erasure racing the MERGE | account console; networking; Terraform; customer-managed keys |
 | **S12b** (kept, 2026-10-06) | **ML point-in-time features, MLflow, model in UC** (B?: verify on Free Edition first) | — |
 | — | **Gate: every Databricks-only row above done before the Snowflake trial starts** | — |
 | **S13** | Snowflake day one: Enterprise trial, cost guards (auto-suspend, resource monitor), **roles**; bridge (CDF export incl. `delete` rows → Parquet → stage → `COPY INTO`); **load-history test, Snowpipe beside `COPY`, `VARIANT` first, PK demo** | SSO / SCIM / network policies; Snowpipe Streaming; PrivateLink |
