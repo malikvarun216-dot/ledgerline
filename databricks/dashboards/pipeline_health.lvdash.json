@@ -1,0 +1,1679 @@
+{
+  "datasets": [
+    {
+      "name": "lag",
+      "displayName": "Silver behind Bronze (the alert)",
+      "queryLines": [
+        "-- Alert: Silver is behind Bronze.\n",
+        "-- Sources whose Bronze data landed more than 26 hours ago and is still not in Silver.\n",
+        "-- 0 = healthy. Trigger when sources_behind > 0. The other columns say which part fired.\n",
+        "--\n",
+        "-- Not \"no night in 26 hours\": nights here land by hand, days apart, so a calendar alarm would be red\n",
+        "-- every quiet day (decisions.md, Session 9 revision of the alarms entry). 26 hours = one daily job run\n",
+        "-- plus slack, so a night that lands just after a run does not fire before the next run has had a go.\n",
+        "\n",
+        "WITH bronze_nights AS (\n",
+        "  SELECT 'customer' AS dimension, to_date(dump_date) AS night, min(_ingested_at) AS landed,\n",
+        "         max(_source_modified_at) AS modified\n",
+        "  FROM workspace.bronze.customer GROUP BY 1, 2\n",
+        "  UNION ALL\n",
+        "  SELECT 'product', to_date(dump_date), min(_ingested_at), max(_source_modified_at)\n",
+        "  FROM workspace.bronze.product GROUP BY 1, 2\n",
+        "  UNION ALL\n",
+        "  SELECT 'seller', to_date(dump_date), min(_ingested_at), max(_source_modified_at)\n",
+        "  FROM workspace.bronze.seller GROUP BY 1, 2\n",
+        "),\n",
+        "applied AS (\n",
+        "  SELECT dimension, max(dump_date) AS last_applied\n",
+        "  FROM workspace.silver.dims_merge_log GROUP BY dimension\n",
+        "),\n",
+        "logged AS (\n",
+        "  SELECT dimension, dump_date AS night, max(bronze_modified_at) AS modified\n",
+        "  FROM workspace.silver.dims_merge_log GROUP BY 1, 2\n",
+        "),\n",
+        "dims_behind AS (\n",
+        "  SELECT count(DISTINCT b.dimension) AS n\n",
+        "  FROM bronze_nights b LEFT JOIN applied a USING (dimension)\n",
+        "  WHERE (a.last_applied IS NULL OR b.night > a.last_applied)\n",
+        "    AND b.landed < current_timestamp() - INTERVAL 26 HOURS\n",
+        "),\n",
+        "old_nights_changed AS (\n",
+        "  -- A night OLDER than the last one applied that Bronze holds in a newer copy than Silver applied, or\n",
+        "  -- never applied at all. Silver never goes back in time, so it will never apply it; until Drill 2 the\n",
+        "  -- only trace was one printed line in a green Job. The answer is a person's: rebuild that dimension\n",
+        "  -- from an empty table (decisions.md, Drill 2), which also records the night and clears this count.\n",
+        "  SELECT count(*) AS n\n",
+        "  FROM bronze_nights b JOIN applied a USING (dimension) LEFT JOIN logged l USING (dimension, night)\n",
+        "  WHERE b.night < a.last_applied AND (l.modified IS NULL OR b.modified > l.modified)\n",
+        "),\n",
+        "cdc_behind AS (\n",
+        "  -- Silver has seen sum(bronze_rows); every Bronze row older than 26 hours must be among them.\n",
+        "  SELECT CASE\n",
+        "           WHEN (SELECT count(*) FROM workspace.bronze.inventory_cdc\n",
+        "                 WHERE _ingested_at < current_timestamp() - INTERVAL 26 HOURS)\n",
+        "              > (SELECT coalesce(sum(bronze_rows), 0) FROM workspace.silver.inventory_cdc_log)\n",
+        "           THEN 1 ELSE 0\n",
+        "         END AS n\n",
+        "),\n",
+        "orders_behind AS (\n",
+        "  -- Same test for the orders stream (Session 10).\n",
+        "  SELECT CASE\n",
+        "           WHEN (SELECT count(*) FROM workspace.bronze.orders\n",
+        "                 WHERE _ingested_at < current_timestamp() - INTERVAL 26 HOURS)\n",
+        "              > (SELECT coalesce(sum(bronze_rows), 0) FROM workspace.silver.orders_log)\n",
+        "           THEN 1 ELSE 0\n",
+        "         END AS n\n",
+        ")\n",
+        "SELECT (SELECT n FROM dims_behind) + (SELECT n FROM old_nights_changed)\n",
+        "       + (SELECT n FROM cdc_behind) + (SELECT n FROM orders_behind) AS sources_behind,\n",
+        "       (SELECT n FROM dims_behind) AS dims_behind,\n",
+        "       (SELECT n FROM old_nights_changed) AS old_nights_changed,\n",
+        "       (SELECT n FROM cdc_behind) AS cdc_behind,\n",
+        "       (SELECT n FROM orders_behind) AS orders_behind\n"
+      ]
+    },
+    {
+      "name": "held",
+      "displayName": "Dims rows held (the alert)",
+      "queryLines": [
+        "-- Alert: dimension rows are being held.\n",
+        "-- Rows held by the latest apply of each dimension: a bad value kept that key at its previous values\n",
+        "-- (decisions.md, Session 8 revision \"hold the bad row\"). The rows themselves are in\n",
+        "-- workspace.silver.dims_rejected_rows. 0 = healthy. Trigger when rows_held > 0.\n",
+        "--\n",
+        "-- Without this alarm a held row could stay stale silently: the job succeeds when it holds a row.\n",
+        "\n",
+        "SELECT coalesce(sum(held), 0) AS rows_held\n",
+        "FROM (\n",
+        "  SELECT dimension, max_by(held, applied_at) AS held\n",
+        "  FROM workspace.silver.dims_merge_log\n",
+        "  GROUP BY dimension\n",
+        ")\n"
+      ]
+    },
+    {
+      "name": "reconciliation",
+      "displayName": "Units ordered vs decremented, per SKU",
+      "queryLines": [
+        "-- The cross-source tie-out: per SKU, units ordered (one order_items row per unit) against units the\n",
+        "-- stock feed decremented. FULL OUTER JOIN: a SKU on one side only is a disagreement too.\n",
+        "-- Expected: 34,448 SKUs, 0 mismatched, 112,650 = 112,650 (merge_orders Verify 7, Drill 2).\n",
+        "WITH ordered AS (\n",
+        "  SELECT sku_key, count(*) AS units FROM workspace.silver.order_items GROUP BY sku_key\n",
+        "),\n",
+        "decremented AS (\n",
+        "  SELECT sku_key, sum(prev_stock_qty - stock_qty) AS units\n",
+        "  FROM workspace.silver.inventory_events WHERE prev_stock_qty > stock_qty GROUP BY sku_key\n",
+        ")\n",
+        "SELECT count(*)                                                AS skus,\n",
+        "       count_if(coalesce(o.units, 0) <> coalesce(d.units, 0))  AS skus_mismatched,\n",
+        "       sum(o.units)                                            AS units_ordered,\n",
+        "       sum(d.units)                                            AS units_decremented\n",
+        "FROM ordered o FULL OUTER JOIN decremented d USING (sku_key)\n"
+      ]
+    },
+    {
+      "name": "quota",
+      "displayName": "Tables per schema (UC quota 100)",
+      "queryLines": [
+        "-- Tables per schema against Unity Catalog's quota of 100 per schema (incidents.md, 2026-10-06:\n",
+        "-- experiment scratch filled 73 of workspace.silver's; Databricks emails at 80%).\n",
+        "SELECT table_schema, count(*) AS tables, 100 - count(*) AS headroom\n",
+        "FROM workspace.information_schema.tables\n",
+        "WHERE table_schema <> 'information_schema'\n",
+        "GROUP BY table_schema\n",
+        "ORDER BY tables DESC\n"
+      ]
+    },
+    {
+      "name": "freshness",
+      "displayName": "Bronze landed vs Silver applied",
+      "queryLines": [
+        "-- Per source: when Bronze last received data, and when Silver last applied some.\n",
+        "-- A Silver run that finds nothing new writes no log line, so `silver_last_applied` is \"last time there\n",
+        "-- was something to apply\", not \"last time the Job ran\" (the Job's own page shows that).\n",
+        "SELECT 'orders' AS source,\n",
+        "       (SELECT max(_ingested_at) FROM workspace.bronze.orders)        AS bronze_last_landed,\n",
+        "       (SELECT max(applied_at) FROM workspace.silver.orders_log)     AS silver_last_applied\n",
+        "UNION ALL\n",
+        "SELECT 'inventory_cdc',\n",
+        "       (SELECT max(_ingested_at) FROM workspace.bronze.inventory_cdc),\n",
+        "       (SELECT max(applied_at) FROM workspace.silver.inventory_cdc_log)\n",
+        "UNION ALL\n",
+        "SELECT 'customer',\n",
+        "       (SELECT max(_ingested_at) FROM workspace.bronze.customer),\n",
+        "       (SELECT max(applied_at) FROM workspace.silver.dims_merge_log WHERE dimension = 'customer')\n",
+        "UNION ALL\n",
+        "SELECT 'product',\n",
+        "       (SELECT max(_ingested_at) FROM workspace.bronze.product),\n",
+        "       (SELECT max(applied_at) FROM workspace.silver.dims_merge_log WHERE dimension = 'product')\n",
+        "UNION ALL\n",
+        "SELECT 'seller',\n",
+        "       (SELECT max(_ingested_at) FROM workspace.bronze.seller),\n",
+        "       (SELECT max(applied_at) FROM workspace.silver.dims_merge_log WHERE dimension = 'seller')\n"
+      ]
+    },
+    {
+      "name": "silver_daily",
+      "displayName": "Silver rows applied per day",
+      "queryLines": [
+        "-- Rows Silver applied per day and stream (input rows: Bronze messages for the streams, file rows for\n",
+        "-- the dims nights).\n",
+        "SELECT date(applied_at) AS day, stream, sum(rows_in) AS rows_in\n",
+        "FROM (\n",
+        "  SELECT 'orders' AS stream, bronze_rows AS rows_in, applied_at FROM workspace.silver.orders_log\n",
+        "  UNION ALL\n",
+        "  SELECT 'inventory', bronze_rows, applied_at FROM workspace.silver.inventory_cdc_log\n",
+        "  UNION ALL\n",
+        "  SELECT dimension, source_rows, applied_at FROM workspace.silver.dims_merge_log\n",
+        ")\n",
+        "GROUP BY ALL\n",
+        "ORDER BY day, stream\n"
+      ]
+    },
+    {
+      "name": "silver_runs",
+      "displayName": "Silver merge logs",
+      "queryLines": [
+        "-- Every unit Silver applied, newest first: a micro-batch for the two streams, a night for the dims.\n",
+        "-- One line per unit, from the three merge logs the lag alarm also reads.\n",
+        "SELECT 'orders' AS stream, concat('batch ', batch_id) AS unit, bronze_rows AS rows_in,\n",
+        "       inserted, updated, CAST(0 AS BIGINT) AS deleted, applied_at\n",
+        "FROM workspace.silver.orders_log\n",
+        "UNION ALL\n",
+        "SELECT 'inventory', concat('batch ', batch_id), bronze_rows, inserted, updated, deleted, applied_at\n",
+        "FROM workspace.silver.inventory_cdc_log\n",
+        "UNION ALL\n",
+        "SELECT dimension, concat('night ', dump_date), source_rows, inserted, updated, deleted, applied_at\n",
+        "FROM workspace.silver.dims_merge_log\n",
+        "ORDER BY applied_at DESC\n"
+      ]
+    },
+    {
+      "name": "expectations",
+      "displayName": "Lakeflow expectations",
+      "queryLines": [
+        "-- The Lakeflow pipeline's own expectation counts, per update, table and rule (event_log of the\n",
+        "-- pipeline that owns the table \u2014 the whole pipeline's log, not only that table's).\n",
+        "WITH progress AS (\n",
+        "  SELECT origin.update_id AS update_id, timestamp,\n",
+        "         from_json(details:flow_progress.data_quality.expectations,\n",
+        "                   'array<struct<name: string, dataset: string, passed_records: bigint, failed_records: bigint>>')\n",
+        "           AS checks\n",
+        "  FROM event_log(TABLE(workspace.silver_dlt.inventory_cdc_checked))\n",
+        "  WHERE event_type = 'flow_progress'\n",
+        "    AND details:flow_progress.data_quality.expectations IS NOT NULL\n",
+        ")\n",
+        "SELECT min(timestamp) AS update_started, update_id, c.dataset, c.name AS expectation,\n",
+        "       sum(c.passed_records) AS passed, sum(c.failed_records) AS failed\n",
+        "FROM progress LATERAL VIEW explode(checks) t AS c\n",
+        "GROUP BY update_id, c.dataset, c.name\n",
+        "ORDER BY update_started DESC, c.dataset, c.name\n"
+      ]
+    },
+    {
+      "name": "bronze_progress",
+      "displayName": "Kafka Bronze micro-batches",
+      "queryLines": [
+        "-- Kafka Bronze, per micro-batch: messages covered (from the offsets, not numInputRows \u2014 wrong under\n",
+        "-- foreachBatch on serverless) and how far behind the topic's end the stream was after it.\n",
+        "SELECT stream, batch_id, batch_started_at, rows_by_offsets, backlog_after_batch, recorded_at\n",
+        "FROM workspace.bronze.stream_progress\n",
+        "ORDER BY recorded_at DESC\n",
+        "LIMIT 50\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "health",
+      "displayName": "Pipeline health",
+      "layout": [
+        {
+          "widget": {
+            "name": "intro",
+            "textbox_spec": "## ledgerline \u2014 pipeline health\nEvery tile is a query on the production tables; **0 is healthy** on the four numbers. The lag and\nheld-rows tiles run the **same SQL as the two SQL Alerts** (`databricks/alerts/`), so the page and the\nalarms cannot disagree. Built from git by `scripts/build_dashboard.py` (Session 11)."
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "c_lag",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "lag",
+                  "fields": [
+                    {
+                      "name": "sources_behind",
+                      "expression": "`sources_behind`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sources_behind",
+                  "displayName": "sources_behind"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Sources behind",
+                "showDescription": true,
+                "description": "Bronze data older than 26 h not yet in Silver"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_held",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "held",
+                  "fields": [
+                    {
+                      "name": "rows_held",
+                      "expression": "`rows_held`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "rows_held",
+                  "displayName": "rows_held"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Dims rows held",
+                "showDescription": true,
+                "description": "Bad values kept at old values"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 2,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "c_recon",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "reconciliation",
+                  "fields": [
+                    {
+                      "name": "skus_mismatched",
+                      "expression": "`skus_mismatched`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "skus_mismatched",
+                  "displayName": "skus_mismatched"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "SKUs mismatched",
+                "showDescription": true,
+                "description": "Units ordered vs stock decremented, per SKU"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "t_recon",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "reconciliation",
+                  "fields": [
+                    {
+                      "name": "skus",
+                      "expression": "`skus`"
+                    },
+                    {
+                      "name": "skus_mismatched",
+                      "expression": "`skus_mismatched`"
+                    },
+                    {
+                      "name": "units_ordered",
+                      "expression": "`units_ordered`"
+                    },
+                    {
+                      "name": "units_decremented",
+                      "expression": "`units_decremented`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "skus",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "skus",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "skus"
+                  },
+                  {
+                    "fieldName": "skus_mismatched",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "skus_mismatched",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "skus_mismatched"
+                  },
+                  {
+                    "fieldName": "units_ordered",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "units_ordered",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "units_ordered"
+                  },
+                  {
+                    "fieldName": "units_decremented",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "units_decremented",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "units_decremented"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Reconciliation",
+                "showDescription": true,
+                "description": "Expected 34,448 / 0 / 112,650 / 112,650"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "t_lag",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "lag",
+                  "fields": [
+                    {
+                      "name": "sources_behind",
+                      "expression": "`sources_behind`"
+                    },
+                    {
+                      "name": "dims_behind",
+                      "expression": "`dims_behind`"
+                    },
+                    {
+                      "name": "old_nights_changed",
+                      "expression": "`old_nights_changed`"
+                    },
+                    {
+                      "name": "cdc_behind",
+                      "expression": "`cdc_behind`"
+                    },
+                    {
+                      "name": "orders_behind",
+                      "expression": "`orders_behind`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "sources_behind",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "sources_behind",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "sources_behind"
+                  },
+                  {
+                    "fieldName": "dims_behind",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "dims_behind",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "dims_behind"
+                  },
+                  {
+                    "fieldName": "old_nights_changed",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "old_nights_changed",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "old_nights_changed"
+                  },
+                  {
+                    "fieldName": "cdc_behind",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "cdc_behind",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "cdc_behind"
+                  },
+                  {
+                    "fieldName": "orders_behind",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100004,
+                    "title": "orders_behind",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "orders_behind"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Which part of the lag alarm",
+                "showDescription": true,
+                "description": "Each part of the alert query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "t_fresh",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "freshness",
+                  "fields": [
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "bronze_last_landed",
+                      "expression": "`bronze_last_landed`"
+                    },
+                    {
+                      "name": "silver_last_applied",
+                      "expression": "`silver_last_applied`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "source",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "source",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "source"
+                  },
+                  {
+                    "fieldName": "bronze_last_landed",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "bronze_last_landed",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "bronze_last_landed"
+                  },
+                  {
+                    "fieldName": "silver_last_applied",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "silver_last_applied",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "silver_last_applied"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Freshness",
+                "showDescription": true,
+                "description": "Last data into Bronze, last data applied in Silver"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "b_quota",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "quota",
+                  "fields": [
+                    {
+                      "name": "table_schema",
+                      "expression": "`table_schema`"
+                    },
+                    {
+                      "name": "tables",
+                      "expression": "`tables`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "table_schema",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "table_schema"
+                },
+                "y": {
+                  "fieldName": "tables",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "tables"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Tables per schema",
+                "showDescription": true,
+                "description": "Unity Catalog allows 100 per schema; Databricks emails at 80"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "b_daily",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "silver_daily",
+                  "fields": [
+                    {
+                      "name": "day",
+                      "expression": "`day`"
+                    },
+                    {
+                      "name": "rows_in",
+                      "expression": "`rows_in`"
+                    },
+                    {
+                      "name": "stream",
+                      "expression": "`stream`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "day",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "day"
+                },
+                "y": {
+                  "fieldName": "rows_in",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "rows_in"
+                },
+                "color": {
+                  "fieldName": "stream",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "stream"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Silver rows applied per day",
+                "showDescription": true,
+                "description": "Bronze messages / file rows each stream applied"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 8,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "t_runs",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "silver_runs",
+                  "fields": [
+                    {
+                      "name": "stream",
+                      "expression": "`stream`"
+                    },
+                    {
+                      "name": "unit",
+                      "expression": "`unit`"
+                    },
+                    {
+                      "name": "rows_in",
+                      "expression": "`rows_in`"
+                    },
+                    {
+                      "name": "inserted",
+                      "expression": "`inserted`"
+                    },
+                    {
+                      "name": "updated",
+                      "expression": "`updated`"
+                    },
+                    {
+                      "name": "deleted",
+                      "expression": "`deleted`"
+                    },
+                    {
+                      "name": "applied_at",
+                      "expression": "`applied_at`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "stream",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "stream",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "stream"
+                  },
+                  {
+                    "fieldName": "unit",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "unit",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "unit"
+                  },
+                  {
+                    "fieldName": "rows_in",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "rows_in",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "rows_in"
+                  },
+                  {
+                    "fieldName": "inserted",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "inserted",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "inserted"
+                  },
+                  {
+                    "fieldName": "updated",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100004,
+                    "title": "updated",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "updated"
+                  },
+                  {
+                    "fieldName": "deleted",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100005,
+                    "title": "deleted",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "deleted"
+                  },
+                  {
+                    "fieldName": "applied_at",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100006,
+                    "title": "applied_at",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "applied_at"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Silver merge logs",
+                "showDescription": true,
+                "description": "One line per micro-batch or night, newest first"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "t_expect",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "expectations",
+                  "fields": [
+                    {
+                      "name": "update_started",
+                      "expression": "`update_started`"
+                    },
+                    {
+                      "name": "update_id",
+                      "expression": "`update_id`"
+                    },
+                    {
+                      "name": "dataset",
+                      "expression": "`dataset`"
+                    },
+                    {
+                      "name": "expectation",
+                      "expression": "`expectation`"
+                    },
+                    {
+                      "name": "passed",
+                      "expression": "`passed`"
+                    },
+                    {
+                      "name": "failed",
+                      "expression": "`failed`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "update_started",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "update_started",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "update_started"
+                  },
+                  {
+                    "fieldName": "update_id",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "update_id",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "update_id"
+                  },
+                  {
+                    "fieldName": "dataset",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "dataset",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "dataset"
+                  },
+                  {
+                    "fieldName": "expectation",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "expectation",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "expectation"
+                  },
+                  {
+                    "fieldName": "passed",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100004,
+                    "title": "passed",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "passed"
+                  },
+                  {
+                    "fieldName": "failed",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100005,
+                    "title": "failed",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "failed"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Lakeflow expectations (ledgerline-dlt)",
+                "showDescription": true,
+                "description": "From the pipeline's event log"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "t_bronze",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "bronze_progress",
+                  "fields": [
+                    {
+                      "name": "stream",
+                      "expression": "`stream`"
+                    },
+                    {
+                      "name": "batch_id",
+                      "expression": "`batch_id`"
+                    },
+                    {
+                      "name": "batch_started_at",
+                      "expression": "`batch_started_at`"
+                    },
+                    {
+                      "name": "rows_by_offsets",
+                      "expression": "`rows_by_offsets`"
+                    },
+                    {
+                      "name": "backlog_after_batch",
+                      "expression": "`backlog_after_batch`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "stream",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100000,
+                    "title": "stream",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "stream"
+                  },
+                  {
+                    "fieldName": "batch_id",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "title": "batch_id",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "batch_id"
+                  },
+                  {
+                    "fieldName": "batch_started_at",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "title": "batch_started_at",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "batch_started_at"
+                  },
+                  {
+                    "fieldName": "rows_by_offsets",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100003,
+                    "title": "rows_by_offsets",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "rows_by_offsets"
+                  },
+                  {
+                    "fieldName": "backlog_after_batch",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100004,
+                    "title": "backlog_after_batch",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "backlog_after_batch"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "frame": {
+                "showTitle": true,
+                "title": "Kafka Bronze micro-batches",
+                "showDescription": true,
+                "description": "Messages per batch and backlog after it"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 28,
+            "width": 6,
+            "height": 7
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    }
+  ]
+}

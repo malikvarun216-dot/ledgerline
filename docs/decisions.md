@@ -2585,3 +2585,31 @@ unknown table stopping it before a single drop.
   leftovers" list for four sessions and nobody acted on it.
 - Rejected: **ask for a higher quota.** Free Edition has no account team, and the
   quota would only move the day the same pile-up stops something.
+
+## The pipeline-health dashboard is built from git, and reuses the alerts' SQL (Session 11)
+
+**In plain words:** one page of tiles that answers "is the pipeline healthy?" —
+Silver behind Bronze, rows held, units ordered vs decremented per SKU, tables per
+schema against the quota, freshness, every Silver merge-log line, the Lakeflow
+expectation counts, and Kafka Bronze's micro-batches. Its queries are `.sql`
+files in git; `scripts/build_dashboard.py` assembles them into the dashboard's
+own file format (`.lvdash.json`), which is imported into Databricks in one step.
+
+- Chosen: datasets in `databricks/dashboards/pipeline_health/*.sql`; the lag and
+  held-rows tiles read **the same files as the two SQL Alerts**
+  (`databricks/alerts/`), so the page and the alarms cannot disagree;
+  `tests/test_dashboard.py` fails if the built file is stale or a widget reads a
+  dataset that does not exist. Four counters where 0 is healthy, tables beside
+  them that say which part fired.
+- Rejected: **build it by hand in the dashboard editor.** About twenty UI steps,
+  and the result would live only in the workspace — this account is on Free
+  Edition, whose inactive accounts may be deleted, and everything here must be
+  rebuildable from git + S3 (CLAUDE.md, accepted risks).
+- Rejected: **write the `.lvdash.json` by hand.** Every query copied a second
+  time, and the copy of the alert SQL would drift from the alert itself.
+- Rejected: **open the file straight from the Git folder.** Databricks re-saves
+  what it opens there (the notebook lesson of Drill 1); the dashboard is imported
+  into the user's workspace instead, and the Git folder only ever receives pulls.
+- Not built: a separate SQL Alert on the quota — Databricks itself emails at 80%
+  (that is how the 2026-10-06 incident was found); the dashboard tile shows the
+  number between those emails.
