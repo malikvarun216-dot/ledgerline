@@ -98,27 +98,31 @@ assert tables, "no table carries a pii_subject tag — the inventory is empty, s
 
 # COMMAND ----------
 
-requests = spark.table(REQUESTS).select("request_id", "customer_unique_id").collect()
+requests = [(r.request_id, r.customer_unique_id) for r in spark.table(REQUESTS).collect()]
+# In plan mode section 1 filed nothing, so the new request is added here in memory — otherwise the
+# plan reads an empty forget list and shows nothing about the person it was asked about.
+if person and person not in {who for _, who in requests}:
+    requests.append((request_id, person))
+print(f"requests to process: {len(requests)}")
 done = {
     (r.request_id, r.table_name)
     for r in spark.table(LOG).where("step = 'purged'").select("request_id", "table_name").collect()
 }
-for req in requests:
+for rid, who in requests:
     for table, column in tables.items():
-        if (req.request_id, table) in done:
+        if (rid, table) in done:
             continue
-        found = spark.table(table).where(F.col(column) == req.customer_unique_id).count()
-        print(f"{req.request_id} {table}: {found} rows" + ("" if mode == "erase" else "  (plan)"))
+        found = spark.table(table).where(F.col(column) == who).count()
+        print(f"{rid} {table}: {found} rows" + ("" if mode == "erase" else "  (plan)"))
         if mode != "erase":
             continue
         deleted = 0
         if found:
-            spark.sql(f"DELETE FROM {table} WHERE {column} = '{req.customer_unique_id}'")
+            spark.sql(f"DELETE FROM {table} WHERE {column} = '{who}'")
             deleted = int(spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").first()
                           .operationMetrics.get("numDeletedRows", 0))
             spark.sql(f"REORG TABLE {table} APPLY (PURGE)")
-        log([(req.request_id, req.customer_unique_id, table, "deleted", deleted),
-             (req.request_id, req.customer_unique_id, table, "purged", deleted)])
+        log([(rid, who, table, "deleted", deleted), (rid, who, table, "purged", deleted)])
 
 # COMMAND ----------
 
