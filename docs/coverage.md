@@ -57,7 +57,7 @@ session · **X** skip (no honest use here).
 | Unity Catalog grants, groups, service principals | ★★★ | B? S12 |
 | Column masks, row filters, tags | ★★ | B? S12 |
 | Asset Bundles deployed from CI | ★★★ | B? S12 |
-| ML: feature table with point-in-time joins, MLflow experiment, model in UC (no serving) | ★★ (point-in-time ★★★) | B? S12b — optional session |
+| ML: feature table with point-in-time joins, MLflow experiment, model in UC (no serving) | ★★ (point-in-time ★★★) | B? S12b — kept (decided 2026-10-06, no longer optional) |
 | `SHALLOW` / `DEEP CLONE` (vs Snowflake's zero-copy clone) | ★★ | B S16 |
 | Liquid clustering vs partitioning vs Z-order; data skipping | ★★★ | B S21 — on a large sample table, never Olist (Session 0: Olist is too small, "that session would be theater") |
 | Spark performance: broadcast vs shuffle joins, skew, AQE, small files, reading the query profile | ★★★ | B S21 (mostly reading plans — serverless hides most settings) |
@@ -166,7 +166,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **Drill 2** ✓ | attacks on Silver (dedup, MERGE correctness, out-of-order, reconciliation 112,806 → 112,650), incident regression, **lineage check, alarm regression** — done 2026-10-04: Silver reset guards, old-night alarm, the refusal in a real stream + email, a regression Job for every experiment; Unity Catalog lineage follows the `foreachBatch` MERGE | — |
 | **S11** ✓ | Lakeflow expectations + **`AUTO CDC` as SCD1 and SCD2**; windowed streaming (stream-stream join, watermarks, `dropDuplicatesWithinWatermark` vs `MERGE`); **schema evolution; pipeline-health dashboard** | continuous triggers / latency; Lambda vs Kappa; Lakeflow Connect |
 | **S12** | GDPR, lakehouse half (synthetic PII, pseudonymise, erasure) + **UC grants, column masks, row filters, tags, Asset Bundles from CI** (all B?) | account console; networking; Terraform; customer-managed keys |
-| S12b (optional) | **ML point-in-time features, MLflow, model in UC** | — |
+| **S12b** (kept, 2026-10-06) | **ML point-in-time features, MLflow, model in UC** (B?: verify on Free Edition first) | — |
 | — | **Gate: every Databricks-only row above done before the Snowflake trial starts** | — |
 | **S13** | Snowflake day one: Enterprise trial, cost guards (auto-suspend, resource monitor), **roles**; bridge (CDF export incl. `delete` rows → Parquet → stage → `COPY INTO`); **load-history test, Snowpipe beside `COPY`, `VARIANT` first, PK demo** | SSO / SCIM / network policies; Snowpipe Streaming; PrivateLink |
 | **S14–S16** | dbt snapshot (**exp_05**, `hard_deletes` decided), incremental, **tests / unit tests / contracts / freshness**, MERGE + anti-join, zero-copy clone CI + **slim CI + Delta clone**, Airflow DAG with backfill | disaster recovery |
@@ -179,6 +179,6 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | After the trial | Gold on Databricks via dbt's second target, **Genie** | — |
 
 **Cost of the additions:** about 10–12 hours spread over existing sessions, two
-optional sessions (S12b, S20), and roughly 10 minutes per theory hook.
+optional sessions (S12b, S20 — S12b kept on 2026-10-06, so now one), and roughly 10 minutes per theory hook.
 **Calendar risk:** S13–S21 plus Drill 3 is about ten sessions inside the trial's
 30 days — at Sessions 8–9's pace (~2 days each) about 20 days, so little slack.

@@ -2635,3 +2635,23 @@ left two questions to the experiment. Answered (incidents.md, 2026-10-06,
 - The scratch tables it wrote (`s11_*` in `workspace.silver`) were among the 88
   removed after the quota incident; the notebook now writes to
   `workspace.s11.ws_*` and rebuilds them on its next run.
+
+## Session 12b (ML: point-in-time features, MLflow, a model in Unity Catalog) is kept, not skipped (end of Session 11)
+
+**In plain words:** the coverage map marked S12b optional. Asked at the end of
+Session 11 whether to skip it to finish sooner, the human chose to keep it ("will
+go full throttle, no skipping 12b"). It runs after S12 and before the Snowflake
+trial starts, so it costs no trial days.
+
+- Chosen: S12b as a bound session — a feature table built with **point-in-time
+  joins** (each training row sees features only as they were at its own time),
+  an MLflow experiment, a model registered in Unity Catalog, no serving. Every
+  piece **B?**: verified on Free Edition first, else theory with the finding.
+- Rejected: **skip it, teach point-in-time joins as theory** — saves a session,
+  but point-in-time correctness is a ★★★ interview topic and the one ML idea that
+  is really a data-engineering idea (leakage is a join bug); it is best learned
+  by seeing a wrong join give a model future data.
+- Rejected: **move it after Gold** — it would then compete with the trial's
+  30-day clock or slip behind it.
+- S20 (sharing, federation, Iceberg / UniForm) stays optional; decided when S19
+  ends.

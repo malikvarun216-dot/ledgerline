@@ -2829,6 +2829,12 @@ Theory hooks: account console; networking; Terraform; customer-managed keys.
 Also bound to S12: an erasure `DELETE` racing the daily MERGE (row-level
 concurrency; the loser retries).
 
+**Then Session 12b — kept, not optional** (the human, end of Session 11: "will
+go full throttle, no skipping 12b"; decisions.md): a feature table with
+point-in-time joins, an MLflow experiment, a model in Unity Catalog — each B?,
+verified on Free Edition first. Both S12 and S12b run before the Snowflake trial
+starts (S13).
+
 **Carried, each a claim to re-check:**
 - **Deadline ~2026-10-27:** a Silver orders rebuild and any re-run of
   `windowed_streaming` need Bronze's replaced files (`startingVersion = 0`).
