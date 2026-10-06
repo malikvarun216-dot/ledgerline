@@ -1939,3 +1939,77 @@ production rebuild or an experiment asked for it.
   keep 8, scratch 15, unknown []`; every name in both drop lists checked before
   acting. Drop (mode `drop`, ~1 min) → **silver 11 left, bronze 8 left**, exactly
   the production names.
+
+## [2026-10-06] — DELIBERATE (Session 12, `experiments/gdpr_erasure`): "delete this person" on Delta — the `DELETE` left the bytes in a live file, the change feed copied the email, and a MERGE racing the erasure put the person back with no error
+
+**In plain words:** one person (synthetic contact data) was erased from scratch
+copies of the PII vault four ways. A plain `DELETE` hid the row but left it
+inside a file the table still uses, readable by time travel; the change feed
+made a new copy of the email *because* of the delete; encrypting per person and
+deleting the key made the data unreadable at once, but the old key stayed
+readable through the key table's own time travel; and a vault MERGE that had
+read its source just before the erasure inserted the person straight back —
+no error, no conflict.
+
+- What happened (scratch `workspace.s12`, person X = `0000f46a…`, run 1):
+  - **A, physical delete** (deletion vectors on, as on the real vault):
+    `DELETE` → `numDeletedRows=1, numDeletionVectorsAdded=1, numRemovedFiles=0`;
+    X gone from the table, **X's file still part of the current table**, X
+    readable `VERSION AS OF 0`. `REORG TABLE … APPLY (PURGE)` →
+    `numRemovedFiles=1, numAddedFiles=1`; the file left the current table; time
+    travel still returned X's email. `VACUUM`: setting
+    `retentionDurationCheck.enabled=false` → `CONFIG_NOT_AVAILABLE` (serverless);
+    `VACUUM … RETAIN 0 HOURS` → `DELTA_VACUUM_RETENTION_PERIOD_TOO_SHORT`;
+    table property `deletedFileRetentionDuration = 0 hours` + plain `VACUUM` →
+    ran. Time travel then failed with
+    `DELTA_UNSUPPORTED_TIME_TRAVEL_BEYOND_DELETED_FILE_RETENTION_DURATION`.
+  - **B, change feed on**: after the `DELETE`, `table_changes` returned
+    `('delete', 1, 'eduardo.araujo.baedd6@example.com')` — still there after
+    `PURGE`.
+  - **C, crypto-shredding** (`aes_encrypt(email, key, 'GCM')`, 32 random bytes
+    per person): key deleted → 1 ciphertext row left, decrypts to nothing;
+    **with the key table `VERSION AS OF 0` it decrypted again**; after the key
+    table's PURGE + VACUUM, refused. The same email encrypted twice gave
+    different bytes. Key table **2,101,006 bytes vs 3,409,987** of encrypted data.
+  - **D, the erasure racing the vault MERGE** (2,000-row copy):
+    **D1** X new tonight, the MERGE's source fixed before X's request → erasure
+    deleted 0 rows, the MERGE inserted X: **erased person back, no error**; the
+    production guard counted 1. Forget list read inside the MERGE → X 0.
+    **D2** the same instant, X in the vault, MERGE updating X's phone, plain
+    source → erase committed, MERGE `DELTA_CONCURRENT_APPEND.ROW_LEVEL_CHANGES`,
+    **retried → X back (1)**. Forget list inside the MERGE → **both committed**
+    (both read v0), X 0. **D3** MERGE updating everyone *except* X, X still in
+    its source unchanged → the MERGE **conflicted** and updated nobody.
+- What I thought was wrong: **D3 predicted both commit** (row-level concurrency,
+  different rows changed). Wrong: X was *matched* by the MERGE's `ON` though not
+  updated, and that was enough to conflict. Inferred from D2 (X absent from the
+  source → no conflict) vs D3 (X present, unchanged → conflict); not a
+  documented rule I have read. And A3/B3's last line was over-claimed at first:
+  the time-travel error after `retention 0 hours` is a **policy check on the
+  table property**, raised whether or not VACUUM removed a single file — it is
+  not proof the bytes are gone (run 2 adds the proof: window back to 7 days,
+  read again).
+- Root cause: Delta is built never to lose data by accident, which is the
+  opposite of what erasure needs. A deletion vector marks rows deleted without
+  rewriting the file; every old version stays readable until VACUUM removes its
+  files, and VACUUM refuses to remove anything younger than the retention
+  window; the change feed records deleted rows by design; a key table is a
+  Delta table with the same history. The race is time-of-check vs time-of-use:
+  the MERGE's source decided "X is not erased" before the request existed, and
+  a DELETE that removed nothing gives the MERGE nothing to conflict with.
+- Why none of it would be seen: every statement succeeded; `SELECT … WHERE id = X`
+  returns nothing after the first `DELETE`, which is what any test of erasure
+  would check. The resurrected row in D1 arrives with a normal MERGE commit.
+- Fix (production, decisions.md Session 12): the vault reads the forget list
+  **inside** its MERGE statement; erasure writes the forget list first, deletes
+  in every tagged table, purges at once and VACUUMs after the 7-day window; the
+  vault has no change feed; the notebook's guard fails the run if a forget-listed
+  person is in the raw table or the vault.
+- Prevention rule: **an erasure is verified by reading old versions and the
+  change feed, not the current table** — "0 rows now" proves nothing. Any write
+  into a PII table reads the forget list in the same statement that writes; a
+  retried write re-reads it. A PII table never has the change feed on.
+- Lesson: on Delta, `DELETE` is a promise to stop showing the row, not to
+  destroy it — destruction is `REORG PURGE` plus `VACUUM` after the retention
+  window, and every other copy (change feed, key tables, a concurrent MERGE's
+  source) has to be found and closed separately.

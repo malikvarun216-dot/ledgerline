@@ -114,6 +114,22 @@ def vacuum_now(table):
         print("  table retention 0 hours + VACUUM: ran")
     except Exception as e:
         print(f"  table retention 0 hours + VACUUM: REFUSED {first_line(e)}")
+    history = spark.sql(f"DESCRIBE HISTORY {table}")
+    ends = history.where("operation = 'VACUUM END'").orderBy("version").collect()
+    if ends:
+        m = ends[-1].operationMetrics
+        print(f"  VACUUM END: numDeletedFiles={m.get('numDeletedFiles')}, "
+              f"numVacuumedDirectories={m.get('numVacuumedDirectories')}")
+
+
+def with_window_restored(table, read):
+    """The proof run 1 lacked (Session 12): after `retention 0 hours`, time travel fails on a
+    POLICY check (DELTA_UNSUPPORTED_TIME_TRAVEL_BEYOND_DELETED_FILE_RETENTION_DURATION) whether or
+    not any file was removed. Put the 7-day window back and read again: now only a missing file
+    can stop the read."""
+    week = "'delta.deletedFileRetentionDuration' = 'interval 7 days'"
+    spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ({week})")
+    return read()
 
 
 props = {r.key: r.value for r in spark.sql(f"SHOW TBLPROPERTIES {VAULT}").collect()}
@@ -147,6 +163,7 @@ print("A3  VACUUM")
 vacuum_now(A)
 print(f"    X at v{v_before} (time travel): {x_rows(A, v_before)}")
 print(f"    X now: {x_rows(A)}; rows now {spark.table(A).count()}")
+print(f"A4  window back to 7 days, X at v{v_before}: {with_window_restored(A, lambda: x_rows(A, v_before))}")
 
 # COMMAND ----------
 
@@ -176,6 +193,7 @@ spark.sql(f"REORG TABLE {B} APPLY (PURGE)")
 print(f"B2  after PURGE, X in the change feed: {x_in_change_feed()}")
 vacuum_now(B)
 print(f"B3  after VACUUM, X in the change feed: {x_in_change_feed()}")
+print(f"B4  window back to 7 days, X in the change feed: {with_window_restored(B, x_in_change_feed)}")
 
 # COMMAND ----------
 
@@ -228,6 +246,8 @@ print(f"    ...but with the key table at v{v_keys} (time travel): {x_decrypted(v
 spark.sql(f"REORG TABLE {KEYS} APPLY (PURGE)")
 vacuum_now(KEYS)
 print(f"C2  after PURGE + VACUUM of the KEY table: decrypt with keys at v{v_keys}: {x_decrypted(v_keys)}")
+print(f"C3  window back to 7 days: decrypt with keys at v{v_keys}: "
+      f"{with_window_restored(KEYS, lambda: x_decrypted(v_keys))}")
 size = {t: spark.sql(f"DESCRIBE DETAIL {t}").first().sizeInBytes for t in (KEYS, ENC)}
 print(f"    bytes: key table {size[KEYS]:,}  vs  encrypted data {size[ENC]:,}")
 
@@ -383,6 +403,48 @@ print("D3 (MERGE touches everyone except X)")
 race(("erase", f"DELETE FROM {V} WHERE {KEY} = '{X}'"), ("merge", merge_sql("update_others")))
 print(f"    X in vault at the end: {spark.table(V).where(F.col(KEY) == X).count()}; "
       f"others updated: {spark.table(V).where(F.col('customer_phone').endswith('-o')).count()}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## E. A rebuild from S3 — does the forget list keep erased people out?
+# MAGIC
+# MAGIC The landed files still hold everyone until the lifecycle rule expires them (30 days). A rebuild
+# MAGIC re-reads every file from scratch: the production Bronze code with a fresh checkpoint, into a
+# MAGIC scratch table, with the production forget list as its `keep` filter. Run after a real erasure
+# MAGIC (`databricks/pii/erase`); before one, it simply shows 0 people to keep out.
+
+# COMMAND ----------
+
+# MAGIC %run ../databricks/bronze/_autoload_dims
+
+# COMMAND ----------
+
+PII_LANDING = "s3://ledgerline-landing-dev-fffc8b65/ledgerline/pii/customer_contact/"
+REBUILD = f"{S}.contact_raw_rebuild"
+STATE_E = "/Volumes/workspace/s12/state/rebuild"
+PROD_REQUESTS = "workspace.pii.erasure_requests"
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {S}.state")
+spark.sql(f"DROP TABLE IF EXISTS {REBUILD}")
+try:
+    dbutils.fs.rm(STATE_E, True)  # a rebuild starts with no memory of which files it read
+except Exception as e:
+    print(f"no old rebuild state ({first_line(e)})")
+
+
+def keep_unforgotten(batch_df):
+    return batch_df.join(batch_df.sparkSession.table(PROD_REQUESTS).select(KEY), KEY, "left_anti")
+
+
+ingest(PII_LANDING, REBUILD, STATE_E, keep=keep_unforgotten, retention="interval 7 days")
+landed = spark.read.option("header", "true").option("recursiveFileLookup", "true").csv(PII_LANDING)
+forgotten = spark.table(PROD_REQUESTS).select(KEY).distinct()
+print(f"E1  people on the production forget list: {forgotten.count()}")
+print(f"    in the landed files (S3, until expiry): {landed.join(forgotten, KEY).count()} rows")
+print(f"    in the rebuilt raw table:               {spark.table(REBUILD).join(forgotten, KEY).count()} rows")
+per_night = spark.table(REBUILD).groupBy("dump_date").agg(F.count("*").alias("n"))
+rebuilt = {r.dump_date: r.n for r in per_night.collect()}
+print(f"    rebuilt per night: {dict(sorted(rebuilt.items()))}")
 
 # COMMAND ----------
 

@@ -2694,3 +2694,51 @@ existing customer files do not change by a single byte.
   it can read the PII files. In production the lane would be a separate bucket or
   prefix with its own IAM role and external location; recorded as the gap, not
   built (one more role policy for one reader).
+
+## Erasure deletes physically — `DELETE`, `REORG … PURGE`, `VACUUM` after a 7-day window — found by tags, guarded by a forget list read inside every PII write; crypto-shredding not adopted here (Session 12)
+
+**In plain words:** to erase a person, the platform first adds them to a forget
+list, then deletes their rows from every table Unity Catalog's tags mark as
+holding personal data, rewrites the affected files at once so the row is not
+merely hidden, and lets `VACUUM` remove the old files once they are 7 days old.
+The raw S3 copy expires by itself within 30 days (lifecycle rule). Encrypting
+each person's data with their own key and deleting the key ("crypto-shredding")
+was built and measured beside it, and not adopted for these tables.
+
+- Chosen, measured in `experiments/gdpr_erasure` (incidents.md, 2026-10-06):
+  1. **Forget list first** (`pii.erasure_requests`), then `DELETE` in every table
+     with a `pii_subject` column tag (`information_schema.column_tags` — the tags
+     make no Delta commit, so keeping them complete costs nothing).
+  2. **`REORG TABLE … APPLY (PURGE)` at once**: with deletion vectors a `DELETE`
+     rewrote no file (`numRemovedFiles=0`); PURGE rewrote the one file.
+  3. **`VACUUM` after the PII tables' 7-day window** (`deletedFileRetentionDuration`,
+     set by `contact_vault`), run by the erasure job itself rather than left to
+     Predictive Optimization's own schedule. Bytes gone ≤ 7 days + one daily run;
+     the raw S3 copy ≤ 30 days; both inside GDPR's one month.
+  4. **The forget list is read inside every write** into a PII table — Bronze's
+     `keep` filter, and the vault MERGE's `USING` clause. D1/D2: a MERGE whose
+     source was fixed before the request put the person back with no error, and
+     so did a retried MERGE; read inside the statement, the erased person is
+     never matched, and the MERGE and the erasure `DELETE` both commit (D2).
+  5. **No change feed on PII tables** (B: the `DELETE` copied the email into it).
+  6. **A guard after every vault run**: a forget-listed person in raw or vault
+     fails the run (D1's resurrection is exactly what it counts).
+- Rejected: **`DELETE` alone.** The row stays in a live file, readable by time
+  travel for 7 days and physically present until a PURGE or a rewrite.
+- Rejected: **shortening the window to 0 to vacuum at once.** Serverless refuses
+  the switch that disables the safety check (`CONFIG_NOT_AVAILABLE`) and refuses
+  `RETAIN 0 HOURS`; the only way is the table property, which ends time travel
+  on that table for everyone. Kept to the experiment.
+- Rejected: **crypto-shredding for these tables.** It works — key deleted,
+  ciphertext unreadable at once — but (a) the key table is a Delta table with
+  the same time-travel problem (decrypting with its old version worked until
+  its own PURGE + VACUUM), so it moves the physical delete rather than removing
+  it; (b) with one short email per person the key table was **2.1 MB beside
+  3.4 MB** of data — no saving; (c) every reader must join keys and decrypt,
+  and ciphertext cannot be joined or grouped (the same email encrypted twice
+  differed). It pays off where copies **cannot** be deleted on our schedule —
+  an immutable Kafka topic, backups, an export into a system we do not run.
+  None holds PII today; Session 18 decides it again for the Snowflake copy.
+- Trade-off: for up to 7 days (plus one run) the erased person's bytes exist in
+  files no current version uses, readable only by time travel to an older
+  version; the PII tables get a 7-day time-travel window instead of 30.

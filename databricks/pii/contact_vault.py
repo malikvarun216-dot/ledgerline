@@ -160,8 +160,13 @@ def merge_vault():
     compared = [*CONTACT_COLUMNS, "email_hash", "dim_updated_at"]
     changed = " OR ".join(f"NOT (t.{c} <=> s.{c})" for c in compared)
     columns = [KEY, *compared, "_dump_date"]
+    # The forget list is read again INSIDE the MERGE statement, not only when the source was built:
+    # experiments/gdpr_erasure D1/D2 — a MERGE whose source was fixed before an erasure put the
+    # person back with no error, and a retried MERGE did the same. Read here, an erased person is
+    # never matched, so the MERGE also never conflicts with the erasure's DELETE (D2: both commit).
+    not_forgotten = f"(SELECT * FROM contact_tonight WHERE {KEY} NOT IN (SELECT {KEY} FROM {REQUESTS}))"
     metrics = spark.sql(
-        f"""MERGE INTO {VAULT} t USING contact_tonight s ON t.{KEY} = s.{KEY}
+        f"""MERGE INTO {VAULT} t USING {not_forgotten} s ON t.{KEY} = s.{KEY}
         WHEN MATCHED AND ({changed}) THEN UPDATE SET
             {", ".join(f"t.{c} = s.{c}" for c in columns[1:])}, t._merged_at = current_timestamp()
         WHEN NOT MATCHED THEN INSERT ({", ".join(columns)}, _merged_at)
