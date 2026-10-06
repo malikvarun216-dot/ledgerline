@@ -2863,3 +2863,22 @@ why point-in-time correctness is a data-engineering skill.
 - Trade-off: the order's seller is its first item's seller (orders with several
   sellers are a small minority); the model is small and not served (model
   serving is an X row).
+
+### Outcome (2026-10-06, same session) — measured
+
+- Spine 96,470 delivered orders, 6,534 late (6.8 %); feature table 96,428 rows,
+  2,960 sellers, primary key with `TIMESERIES` accepted on Free Edition; the
+  hand-written as-of join and Feature Engineering's `create_training_set` agree
+  on **all 96,470** rows (0 different); 5,281 orders have no seller history yet.
+- The leaky all-time join leaked on **96,470 of 96,470** orders (each order's
+  own delivery is in its seller's all-time count). Test AUC: **point in time
+  0.598**; leaky as its notebook reports it **0.731**; leaky in use (fed
+  point-in-time features) **0.547** — it looked 13 points better and was 5 worse.
+- MLflow 3.12.0 experiment with every run; `workspace.ml.late_delivery` versions
+  1–3, `@champion` = 3; scored by `score_batch` in a fresh session, 52,777 of
+  52,777 equal to training. Two incidents on the way (type skew between the two
+  scoring paths; a stale model in the training session).
+- Production scores the champion in its own notebook (`score_champion`), never
+  where the model was trained. The 0/1 output at the default 0.5 threshold
+  flags 120 of 52,777 orders (6.8 % are late) — a real use would choose a
+  threshold by business cost; AUC is the score that means something here.

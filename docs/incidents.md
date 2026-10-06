@@ -2110,3 +2110,22 @@ missing value that scikit-learn refuses.
   rows. Type normalisation lives inside the model, not in the caller.
 - Lesson: training/serving skew is often not different data but the same data
   converted twice — here one NULL, two pandas types.
+
+### Continuation (2026-10-06, same session) — the fix was right; the training session kept scoring with the old model
+
+After the fix, version 2 was registered as `@champion` and `score_batch` in the
+**same notebook session** failed again with the identical error — naming
+`ColumnTransformer` and the transformer `'inputs'`, which only version 1 has.
+A separate notebook (`databricks/ml/score_champion`, its own session) read each
+registered version from the registry: v1 `ColumnTransformer`, v2 and v3
+`FunctionTransformer` (inside Feature Engineering's package,
+`data/feature_store/raw_model`) — the registry was right. Scored there,
+`@champion` (v3) gave **52,777 of 52,777** predictions equal to training's, 0 on
+one side only, 120 predicted late on both sides.
+
+- Root cause (inferred by elimination, not observed): the training session's
+  reused Python workers kept the model loaded during the first, failed
+  `score_batch` and answered with it.
+- Prevention rule (added): **score in a session of its own, from the registry**
+  — never in the session that trained or re-registered the model. It is also
+  how a production scoring job runs.

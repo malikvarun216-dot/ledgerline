@@ -3068,3 +3068,123 @@ row done → the Snowflake trial (S13).
 - Deletion vectors on production Silver tables; the OPTIMIZE `userName`; topics
   empty and the Git-folder token expires ~2026-12-25; read-only Kafka identity
   for Bronze; dev-only Kafka key.
+
+---
+
+## Session 12b — a model that does not see the future: point-in-time features, MLflow, a model in Unity Catalog
+Date: 2026-10-06 (same day, straight after Session 12)
+
+**In plain words:** one honest prediction — *will this order arrive after the
+date promised at purchase?* — built so the point-in-time join is the thing being
+tested. The seller's late-delivery record is a time-series feature table; each
+order sees the seller only as they were when it was placed. Joined by hand and
+by Databricks Feature Engineering, the two agree on every row. Joined the easy
+way (the seller over all time), the model looked 13 AUC points better in its
+notebook and was 5 points worse in use. The honest model is registered in Unity
+Catalog as `@champion` and scored by a separate notebook, matching training on
+every test order — after two failures that each became a rule.
+
+### Scope, as it actually ran
+Planned (`coverage.md`, S12b, all B?): feature table with point-in-time joins,
+MLflow experiment, model in UC. **All three verified and built.** Added: the
+deliberately leaky join and its measured cost; a separate scoring notebook.
+Mistakes of mine: the model's first step passed whatever pandas types it was
+given (broke in the scoring path); scoring was first done in the training
+session.
+
+### Built
+- **`databricks/ml/late_delivery`:** spine (delivered orders, prediction time
+  `created_at`, label = delivered on a later day than promised); feature table
+  `workspace.ml.seller_delivery_features` (one row per seller per delivery
+  completion, primary key `(seller_id, feature_ts TIMESERIES)`); the as-of join
+  by hand and by `FeatureEngineeringClient.create_training_set`
+  (`timestamp_lookup_key`), compared; the leaky all-time join; two
+  `HistGradientBoostingClassifier` models, time split at 2018-01-01, logged to
+  MLflow; the honest one logged with `fe.log_model` and registered as
+  `workspace.ml.late_delivery`, alias `champion`; test predictions saved to
+  `workspace.ml.late_delivery_test_orders`.
+- **`databricks/ml/score_champion`:** in its own session — each registered
+  version's pipeline steps read from the registry; `score_batch` on the test
+  spine compared with training, order by order.
+- `pyproject.toml`: `E402` allowed in `databricks/ml/*` (imports after the
+  library install and Python restart).
+
+### Verified
+- Spine **96,470** delivered orders, **6,534 late (6.8 %)**, 43,693 before the
+  cutoff. Feature table **96,428** rows, **2,960** sellers; `TIMESERIES` key
+  accepted. By hand **96,470** rows, **5,281** with no seller history yet; by
+  Feature Engineering **96,470**, **0 different**.
+- Leaky: **96,470 of 96,470** orders saw their own future. Test AUC (identical in
+  three runs): point in time **0.5977** (train 0.754); leaky **0.7313** (train
+  0.8304); leaky fed point-in-time features **0.5467**.
+- MLflow **3.12.0**; experiment `/Users/…/ledgerline-late-delivery`; model
+  versions 1–3, `@champion` = **3**. `%pip install databricks-feature-engineering`
+  upgraded `databricks-sdk` 0.122.0 → 0.147.0 in that notebook's session (warned,
+  no effect seen).
+- First scoring (v1, training session): `ValueError … 'seller_deliveries' has
+  dtype Int64 and uses pandas.NA`. After the fix, v2 in the same session: the
+  same error from a `ColumnTransformer` that only v1 has. **Fresh session:** v1
+  `ColumnTransformer`, v2/v3 `FunctionTransformer`; `score_batch` on `@champion`
+  **52,777 of 52,777** equal to training, 0 one-sided, 120 predicted late both
+  ways.
+- `ruff` clean; `pytest` 163.
+
+### Built but NOT verified
+- Why the training session scored with v1 after v2 was champion (reused workers'
+  cached model — inferred by elimination).
+- `score_batch` with a feature table updated after training (new deliveries):
+  the lookup should then use the newer rows — not exercised.
+- Model serving, monitoring, retraining: not built (serving is an X row).
+
+### Not done
+Nothing bound to S12b.
+
+### Incidents (1 new, with a continuation)
+1. The registered model crashed when scored through `score_batch`: one NULL,
+   two pandas types (training/serving skew) — continuation: the training
+   session kept scoring with the old model; a fresh session matched training.
+
+### Decisions (1 new, with its outcome)
+The late-delivery prediction with point-in-time seller features (+ outcome:
+0.598 honest vs 0.731 leaky-reported vs 0.547 leaky-in-use).
+
+### Seen, recorded rather than guessed
+- `fe.log_model` on MLflow 3 registers a *logged model* (`models:/m-…`), with
+  the warning "Run … has no artifacts at artifact path 'model'"; the raw model
+  sits at `data/feature_store/raw_model` inside the package.
+- `score_batch` runs the model in a Spark UDF with `env_manager="local"` and says
+  so; MLflow warns on each run that context tags cannot be resolved
+  (`getContext().extraContext()`), harmless.
+- At the default 0.5 threshold the model flags 120 of 52,777 orders.
+
+### Cost
+Databricks $0. Nothing else touched.
+
+### Hands-on checks (offered)
+- **Experiments** (left menu) → `ledgerline-late-delivery`: compare the
+  `point_in_time` and `leaky_all_time` runs' `auc_test`, and the leaky run's
+  `auc_test_on_point_in_time_features`.
+- **Catalog** → `workspace.ml` → `late_delivery` (Models): versions 1–3, alias
+  `champion`, lineage to `seller_delivery_features`; the feature table's
+  **Primary key** with `TIMESERIES`.
+
+### Learning check
+Offered at the end, together with Session 12's; see `learning.md` Part B.
+
+### Next
+**The gate is passed: every Databricks-only row of `coverage.md` is done or
+bound later by design** (S16 clone, S21 performance, S20 optional). **Session 13
+— Snowflake day one:** create the trial as **Enterprise edition** and record the
+edition, region, credits and end date as verified (rewrite CLAUDE.md's Snowflake
+bullet); cost guards on day one (auto-suspend 60 s, XSMALL, resource monitor);
+roles; the bridge (Silver change feed incl. `delete` rows → Parquet → stage →
+`COPY INTO`); load-history test, Snowpipe beside `COPY`, `VARIANT` first, the PK
+demo. Theory hooks: SSO / SCIM / network policies; Snowpipe Streaming;
+PrivateLink.
+
+**Carried from Session 12, unchanged** (see its `### Next`): the 2026-10-13
+VACUUM check on fresh compute; `ledgerline-jobs` read on the salt secret before
+the next contact night; the 30-day S3 expiry (~2026-11-05); `ledgerline-ci`'s
+secret (~2027-01-04); the ~2026-10-27 Bronze-files deadline; the Gold-window
+items; Drill 3's list; dashboard; clean-up (also drop `workspace.s12` after
+2026-10-13).
