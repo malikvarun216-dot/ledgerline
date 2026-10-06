@@ -262,11 +262,11 @@ for k, v in results.items():
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Register the honest model in Unity Catalog, and score through it
+# MAGIC ## 7. Register the honest model in Unity Catalog
 # MAGIC
-# MAGIC Logged with Feature Engineering, the model remembers its feature lookups: `score_batch` is given
-# MAGIC only the spine (ids + time + order columns) and looks the seller up **as of each order's time**
-# MAGIC itself. Its test AUC must equal step 6's.
+# MAGIC Logged with Feature Engineering, the model remembers its feature lookups: given only the spine
+# MAGIC (ids + time + order columns) it looks the seller up **as of each order's time** itself. Scoring
+# MAGIC through it is `databricks/ml/score_champion`, in a session of its own.
 
 # COMMAND ----------
 
@@ -289,11 +289,14 @@ version = max(int(v.version) for v in client.search_model_versions(f"name = '{MO
 client.set_registered_model_alias(MODEL, "champion", version)
 print(f"{MODEL}: version {version} = @champion")
 
-test_spine = spine.where(F.col("created_at") >= CUTOFF)
-scored = fe.score_batch(model_uri=f"models:/{MODEL}@champion", df=test_spine)
-scored = scored.select("order_id", "prediction").toPandas()
-mine = honest_test.assign(step6=honest_model.predict(honest_test))[["order_id", "step6"]]
-both = mine.merge(scored, on="order_id", how="outer", indicator=True)
-agree = (both.step6 == both.prediction).sum()
-print(f"score_batch scored {len(scored):,} test orders; same 0/1 prediction as step 6's model: "
-      f"{agree:,} of {len(both):,} (only on one side: {(both._merge != 'both').sum()})")
+# Scoring is a separate notebook (`score_champion`), in a fresh session — the way production scores,
+# and the first run showed why: in this session score_batch kept answering like an older version.
+# What it is compared with: this notebook's own predictions on the test orders, saved here.
+TEST = f"{ML}.late_delivery_test_orders"
+step6 = honest_test.assign(step6_prediction=honest_model.predict(honest_test))
+saved = spark.createDataFrame(step6[["order_id", "step6_prediction"]]).join(
+    spine.where(F.col("created_at") >= CUTOFF), "order_id"
+)
+saved.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(TEST)
+print(f"{TEST}: {spark.table(TEST).count():,} test orders with step 6's prediction "
+      f"({int(step6.step6_prediction.sum()):,} predicted late); champion = version {version}")
