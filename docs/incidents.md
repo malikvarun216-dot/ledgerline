@@ -2044,3 +2044,34 @@ referenced in the transaction log cannot be found`.
   rebuild from S3** with a fresh checkpoint and the production forget list: the
   erased person still in the landed files (2 rows, until the 30-day expiry), 0
   rows in the rebuilt table, nights 22,496 / 43,689.
+
+## [2026-10-06] — the first bundle-deployed job failed in 0 seconds: the robot that runs it could not read the notebooks the robot that deployed it had uploaded
+
+**In plain words:** CI deployed the PII job as one service principal
+(`ledgerline-ci`), which uploads the notebooks into its own home folder. The
+job runs as another (`ledgerline-jobs`). That one had every Unity Catalog grant
+the notebooks need — tables, volume, landing files — and still could not open
+the notebook itself, so the run failed before a single line ran.
+
+- What happened: run `895970998774029`, task `contact_vault`, 0 s: `Unable to
+  access the notebook "/Workspace/Users/b21c5575-…/.bundle/ledgerline/free/files/
+  databricks/pii/contact_vault". Either it does not exist, or the identity used
+  to run this job, ledgerline-jobs (18160145-…), lacks the required permissions.`
+  Run as: `ledgerline-jobs` (correct). Two CI deploys before it were green.
+- What I thought was wrong: nothing — the grants in `governance` §5 were written
+  as "exactly what the two notebooks touch", and the deploy and `validate` passed.
+- Root cause: two permission systems. **Unity Catalog** governs data (tables,
+  volumes, external locations); **workspace object ACLs** govern notebooks and
+  folders. A bundle's `permissions:` list sets the second on its deploy folder;
+  the runner was not in it, and naming a principal in `run_as` grants it nothing.
+- Why nothing caught it: `bundle validate` checks the bundle's shape, not whether
+  the run-as identity can read the deployed files; the deploy succeeds because
+  the *deployer* can write its own folder. Only a run as the other identity shows it.
+- Fix: the runner added to the bundle's permissions at `CAN_VIEW` (read the job
+  and its files; cannot edit or manage).
+- Prevention rule: **a deploy is not done until one run as the run-as identity is
+  green.** Whenever deployer ≠ runner, the runner is listed in the bundle's
+  `permissions` — and its grants are checked in both systems, Unity Catalog for
+  data and workspace ACLs for code.
+- Lesson: "can it read the data" and "can it read the code" are different
+  questions in Databricks, answered by different permission systems.

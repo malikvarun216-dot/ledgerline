@@ -78,3 +78,8 @@ targets:
         level: CAN_MANAGE
       - group_name: admins
         level: CAN_MANAGE
+      # The runner must READ the notebooks the deployer uploaded into its own folder. run_as grants
+      # nothing by itself, and Unity Catalog grants do not cover workspace files: the first run
+      # failed in 0 s with "Unable to access the notebook" (incidents.md, 2026-10-06).
+      - service_principal_name: ${var.runner}
+        level: CAN_VIEW
