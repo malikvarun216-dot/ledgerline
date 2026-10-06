@@ -2829,3 +2829,37 @@ personal data; the one whose secret sits in GitHub cannot.
   workflow called as `ci`'s last job (`needs: lint-and-test`) has no such catch.
 - Trade-off: one more identity to look after, and an OAuth secret that expires
   (90 days, so ~2027-01-04) — CI deploys fail loudly on that day.
+
+## Session 12b's model predicts a late delivery from the seller's record *so far* — point in time, not all time (Session 12b)
+
+**In plain words:** the ML session needs one honest prediction whose features
+change over time. Chosen: *will this order arrive after the date promised at
+purchase?* — both dates are real Olist data. Its strongest feature is the
+seller's late-delivery rate, which must be computed **only from deliveries
+completed before the order was placed**. Computed over all time, it includes
+deliveries from the future — the order's own outcome among them — and the model
+looks better than it can ever be in use. That leakage is a join bug, which is
+why point-in-time correctness is a data-engineering skill.
+
+- Chosen: a **time-series feature table** `workspace.ml.seller_delivery_features`
+  — one row per seller per delivery completion (`seller_id`, `feature_ts` =
+  `delivered_at`, cumulative deliveries, late deliveries, late rate) — so "the
+  seller as of time t" is the newest row with `feature_ts <= t`. A spine of
+  delivered orders (`created_at` = when the prediction is made; label = late).
+  The as-of join built twice — by hand (join + newest row) and by Databricks
+  Feature Engineering's `create_training_set` with `timestamp_lookup_key` — and
+  compared row for row; a deliberately leaky all-time join trained beside it.
+  Train before 2018-01-01, test after (time split: a random split would leak
+  the future by itself). MLflow logs both runs; only the point-in-time model is
+  registered in Unity Catalog (`workspace.ml.late_delivery`, alias `champion`).
+- Rejected: **predict a repeat purchase.** ~3% of Olist customers buy twice; the
+  label is too thin to show anything.
+- Rejected: **one row per seller per day** for the feature table. Easier to
+  read, but ~2M rows of mostly unchanged values; the event-sourced form (a row
+  only when the value changes) is what an as-of lookup is built for.
+- Rejected: **only the hand-written join**, or only the Feature Engineering
+  client. The client is the B? row (does it run on Free Edition?); the hand-written
+  join is the answer key that says whether the client is right.
+- Trade-off: the order's seller is its first item's seller (orders with several
+  sellers are a small minority); the model is small and not served (model
+  serving is an X row).

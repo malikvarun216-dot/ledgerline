@@ -39,6 +39,8 @@ select = [
 # W292 (no final newline) because Databricks saves every notebook without one; matching
 # it byte for byte is what keeps a Git-folder Pull from conflicting (decisions.md, Drill 1).
 "databricks/*" = ["F821", "W292"]
+# The ML notebook installs libraries, then restarts Python: its imports must come after that cell.
+"databricks/ml/*" = ["F821", "W292", "E402"]
 # Experiments that run as Databricks notebooks, named one by one so a plain-Python
 # experiment added later still gets undefined-name checking.
 "experiments/exp_01_exactly_once_replay.py" = ["F821", "W292"]

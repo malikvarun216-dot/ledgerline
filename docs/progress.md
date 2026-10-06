@@ -2853,3 +2853,218 @@ starts (S13).
 - Deletion vectors on the production Silver tables; the OPTIMIZE `userName`;
   CI's Actions log for the producer tests; topics empty and the Git-folder token
   expires ~2026-12-25; read-only Kafka identity for Bronze; dev-only Kafka key.
+
+---
+
+## Session 12 — personal data: a lane of its own, erasure that really erases, and who may see what
+Date: 2026-10-06
+
+**In plain words:** the source now sends synthetic contact data (name, email,
+phone — `@example.com`, area code `00`) in a nightly file of its own, which S3
+deletes after 30 days. It lands in a restricted schema, `workspace.pii`: a raw
+Bronze table and a "vault" with one row per person. One real erasure request
+was carried out end to end, and an experiment showed what "delete this person"
+takes on Delta: a `DELETE` only hides the row, `REORG … PURGE` rewrites the
+file, `VACUUM` removes it — proven on fresh compute, because the notebook that
+had read the file kept answering from its cache. A vault MERGE racing the
+erasure put the person back with no error, until it read the forget list inside
+its own statement. Access is now by account groups, column masks and a row
+filter, tested from the outside as a service principal. And the first job is
+code: `databricks.yml`, deployed by GitHub Actions as one robot and run as
+another.
+
+### Scope, as it actually ran
+Planned (`coverage.md` S12): GDPR lakehouse half (synthetic PII, pseudonymise,
+erasure), UC grants / groups / service principals, column masks, row filters,
+tags, Asset Bundles from CI — all **B?** — plus four theory hooks and the
+erasure `DELETE` racing the daily MERGE. **All done; every B? verified and
+built.** Added: the S3 lifecycle rule, a rebuild-from-S3 proof, a second service
+principal (deploy ≠ run). Mistakes of mine, each caught by a run or a reading:
+the VACUUM "proof" first read the notebook's own cache; the erasure plan mode
+showed nothing (its work list came from a table plan mode never writes); a
+prediction that two non-overlapping MERGE/DELETE would both commit (D3: they
+conflicted); a `git rm --cached` on the bundle stub (git is read-only for me —
+undone at once, nothing committed); the job's run-as robot had no read on the
+deployer's files.
+
+### Start-of-session re-check
+Docs read in order; git clean at `7525ed1`; `ruff` clean, `pytest` 157. No
+experiment due (exp_05 / exp_06 are Gold).
+
+### Built
+- **Generator:** `generators/dim_dumps.py --pii-from DATE` — the
+  `customer_contact` lane (`pii/customer_contact/dump_date=…/`), synthetic and
+  deterministic per `customer_unique_id`, rows = that night's customers,
+  `dim_updated_at` = first order. Off unless asked: every dims file unchanged.
+- **`scripts/set_pii_lifecycle.py`** (plan / `--apply`): S3 rule
+  `ledgerline-pii-expire`, prefix `ledgerline/pii/`, 30 days; keeps other rules.
+- **`databricks/bronze/_autoload_dims.py`:** optional `keep` filter and per-table
+  `retention` (production dims pass neither).
+- **`databricks/pii/contact_vault`:** schema `workspace.pii`;
+  `customer_contact_raw` (Auto Loader, forget-list `keep`, 7-day retention);
+  vault `customer_contact` (newest night, three-clause MERGE with the forget
+  list read **inside** it, `email_hash` = SHA-256 of a UC-secret salt + email, no
+  change feed, 5% delete breaker, merge log); column and table tags; guards.
+- **`databricks/pii/erase`:** forget list first → `DELETE` in every
+  `pii_subject`-tagged table → `REORG … PURGE` → `VACUUM` once 7 days have
+  passed; `erasure_log`; `plan` / `erase` widget.
+- **`databricks/pii/governance`:** grants (`analysts`: `SELECT` on the vault),
+  masks (`mask_email` → `email_hash`, `mask_phone` → last 4, `mask_name` →
+  initial), row filter `region_filter` (SP only, looked up in `silver.customer`),
+  §5 the job identity's grants.
+- **`experiments/gdpr_erasure`** (scratch `workspace.s12`): A physical delete,
+  B change feed, C crypto-shredding, D the race (D1 stale source, D2 same
+  instant, D3 other rows), E rebuild from S3.
+- **`scripts/query_as.py`:** SQL on the warehouse as `ledgerline-ci` (OAuth M2M,
+  standard library only); `--check governance`.
+- **`databricks.yml`** (job `ledgerline-pii`, 06:30 IST, `contact_vault → erase`,
+  run as `ledgerline-jobs`) and **`.github/workflows/deploy.yml`** (reusable;
+  called as `ci`'s last job on a push to `dev`, CLI 1.19.0). Empty
+  `databricks/bundle/` stub removed.
+- **Identities (clicked):** account groups `pii_readers` (human, `ledgerline-jobs`)
+  and `analysts` (`ledgerline-ci`); service principals `ledgerline-ci` (OAuth
+  secret, 90 days, `all-apis`, until ~2027-01-04) and `ledgerline-jobs` (no
+  secret; `ledgerline-ci` holds **Use** on it); `ledgerline-ci` **Can use** on
+  the SQL warehouse; GitHub secrets `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`,
+  `DATABRICKS_CLIENT_SECRET`, `ALERT_EMAIL`; UC secret
+  `workspace.ledgerline_secrets.pii_hash_salt`.
+- `tests/conftest.py` blocks `DATABRICKS_CLIENT_ID/SECRET` too; tests 157 →
+  **163**.
+
+### Verified
+- **Landing:** the Night 5 command + `--pii-from 2017-08-30` → all 15 dims
+  nights `identical`, 2 contact files `new` (22,497; 43,690, `gone 19`).
+  Lifecycle: `rules now 2: ['abort-incomplete-mpu', 'ledgerline-pii-expire']`,
+  versioning never enabled.
+- **Vault:** raw 22,497 / 43,690; vault inserted 43,690; 43,690 distinct
+  `email_hash`; 9 column tags; tags made **no Delta commit** (history v0 CREATE,
+  v1 MERGE only).
+- **Erasure experiment, run 1 and 2:** `DELETE` → `numDeletionVectorsAdded=1,
+  numRemovedFiles=0`, the file still part of the current table, time travel
+  returns the email; `REORG PURGE` → 1 file out, 1 in; VACUUM: the switch
+  `CONFIG_NOT_AVAILABLE`, `RETAIN 0 HOURS` refused, table retention 0 hours +
+  `VACUUM` ran (`numDeletedFiles=2`). Change feed held the `delete` row with the
+  email after the DELETE and after PURGE. Crypto-shredding: key deleted → no
+  decrypt; key table at v0 → decrypt works; key table 2,100,972 B vs 3,409,913 B
+  data; same email encrypted twice differs. **VACUUM's deletion verified on the
+  SQL warehouse:** `FAILED_READ_FILE.DBR_FILE_NOT_EXIST` — the notebook, which
+  had read the file earlier, still returned it (A4, B4, C3: cache).
+- **The race:** D1 erasure deleted 0, the stale MERGE inserted X → 1 (guard
+  counted 1); forget list inside the MERGE → 0. D2 plain: MERGE lost
+  (`ROW_LEVEL_CHANGES`), retried → X back (1); forget list inside: both commit
+  (both read v0), X 0. D3 MERGE matching X unchanged → conflict.
+- **Production erasure `REQ-2026-10-06-001`:** plan raw 2 / vault 1; erase
+  deleted + purged (vault v2 DELETE with deletion vector, v3 REORG removed
+  3,035,491 B); `VACUUM from 2026-10-13`; 0 / 0 left. `contact_vault` after:
+  raw 22,496 / 43,689, vault 43,689, forget list 1, 0 present. **Rebuild from S3**
+  (fresh checkpoint, production forget list): 2 rows still in the landed files,
+  0 rebuilt, 22,496 / 43,689.
+- **Governance, as `ledgerline-ci`:** `analyst true, pii_reader false`; `B***`,
+  email = its hash, `+55 ** *****-6419`; **17,166** rows; raw, forget list,
+  `silver.customer`, the states join → `INSUFFICIENT_PERMISSIONS`; `DELETE` →
+  `User does not have DELETE`. The owner: real values, 43,689 rows. Masks and
+  filter made no Delta commit; groups are **Account** groups;
+  `is_account_group_member` and `is_member` both true for the human.
+- **CI deploy:** runs #60 → #62 green (`lint-and-test` → `deploy / bundle`);
+  job `ledgerline-pii` id `931302488873685` kept across redeploys; deployer name
+  masked as `***` (it equals a secret). First run `895970998774029` failed in
+  0 s (runner could not read the notebook); after `CAN_VIEW` for the runner,
+  run `749965703459266` **green** as `ledgerline-jobs` (`contact_vault` 1 m 8 s,
+  `erase` 16 s). `CREATE … IF NOT EXISTS` on existing objects needed no
+  `CREATE` grant.
+- `ruff` clean; `pytest` **163** passed.
+
+### Built but NOT verified
+- **The 2026-10-13 VACUUM** by the scheduled job, as `ledgerline-jobs` (needs
+  `MODIFY` only? — unknown until it runs), and the erased person unreadable by
+  time travel on fresh compute after it.
+- **The salt secret read by `ledgerline-jobs`:** the vault reads it only when a
+  new night arrives; the runner has no grant on the secret yet — the first new
+  night will fail until it does (the UC secret privilege's name not yet checked).
+- **The 30-day S3 expiry** actually removing the PII files (~2026-11-05).
+- **A writer outside `pii_readers` writing blind** (MERGE re-inserting hidden
+  rows; DELETE removing nothing and passing its check) — predicted, guarded, not
+  staged.
+- 17,166 = SP customers in the vault, as the owner (the confirming SQL was
+  handed over, its answer not yet seen).
+- The validate step being clean after the permissions fix (the run was green;
+  its warnings were not re-read).
+
+### Not done
+Nothing bound to Session 12. Carried by name: the two hand-made jobs
+(`ledgerline-silver`, `ledgerline-regression`) move into the bundle at **Drill 3**.
+
+### Incidents (2 new, 1 deliberate)
+1. **DELIBERATE:** `gdpr_erasure` — `DELETE` left the bytes in a live file, the
+   change feed copied the email, crypto-shredding's key table time-travelled, a
+   racing MERGE put the person back (+ correction: the VACUUM "proof" read the
+   notebook's cache).
+2. The first bundle-deployed run failed in 0 s: the run-as robot could not read
+   the deployer's notebooks (workspace ACLs ≠ Unity Catalog grants).
+Also a slip, owned here rather than as an entry: plan mode of `erase` printed
+nothing for the request it was given (fixed before the real run).
+
+### Decisions (5 new, plus an addendum)
+PII in a lane of its own; erasure by physical delete (crypto-shredding measured,
+not adopted) + addendum (VACUUM confirmed; verify on fresh compute); governance
+by groups, masks and a lookup row filter, tested as a service principal; jobs as
+code — a bundle deployed by one robot and run by another.
+
+### Seen, recorded rather than guessed
+- Free Edition service principals have **scoped, expiring OAuth secrets** (1–730
+  days; scopes "BI Tools" / "Other APIs").
+- The "Add service principal" dialog says *"to account and workspace"*: an
+  account exists behind Free Edition, without a console.
+- A row filter's subquery runs with the function owner's rights.
+- The Databricks-made `users-clone-2026-08-06-1048-UTC` group is a
+  workspace-local group.
+- `bundle validate` recommended naming the deployer in `permissions` and setting
+  `root_path`; both done.
+
+### Cost
+Databricks $0. AWS: two S3 objects (~8.7 MB) and a lifecycle rule — cents.
+Confluent: nothing read. GitHub Actions: free minutes.
+
+### Hands-on checks (offered)
+- Catalog Explorer → `workspace.pii.customer_contact` → **Permissions** and the
+  column list (mask icons); the row filter on the table's Overview.
+- `DESCRIBE HISTORY workspace.pii.customer_contact` — v2 `DELETE`
+  (`numDeletionVectorsAdded`), v3 `REORG` — and nothing for grants, masks, tags.
+- Jobs & Pipelines → `ledgerline-pii` → **Run as**, the failed and the green run
+  side by side; the job's "Deployed from a bundle" banner.
+- SQL Editor as yourself vs `python scripts/query_as.py --check governance`.
+
+### Learning check
+Offered at the end; see `learning.md` Part B.
+
+### Next
+**Session 12b — kept** (decisions.md, end of Session 11): a feature table with
+**point-in-time joins**, an **MLflow** experiment, a **model in Unity Catalog** —
+each B?, verified on Free Edition first. Then the gate: every Databricks-only
+row done → the Snowflake trial (S13).
+
+**Carried, each a claim to re-check:**
+- **2026-10-13:** the scheduled `ledgerline-pii` run VACUUMs the erasure — check
+  its `erase` output (`VACUUM … ran`, `vacuumed` lines in `pii.erasure_log`), then
+  time travel to vault v1 on the **SQL warehouse** must fail on a missing file.
+- **Before the next contact night lands:** grant `ledgerline-jobs` read on the UC
+  secret `pii_hash_salt` (find the privilege's name), or the vault fails.
+- **~2026-11-05:** the 30-day lifecycle has emptied `ledgerline/pii/`
+  (`aws s3 ls`); `contact_raw_rebuild` in `workspace.s12` then holds the only
+  "landing" copy — drop `workspace.s12` after S12b.
+- **~2027-01-04:** `ledgerline-ci`'s OAuth secret expires → CI deploys fail.
+- **Deadline ~2026-10-27:** a Silver orders rebuild and any re-run of
+  `windowed_streaming` need Bronze's replaced files (`startingVersion = 0`).
+- **Gold window (S13):** change feed cannot span a rename or drop; the export
+  carries `delete` rows; the Lakeflow SCD2 is exp_05's comparison; **S18 decides
+  how PII reaches Snowflake** (masked, hashed, or crypto-shredded).
+- **Drill 3:** `ledgerline-silver` and `ledgerline-regression` into the bundle;
+  the 11 older notebooks to their own schemas; exp_01 out of
+  `bronze.stream_progress`; a real added field through Bronze `mergeSchema`;
+  stage a writer outside `pii_readers` to show the blind write the guard stops.
+- **Dashboard:** re-import the rebuilt file; decide whether to publish.
+- **Clean-up:** the spare empty pipeline and folder from S11; `drop_scratch`
+  widget on `plan`.
+- Deletion vectors on production Silver tables; the OPTIMIZE `userName`; topics
+  empty and the Git-folder token expires ~2026-12-25; read-only Kafka identity
+  for Bronze; dev-only Kafka key.
