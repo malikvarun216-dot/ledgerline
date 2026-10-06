@@ -42,10 +42,10 @@ import mlflow
 import pandas as pd
 from pyspark.sql import Window
 from pyspark.sql import functions as F
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer
 
 ML = "workspace.ml"
 FEATURES = f"{ML}.seller_delivery_features"
@@ -211,9 +211,19 @@ print(f"leaky: {leaky.count():,} rows; orders whose feature counted deliveries f
 # COMMAND ----------
 
 
+def as_float_inputs(X):
+    """Only the model's inputs, by name, as float64 — whatever the caller passes.
+
+    The first run's skew (incidents.md, 2026-10-06, Session 12b): in the notebook `toPandas()`
+    turned a BIGINT with NULLs (a seller with no delivery yet) into float64 NaN; inside
+    `score_batch`'s Spark UDF the same column arrived as pandas' nullable Int64 with pd.NA, which
+    scikit-learn refuses. One conversion inside the model makes both paths the same.
+    """
+    return X[MODEL_INPUTS].astype("float64")
+
+
 def model():
-    # Columns chosen by name, so scoring may pass extra columns (ids, timestamps) in any order.
-    pick = ColumnTransformer([("inputs", "passthrough", MODEL_INPUTS)], remainder="drop")
+    pick = FunctionTransformer(as_float_inputs)
     return Pipeline([("pick", pick), ("gb", HistGradientBoostingClassifier(max_iter=200, random_state=0))])
 
 

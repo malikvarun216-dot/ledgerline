@@ -2075,3 +2075,38 @@ the notebook itself, so the run failed before a single line ran.
   data and workspace ACLs for code.
 - Lesson: "can it read the data" and "can it read the code" are different
   questions in Databricks, answered by different permission systems.
+
+## [2026-10-06] — the registered model scored fine in the notebook and crashed when scored through `score_batch`: the same NULL arrived as two different pandas types (Session 12b)
+
+**In plain words:** the late-delivery model was trained and tested in the
+notebook without a problem, registered in Unity Catalog, and then failed the
+first time Databricks scored it the production way. Sellers with no completed
+delivery yet have an empty feature; in the notebook that empty value became an
+ordinary "not a number", inside the scoring path it became a different kind of
+missing value that scikit-learn refuses.
+
+- What happened: `fe.score_batch(models:/workspace.ml.late_delivery@champion,
+  test spine)` → `PythonException` in the Spark UDF → `ValueError: The output of
+  the 'inputs' transformer for column 'seller_deliveries' has dtype Int64 and uses
+  pandas.NA to represent null values`. Steps 1–6 (training, test AUC 0.598) and
+  the registration (version 1, `@champion`) had all succeeded.
+- What I thought was wrong: the worker processes lacking the notebook's
+  `%pip`-installed scikit-learn — the UDF warning said it would not recreate the
+  training environment.
+- Root cause: two conversions of one Spark column. `toPandas()` (training, step
+  6) turns a BIGINT with NULLs into `float64` with `NaN`; MLflow's
+  `spark_udf` (what `score_batch` runs) converts by the model's signature into
+  pandas' nullable `Int64` with `pd.NA`. The pipeline's `ColumnTransformer`
+  passes `NaN` and refuses `pd.NA`. 5,281 orders (a seller's first ones) carry
+  that NULL.
+- Why nothing caught it: the model was only ever run along the path it was
+  trained on; the notebook's AUC is computed on `toPandas()` output. Training /
+  serving skew needs the serving path exercised once before the model is trusted.
+- Fix: the model's first step converts exactly its inputs to `float64` itself
+  (`as_float_inputs`), so both paths feed the estimator the same thing.
+- Prevention rule: **a registered model is not done until it has been scored
+  through the same path production will use** (`score_batch` / the serving
+  route), and its predictions compared with the training notebook's on the same
+  rows. Type normalisation lives inside the model, not in the caller.
+- Lesson: training/serving skew is often not different data but the same data
+  converted twice — here one NULL, two pandas types.
