@@ -3035,7 +3035,7 @@ Confluent: nothing read. GitHub Actions: free minutes.
 - SQL Editor as yourself vs `python scripts/query_as.py --check governance`.
 
 ### Learning check
-Offered at the end; see `learning.md` Part B.
+**Skipped by choice, logged.** Offered once, after Session 12b, for both sessions; the human, 2026-10-06: *"skip test, update the docs"*. Five questions parked in `learning.md` as **B55–B59**; theory questions **B51–B54** added, not yet asked.
 
 ### Next
 **Session 12b — kept** (decisions.md, end of Session 11): a feature table with
@@ -3169,7 +3169,7 @@ Databricks $0. Nothing else touched.
   **Primary key** with `TIMESERIES`.
 
 ### Learning check
-Offered at the end, together with Session 12's; see `learning.md` Part B.
+**Skipped by choice, logged** (one offer for Sessions 12 and 12b): *"skip test, update the docs"*. Five questions parked as **B60–B64**.
 
 ### Next
 **The gate is passed: every Databricks-only row of `coverage.md` is done or
