@@ -3139,3 +3139,40 @@ a folder without a log line stops the export until a person looks.
   serverless notebooks run on **Spark Connect**, whose writer knows the mode as `"error"` only
   (the same behaviour: fail if the folder exists). The entry above says `errorifexists`; the code
   says `"error"`.
+
+## RAW lands every bridge file in one VARIANT table, loaded only by Snowpipe; COPY's behaviour is measured in a scratch schema (Session 13)
+
+**In plain words:** Snowflake's landing table keeps each Parquet row **whole and
+untyped** (one `VARIANT` column), plus where it came from — file, row number,
+when it was loaded. One table for all seven Silver tables, the table's name
+taken from the folder. Typing happens later, in Gold's staging models (dbt,
+S14), where a type error is a failed model, not a failed load. And the
+production table is loaded by **one Snowpipe** — Snowflake's serverless loader
+that S3 wakes up when a file lands — never by hand-run `COPY`, because a pipe
+and a `COPY` keep **separate** memories of which files they loaded, and two
+memories over one table is how a file gets loaded twice.
+
+- Chosen: `LEDGERLINE.RAW.SILVER_CHANGES (TABLE_NAME, RECORD VARIANT,
+  SOURCE_FILE, SOURCE_ROW, FILE_LAST_MODIFIED, LOADED_AT)`; pipe
+  `SILVER_CHANGES_PIPE` (`AUTO_INGEST = TRUE`, `PATTERN = '.*[.]parquet'` — each
+  folder also holds Databricks' `_started_` / `_committed_` / `_SUCCESS`
+  markers); today's seven files loaded by `ALTER PIPE … REFRESH` (it queues
+  files staged in the last 7 days); later files by S3 event notifications.
+  `COPY`, its load history, `ON_ERROR`, `VALIDATION_MODE`, the pipe-vs-COPY
+  question and the primary-key demo all run in **`LEDGERLINE.S13`**, a scratch
+  schema — the S11 rule (experiments never in production schemas), on Snowflake.
+- Rejected: **typed tables, `MATCH_BY_COLUMN_NAME = CASE_SENSITIVE`** — the
+  usual shortcut for Parquet. It loads only columns the table already has: a
+  column Silver adds later is **dropped silently**, the same failure as Delta's
+  `INSERT *` (S11 E3). `VARIANT` keeps every field the file had.
+- Rejected: **one RAW table per Silver table** — seven tables and seven pipes
+  for the same rule; one table with `TABLE_NAME` costs nothing at this volume.
+  If it ever grows, `TABLE_NAME` is the natural clustering key (S21).
+- Rejected: **scheduled `COPY` from the warehouse** — the batch alternative, and
+  a fine one for a daily export. Snowpipe is chosen because it is the coverage
+  row's real subject and the honest production shape for files that arrive on
+  their own clock; the trade-off is that its compute is **serverless — outside
+  both resource monitors** (watched through `PIPE_USAGE_HISTORY`, S21).
+- Trade-off: `ON_ERROR` for a pipe defaults to `SKIP_FILE` — a bad file is
+  skipped, not loaded partially, and shows only in `COPY_HISTORY`; checking that
+  view is part of verifying a load.

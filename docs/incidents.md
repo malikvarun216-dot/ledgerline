@@ -2129,3 +2129,60 @@ one side only, 120 predicted late on both sides.
 - Prevention rule (added): **score in a session of its own, from the registry**
   — never in the session that trained or re-registered the model. It is also
   how a production scoring job runs.
+
+## [2026-10-11] — Snowflake's first load tagged all 504,039 rows with the table name `silver`: the file path included the stage's own folder (Session 13)
+
+**In plain words:** the landing table `LEDGERLINE.RAW.SILVER_CHANGES` holds
+every bridge row with the name of the Silver table it came from, taken from the
+file's path. I took the **first** folder of the path, believing the path starts
+at the stage (`orders/v…/part….parquet`). It starts at the bucket
+(`silver/orders/v…/part….parquet`), so every row of all seven tables was tagged
+`silver`. Row counts, file counts and the load history all looked right.
+
+- Seen: `SELECT TABLE_NAME, COUNT(*) … GROUP BY 1` → one group, `silver`,
+  504,039 rows, 7 files — straight after `COPY_HISTORY` had listed seven tables,
+  `Loaded`, with the right row count each (43,771 customer … 158,446
+  inventory_events).
+- Root cause: `METADATA$FILENAME` is the object's path **including the stage
+  URL's own prefix** (`silver/`); `COPY_HISTORY.FILE_NAME` is relative to the
+  stage. I tested neither before writing the pipe — `SPLIT_PART(…, '/', 1)` was
+  an assumption.
+- Why nothing caught it: every check was a **count**, and counts cannot see a
+  wrong label — 504,039 rows is right whatever they are called. The one check
+  that splits by the label was the one that showed it. `COPY_HISTORY` (relative
+  paths) agreed with my assumption, which made it look confirmed.
+- Contained: pipe paused (`PIPE_EXECUTION_PAUSED = TRUE`) before anything else;
+  no S3 notifications were configured yet, so no new file could have arrived.
+- Fix forward: (1) the table name is taken as the folder **just before the
+  `v<from>-<to>` version folder** — `REGEXP_SUBSTR(path,
+  '([^/]+)/v[0-9]{10}-[0-9]{10}/', 1, 1, 'e', 1)` — which does not depend on how
+  deep the stage sits; tested against the stage first (`seller` from
+  `silver/seller/v…/part…`); (2) the 504,039 rows repaired by `UPDATE … SET
+  TABLE_NAME = <same expression over SOURCE_FILE>` — `SOURCE_FILE` kept the full
+  path on every row, so the repair is exact and the delivered data (`RECORD`)
+  is not touched; (3) the pipe re-created with the new expression, **paused
+  first**. Not reloaded: truncating and reloading production RAW would discard
+  the original load times for nothing the UPDATE cannot do.
+- A second finding on the way, same family: the stage stored its file format as
+  `PARQUET_FF`, unqualified, and a query on the stage from a session in
+  another schema failed `File format 'PARQUET_FF' does not exist or not
+  authorized`; the pipe had worked only because it runs inside `RAW`. Likewise
+  the pipe's first version (unqualified `SILVER_CHANGES`) failed `ALTER PIPE …
+  REFRESH`. **Snowflake resolves an unqualified name inside a stage or pipe in
+  the caller's schema.** Both are now fully qualified.
+- Cost of the repair, named: re-creating a pipe **drops its load history**. The
+  seven files of 2026-10-11 are inside `REFRESH`'s 7-day window, so an `ALTER
+  PIPE … REFRESH` before **2026-10-18** would load them a second time. Gold's
+  MERGE is keyed on `(key, _commit_version)` and would absorb it, but RAW would
+  hold duplicates.
+- Prevention rules:
+  1. **A derived label is checked against its source, not counted.** After every
+     load: every `TABLE_NAME` is one of the seven Silver tables, and per table
+     the rows equal the export log's (`snowflake/12_check_raw.sql`).
+  2. **Test an expression on the stage (`SELECT … FROM @stage`) before it goes
+     into a pipe** — a pipe can only be changed by re-creating it, which costs
+     its load history.
+  3. **Fully qualify every name inside a stage, pipe or view definition.**
+  4. **Never `ALTER PIPE … REFRESH` a re-created pipe over files it may already
+     have loaded**; duplicates in RAW are detected by `(SOURCE_FILE, SOURCE_ROW)`
+     appearing twice (same check file).

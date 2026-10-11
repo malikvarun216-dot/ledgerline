@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from generators._common import load_local_env
 
 MAX_ROWS = 50
+WIDTH = 110  # widest cell printed; longer values are cut
 
 
 def connect(role: str | None = None):
@@ -55,15 +56,16 @@ def show(cursor, statement: str) -> None:
         print("(no result set)")
         return
     names = [d[0] for d in cursor.description]
-    rows = cursor.fetchmany(MAX_ROWS)
+    rows = cursor.fetchmany(MAX_ROWS + 1)
+    more = len(rows) > MAX_ROWS  # rowcount is 'rows affected' for DML, so not used here
+    rows = rows[:MAX_ROWS]
     cells = [[("NULL" if v is None else str(v)) for v in row] for row in rows]
-    widths = [min(60, max([len(n)] + [len(r[i]) for r in cells])) for i, n in enumerate(names)]
+    widths = [min(WIDTH, max([len(n)] + [len(r[i]) for r in cells])) for i, n in enumerate(names)]
     print(" | ".join(n.ljust(w) for n, w in zip(names, widths, strict=True)))
     print("-+-".join("-" * w for w in widths))
     for r in cells:
-        print(" | ".join(c[:60].ljust(w) for c, w in zip(r, widths, strict=True)))
-    more = cursor.rowcount - len(rows) if cursor.rowcount and cursor.rowcount > len(rows) else 0
-    print(f"({len(rows)} row{'s' if len(rows) != 1 else ''}{f', {more} more not shown' if more else ''})")
+        print(" | ".join(c[:WIDTH].ljust(w) for c, w in zip(r, widths, strict=True)))
+    print(f"({len(rows)} row{'s' if len(rows) != 1 else ''}{', more not shown' if more else ''})")
 
 
 def run(sql: str, role: str | None = None) -> int:
