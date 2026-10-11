@@ -3176,3 +3176,121 @@ memories over one table is how a file gets loaded twice.
 - Trade-off: `ON_ERROR` for a pipe defaults to `SKIP_FILE` — a bad file is
   skipped, not loaded partially, and shows only in `COPY_HISTORY`; checking that
   view is part of verifying a load.
+
+## Gold schemas are made by SYSADMIN, managed access, and read by the analyst through future grants — dbt creates tables, never schemas (Session 14)
+
+**In plain words:** dbt builds Gold as the transformer role, but it does not
+get to create schemas or decide who reads what it builds. Three schemas are
+made once by SYSADMIN — `STAGING` (typed views over RAW), `SNAPSHOTS` (the SCD2
+history tables) and `GOLD` (what analysts read) — all *managed access*, so the
+transformer owns its tables but cannot share them. The analyst can read `GOLD`
+and nothing under it, through a grant on future tables and views made once by
+SECURITYADMIN (`snowflake/06_gold_schemas.sql`).
+
+- Chosen: three fixed schemas; the transformer gets `CREATE TABLE` and `CREATE
+  VIEW` on each; `SELECT ON FUTURE TABLES / VIEWS IN SCHEMA GOLD` to the
+  analyst; dbt's schema names used exactly as written (a `generate_schema_name`
+  macro, not dbt's default `<target schema>_<custom schema>` prefixing).
+- Rejected: **`CREATE SCHEMA` on the database for the transformer** — the
+  common dbt setup, where every developer and CI run gets its own schema.
+  The transformer would then *own* its schemas, and the owner of an ordinary
+  schema can grant anything in it to anyone: the S13 role design (each role one
+  job, SECURITYADMIN grants) would leak through dbt. Revisited at S16, when
+  slim CI needs a schema per run (a clone needs a place to land).
+- Rejected: **dbt's `grants:` config on each model** — grants written next to
+  the SQL are convenient and versioned, but in a managed-access schema only the
+  schema owner or `MANAGE GRANTS` may grant, so they would fail; and a model
+  that forgets the config is silently unreadable. One future grant per schema
+  covers every model, including ones not written yet.
+- Trade-off: a new Gold schema is a human step in Snowsight, not a line of dbt.
+  Experiments get `LEDGERLINE.S14` (the S11 scratch rule).
+
+## Gold current state is rebuilt from the change log on every run — newest change per key, then drop deletes; incremental MERGE waits for the facts (Session 14)
+
+**In plain words:** Snowflake holds every change Silver ever made (504,039 rows).
+"The customer as they are now" is computed from that log on each run: for each
+key take its newest change, and if that change is a delete, the key is gone.
+The whole table is rebuilt each time (`customer_current`, `product_current`,
+`seller_current`, `inventory_current` — dbt `table` models over one macro,
+`current_state`). No row-by-row MERGE, no state carried from the last run.
+
+- Chosen: `QUALIFY row_number() OVER (PARTITION BY key ORDER BY commit_version
+  DESC) = 1`, **then** `WHERE change_type <> 'delete'` — in that order: filtering
+  deletes first leaves the key's older insert as its newest change and brings
+  a deleted row back (B68, now a dbt unit test). Duplicated change rows (a file
+  loaded twice) are absorbed by the pick; two *different* rows at one
+  `(key, commit_version)` fail the build first (`no_conflicting_changes`, the
+  Silver tie rule from Session 9). Every Gold model has an enforced contract.
+- Rejected: **a dbt incremental `merge` model** — the production shape when the
+  log is large. dbt's `merge` strategy writes only `UPDATE` / `INSERT`; deletes
+  need a second statement (a post-hook, or `delete+insert` with a tombstone
+  row), and a rebuild is no longer the same code path as a normal run. At
+  504K rows the full rebuild is seconds on an XSMALL warehouse and cannot drift.
+  The incremental MERGE is built where its cost is honest — the order facts, S15,
+  with the lookback window of exp_06 (S17).
+- Rejected: **`WHEN NOT MATCHED BY SOURCE`-style deletion by absence** — the
+  deletes are in the log as rows, so nothing has to be inferred from a key
+  being missing (CLAUDE.md rule 1). Deletion by absence appears in Gold only
+  where the source really is a snapshot: the dbt snapshot's `hard_deletes`
+  compares the current state with the snapshot table — an anti-join (exp_05).
+- Trade-off: each run re-reads the whole log for these four tables. Revisit if
+  RAW grows past what a minute of XSMALL reads (clustering on `TABLE_NAME`, S21).
+
+**Staging is generated from one declaration** (`macros/silver_tables.sql`):
+each Silver table's key and every field with the type Snowflake reads it as.
+The same list types the staging views and drives the drift check
+(`tests/raw_fields_declared.sql`, `FLATTEN(OBJECT_KEYS(RECORD))`): a field or a
+type in RAW that is not declared fails the build. Rejected: hand-written
+staging SQL plus a separate list for the check — two lists drift apart, which
+is the failure the check exists to catch. Verified: passes on all 504,039 rows;
+with `orders.units` undeclared it returns exactly that one field and fails.
+
+## Gold dimension history is a dbt snapshot on business time, `hard_deletes='invalidate'`, run one Silver night per run (Session 14)
+
+**In plain words:** the SCD2 history of customer, product and seller is kept
+by dbt snapshots (`SNAPSHOTS.<dim>_history`, read through the views
+`GOLD.dim_<dim>`). A version starts at the row's own `dim_updated_at` — when
+it became true in Olist — not when the snapshot ran. A deleted key's last
+version is closed. And the snapshot is fed **one Silver night at a time,
+oldest first** (`scripts/snapshot_nights.py`), because a snapshot only sees the
+state at the moment it runs. Chosen on exp_05's numbers (35 of 35 predictions held).
+
+- Chosen: `strategy='timestamp'`, `updated_at='dim_updated_at'`,
+  `hard_deletes='invalidate'`, `dbt_valid_to_current = 9999-12-31` (a
+  point-in-time join is `valid_from <= T AND T < valid_to`, no NULL handling).
+  The source is `current_state(..., as_of_night=n)`: Silver as it stood after
+  the n-th dump. Verified on production: all three dims answer nights 1–4
+  exactly like the generator's own dumps (0 missing / 0 extra / 0 different).
+- Rejected: **`strategy='check'`** — no business time needed, but
+  `dbt_valid_from` = the run time: asked about any 2017 night, the snapshot
+  knew nobody (exp_05 A: 1 / 326 / 8,068 / 22,497 / 43,690 missing). Right
+  only if the snapshot runs within minutes of every change, never on a replay.
+- Rejected: **`hard_deletes='ignore'`** (dbt's default) — the 19 deleted
+  customers stay current forever (exp_05 B).
+- Rejected: **`hard_deletes='new_record'`** — records the deletion as a row of
+  its own, good for audit, but every consumer must filter `dbt_is_deleted`;
+  one that forgets sees deleted people as current, which is `ignore` again.
+  `invalidate` fails safe: a deleted key simply has no current row. The audit
+  trail of the delete already exists in RAW (the change feed's `delete` row).
+- Rejected: **one `dbt snapshot` over today's state** (the usual way to start
+  one) — right for today, but it starts history now: 1 / 24 / 52 people
+  absent from nights 2–4 (exp_05 A, `ts_one_run`). Replay is possible only
+  because RAW kept every Silver version.
+- Rejected: **SCD2 derived directly from the change log** (`lead()` over each
+  key's versions, as B46 / the Lakeflow SCD2 of S11) — rebuildable at any time
+  and could close a delete at its night's date. Kept as the alternative to
+  build if the snapshot's limits bite; the snapshot is chosen because the
+  dims' real temporal shape is *nightly full dumps*, the case snapshots are
+  for, and it is the coverage row's subject.
+- Known limit, measured: **a delete is closed at the RUN time** (exp_05 C:
+  `dbt_valid_to` 2026-10-11 15:07:29, inside the night-5 run). A delete is an
+  absence, and an absent row has no `dim_updated_at`, so the 19 / 100 / 100
+  deleted keys still appear in the night-5 (2017-12-28) picture. Every
+  `hard_deletes` option has it. Running the snapshot soon after each night
+  makes the error hours, not years; a replay makes it years.
+- Known limit, measured: the history is only as fine as the delivery: Olist
+  holds **91** real address changes up to night 5; the dumps showed **43**.
+- Guards: a production snapshot run without `as_of_night` fails at compile
+  (named error); a default selector (`dbt_project/selectors.yml`) keeps
+  snapshots out of a bare `dbt build` / `dbt snapshot`; `scd2_shape` test (one
+  open version per key, versions meet end to start).

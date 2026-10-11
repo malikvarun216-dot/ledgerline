@@ -17,7 +17,7 @@ changes it.
 | exp_02 | partition overwrite: append doubles, predicate-less overwrite wipes | Bronze dims (`replaceWhere`) | **S6 — missed**; S8 | **done** S8 (two sessions late); re-run Drill 2 |
 | exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8; G rewritten + H added S9 (hold the bad row); re-run Drill 2 |
 | exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | **done** S10 (on time); its part C changed production (`newest_from="log"`); re-run Drill 2 |
-| exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | not started |
+| exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | **done** S14 (on time; 35/35 predictions; chose `timestamp` + `invalidate`, one night per run) |
 | exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | not started |
 
 **The rest of the plan is bound the same way** — since Session 9, every
@@ -3280,7 +3280,14 @@ and SQL in git; the Ohio bridge bucket; the change-feed export (+ correction:
 two serverless refusals); RAW as one `VARIANT` table loaded only by Snowpipe.
 
 ### Cost
-Databricks $0. AWS: one bucket, a few MB. Snowflake: see the end of this entry.
+Databricks $0. AWS: one bucket, a few MB. Snowflake: the Snowsight counter
+still read **"$400 of $400 left"** at the end of the session, after the
+experiments had run `LEDGERLINE_WH` and Snowpipe had loaded 504,039 rows. The
+counter lags: usage reaches it hours later. `WAREHOUSE_METERING_HISTORY` and
+`PIPE_USAGE_HISTORY` returned 0 rows to the loader role (privilege or the same
+delay — not told apart). **Read again at the start of S14**, as ACCOUNTADMIN, in
+Admin → Cost management; expected well under 1 credit (minutes of XSMALL, one
+pipe load).
 
 ### Learning check
 **Skipped by choice** (*"skip Qs for now"*). Five questions parked as **B68–B72**; theory hooks B65–B67 in C11.
@@ -3294,6 +3301,7 @@ dims SCD2 snapshot, run time vs business time, `hard_deletes` decided, compared
 with the Lakeflow SCD2 (S11); tests / unit tests / contracts / freshness.
 
 **Carried, by name:**
+- **Snowflake spend for S13:** read the credit counter / Cost management at S14 start (it lagged at session end).
 - **Snowpipe auto-ingest firing**: at the next bridge export with new Silver
   rows, confirm `RAW` grows by itself (no `REFRESH`) and `12_check_raw.sql` is empty.
 - **No `ALTER PIPE … REFRESH` before 2026-10-18.**
@@ -3308,3 +3316,151 @@ with the Lakeflow SCD2 (S11); tests / unit tests / contracts / freshness.
 - **Drill 3** adds: re-delivery of a changed file on the **external** stage; a
   `COPY` into RAW refused by process; the export's orphan-folder refusal staged.
 - The bridge export into the bundle / a Job after Silver (Airflow, S15–S16).
+
+---
+
+## Session 14 — Gold begins: dbt on Snowflake, the SCD2 snapshot on business time, and a role split that existed only on paper
+Date: 2026-10-11
+
+**In plain words:** dbt now builds Gold in Snowflake from the bridge's change
+log, signed in as the transformer and nothing else. Staging types every field
+of `RAW.SILVER_CHANGES`, and a `FLATTEN` check fails the build if RAW holds a
+field or a type nobody declared. Gold's current-state tables are rebuilt from
+the log on every run. The customer, product and seller histories are dbt
+snapshots, replayed one Silver night at a time; asked "who was this customer on
+night n?", they give exactly the answer of a dump the generator rebuilds on its
+own. **exp_05** showed why the settings matter: a snapshot on run time knows
+nobody in 2017, and no snapshot setting can date a delete. On the way, the
+analyst could read RAW — every session of the service user carried **both**
+functional roles. Found, measured without changing a row, fixed at the user.
+
+### Scope, as it actually ran
+Planned (S13 `### Next`, `coverage.md` S14): dbt project + Snowflake target,
+staging with the `FLATTEN` drift check, current-state models, **exp_05** +
+`hard_deletes`, tests / unit tests / contracts / freshness. **All built and
+verified.** The comparison with the Lakeflow SCD2 (S11) is made in words in
+decisions.md (log-derived SCD2 rejected for now), not rebuilt here. Carried in:
+S13's spend reading — done. Added: the Gold schemas and the analyst's grants;
+the secondary-roles incident.
+
+### Built
+- Snowflake: `06_gold_schemas.sql` (STAGING / SNAPSHOTS / GOLD, managed access,
+  future grants for the analyst on GOLD); scratch schema `S14` (`05`);
+  `07_spend.sql` (usage views, as ACCOUNTADMIN); `03_service_user.sql` +
+  `DEFAULT_SECONDARY_ROLES = ()`.
+- dbt (`dbt_project/`): profile (key pair, role TRANSFORMER),
+  `generate_schema_name`, `selectors.yml` (snapshots out of a bare run);
+  `macros/silver_tables.sql` (one declaration: key + field types per Silver
+  table) → 7 staging views; `macros/current_state.sql` → `customer_current`,
+  `product_current`, `seller_current`, `inventory_current` (tables, enforced
+  contracts); snapshots `customer_history`, `product_history`, `seller_history`
+  → views `dim_customer`, `dim_product`, `dim_seller` (contracts); tests:
+  source freshness and tests on RAW, `raw_fields_declared` (FLATTEN), generic
+  `no_conflicting_changes` and `scd2_shape`, a unit test of `current_state`;
+  five exp_05 snapshots in `snapshots/experiments/` (enabled only with `exp05`).
+- `scripts/run_dbt.py` (reads `.env`, runs dbt on the project),
+  `scripts/snapshot_nights.py` (one night per snapshot run, oldest first),
+  `snowflake/experiments/exp_05_scd2.py`.
+- Removed: the four empty dbt stub files from Session 0 (`fct_orders.sql`, two
+  snapshot stubs, `reconcile_sold_vs_decrements.sql`) — the reconciliation test
+  is rebuilt with the facts in S15.
+
+### Verified
+- **S13 spend:** resource monitors read as ACCOUNTADMIN — account **0.46** of 40
+  credits this month, `LEDGERLINE_WH` **0.44** of 4 today. Snowpipe's share
+  (serverless, outside both) not read — `07_spend.sql` result 3, next time.
+- `dbt debug` green as `LEDGERLINE_SVC` / TRANSFORMER. **`dbt build` 51 of 51**
+  (7 views, 4 tables, 3 SCD2 views, 36 data tests, 1 unit test); re-run after
+  the role fix with only TRANSFORMER active: 51 of 51.
+- Drift check: passes on 504,039 rows; with `orders.units` undeclared it
+  returns exactly that one field and fails (restored).
+- Unit test: passes; with deletes filtered before the pick it fails — `C2`
+  comes back as `curitiba` at version 2 (B68's bug) — restored.
+- Current state = Silver's change feed: customer **43,690** (43,709 − 19),
+  product **32,851**, seller **2,995**, inventory **34,348**; customer equals the
+  generator's night-5 dump.
+- Freshness on `LOADED_AT`: PASS (loaded today; warns after 2 days).
+- **exp_05: 35 checks, 35 as predicted** (incidents.md): `check` = everyone
+  missing every night; `timestamp` replayed = 0/0/0 on nights 1–4; all three
+  `hard_deletes` show the 19 deleted on 2017-12-28 (closed at the run time
+  15:07:29); one late run = 1 / 24 / 52 missing on nights 2–4, no history.
+- Production snapshots built by `snapshot_nights.py --apply` (5 nights each);
+  re-plan = "to run nothing". customer_history 43,752 rows / 43,690 open,
+  product_history 33,126 / 32,851, seller_history 3,270 / 2,995.
+  **`GOLD.dim_*` vs the generator's dumps, every night: nights 1–4 0/0/0 for all
+  three dims; night 5 0/19/0, 0/100/0, 0/100/0 = the deletes, the measured limit.**
+- Guards: bare `dbt snapshot` → "Nothing to do"; `--select customer_history`
+  without a night → the named compile error.
+- dbt's executed snapshot SQL read: `deletes` = snapshot LEFT JOIN source WHERE
+  source key IS NULL, dated `current_timestamp()`; then a MERGE that only
+  closes open versions and inserts.
+- Roles, after `DEFAULT_SECONDARY_ROLES = ()` (secondary roles printed empty):
+  analyst reads GOLD (43,690) and is refused STAGING / SNAPSHOTS / RAW;
+  transformer `EXPLAIN INSERT` into RAW → `003001`; loader refused GOLD.
+- RAW untouched: `12_check_raw.sql` all five checks empty, summary = S13's.
+- Olist up to night 5: 91 real address changes; the dumps (and so the
+  snapshot) hold 43.
+- `ruff check` clean; `pytest` 163.
+
+### Built but NOT verified
+- **Snowpipe auto-ingest firing** — still no new Silver data (carried from S13).
+- A source-freshness **warning** — will show between sessions; not yet seen.
+- The Databricks dbt target (commented in `profiles.yml.example`; after the trial).
+- Analyst access through Snowsight as the human — the human's sessions also run
+  with secondary roles `ALL`; not changed (a person may want them), not tested.
+
+### Incidents (2 new)
+1. Every session of the service user held both functional roles
+   (`DEFAULT_SECONDARY_ROLES = ALL`): the transformer was authorised to write
+   RAW, the analyst read RAW. Fixed at the user; three prevention rules.
+2. DELIBERATE exp_05: SCD2 on run time knows nobody in the past; no snapshot
+   setting can date a delete (+ `HASH(* EXCLUDE)` refused; a default selector
+   that hid the sources).
+
+### Decisions (4 new)
+Gold schemas by SYSADMIN, managed access, future grants; current state rebuilt
+from the change log (incremental MERGE waits for the facts); staging generated
+from one declaration (in the same entry); SCD2 = dbt snapshot, `timestamp` +
+`invalidate`, one night per run.
+
+### Cost
+Databricks $0. Snowflake: 0.46 credits this month at the start of the session
+(all of S13); this session added dbt builds and ~30 snapshot runs on XSMALL —
+read at S15 start (`07_spend.sql`).
+
+### Learning check
+**Skipped by choice** (*"skip Qs for now"*). Five questions parked as **B73–B77**; no theory hooks bound to S14.
+
+### Next
+**Session 15 — Gold facts:** `fct_orders` / `fct_order_items` as dbt
+**incremental `merge`** on `(key, commit_version)` with deletes handled (the
+hand-written MERGE + anti-join row of `coverage.md`); **the `customer_id` →
+`customer_unique_id` mapping** — orders carry only the per-order `customer_id`
+and no Silver table maps it to the person, so a point-in-time join of orders to
+`dim_customer` is not possible yet (decide where the mapping comes from); the
+point-in-time fact ↔ SCD2 join; the cross-source reconciliation test (units
+sold ↔ decrements) rebuilt in dbt; Airflow begins (S15–S16).
+
+**Carried, by name:**
+- **First thing in S15: commit Session 14** (left uncommitted at its end, by
+  choice) — `git status` must be clean before S15 builds anything. Two commits:
+  the `feat:` line for the code, the `docs:` line for the docs.
+- Snowsight, once: Query History filtered on tag `ledgerline:dbt` (the snapshot
+  `MERGE` and the `deletes` anti-join with `current_timestamp()`);
+  `GOLD.DIM_CUSTOMER` → Data Preview, customer `0451ef5a…` (two versions).
+- **Snowpipe auto-ingest firing** at the next bridge export with new Silver
+  rows (RAW grows by itself; `12_check_raw.sql` empty), then
+  `python scripts/snapshot_nights.py --apply` for any new dims night.
+- **No `ALTER PIPE … REFRESH` before 2026-10-18.**
+- Drop scratch schemas `LEDGERLINE.S13` and `LEDGERLINE.S14` (findings
+  recorded) — SYSADMIN, by the human.
+- Spend: `07_spend.sql` at S15 start, including Snowpipe (result 3).
+- From S13 / S12, unchanged: a rebuild after **~2026-10-30** needs a baseline;
+  **2026-10-13** VACUUM check on fresh compute; `ledgerline-jobs` read on
+  `pii_hash_salt`; **~2026-11-05** drop `workspace.s12`; **~2026-10-27** Bronze
+  replaced-files deadline; **~2027-01-04** `ledgerline-ci` secret; topics empty /
+  Git token ~2026-12-25.
+- CI does not parse the dbt project (no dbt in the CI install list) — add
+  `dbt parse` with slim CI (S16).
+- **Drill 3** adds: a snapshot run over two nights at once (guard), an
+  undeclared RAW field (drift check), the secondary-roles regression.

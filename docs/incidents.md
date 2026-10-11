@@ -2241,3 +2241,97 @@ ignored what the pipe loaded. Everything ran in the scratch schema
      `error`): a re-delivery is a new version range, so the question B asks
      never reaches production. Re-delivery on the external stage stays an open
      test (Drill 3).
+
+## [2026-10-11] — Every Snowflake session of the service user held BOTH functional roles: dbt "as the transformer" could write into RAW (Session 14)
+
+**In plain words:** Session 13 split the work between two Snowflake roles — the
+loader lands files into RAW, the transformer reads RAW and builds Gold — and
+gave both to one service user. Picking a role at sign-in was supposed to pick
+the job. It did not: Snowflake also switches on **every other role the user
+holds** ("secondary roles", default `ALL` for users created since 2024), so
+each session had the rights of both. dbt, signed in "as the transformer", could
+have inserted into RAW. Nothing did; the separation existed only on paper.
+
+- Seen: Session 14 checked that the analyst role reads GOLD and nothing below.
+  As `LEDGERLINE_ANALYST` it read all five layers — GOLD 43,690, STAGING 43,771,
+  SNAPSHOTS 43,752, **RAW 504,039**. `CURRENT_SECONDARY_ROLES()` →
+  `{"roles":"LEDGERLINE_TRANSFORMER,LEDGERLINE_LOADER","value":"ALL"}`;
+  `DESC USER LEDGERLINE_SVC` → `DEFAULT_SECONDARY_ROLES = ["ALL"]`.
+- Measured the real exposure without changing a row: `EXPLAIN INSERT INTO
+  LEDGERLINE.RAW.SILVER_CHANGES … WHERE FALSE` as the transformer → a plan
+  with an `Insert` into RAW (authorised). After `USE SECONDARY ROLES NONE`, the
+  same statement → `003001 SQL access control error`; the analyst then reads
+  GOLD (43,690) and gets "does not exist or not authorized" on STAGING,
+  SNAPSHOTS and RAW. **The grants were right; the sessions were not.**
+- Root cause: `DEFAULT_SECONDARY_ROLES` was never set on `LEDGERLINE_SVC`, so it
+  took the account default `('ALL')`. Session 13's `03_service_user.sql` set the
+  default role, warehouse and namespace, and not this.
+- Why nothing caught it: every Session 13 check of a role ran as a user that
+  **held more than that role** — the service user (both functional roles) or
+  the human (ACCOUNTADMIN). A check run with extra rights passes whether the
+  grant exists or not — the Databricks lesson of S12 ("the owner passes every
+  grant") again, in a new form: here not ownership, a second active role.
+  "`LEDGERLINE_SVC` sees role LOADER" (progress S13) proved the role could be
+  chosen, not that it was alone.
+- Data: RAW untouched — `12_check_raw.sql` empty after this finding (re-run
+  below), and no `COPY`/`INSERT` into RAW appears in this session's work.
+- Fix forward: `ALTER USER LEDGERLINE_SVC SET DEFAULT_SECONDARY_ROLES = ()`
+  (added to `snowflake/03_service_user.sql`, run by the human), so a session
+  carries the one role it signed in with. Not a per-script `USE SECONDARY
+  ROLES NONE`: dbt opens its own sessions, and a rule every client has to
+  remember is the rule the next client forgets.
+- Prevention rules:
+  1. **Every service user sets `DEFAULT_SECONDARY_ROLES = ()`** at creation;
+     `DESC USER` must show `[]` before the user is used.
+  2. **A grant is tested in a session holding only the role under test** —
+     `SELECT CURRENT_SECONDARY_ROLES()` printed beside the result, and the test
+     must show both what the role can do **and one thing it is refused**. A test
+     that can only pass proves nothing.
+  3. The human's own Snowsight sessions also run with secondary roles `ALL`:
+     a role check done by switching the role picker is not a check.
+
+## [2026-10-11] — DELIBERATE (Session 14, exp_05, `snowflake/experiments/exp_05_scd2.py`): an SCD2 snapshot on run time knows nobody in the past, and no snapshot can date a delete
+
+**In plain words:** five dbt snapshots of the customer dimension were built in
+the scratch schema `LEDGERLINE.S14` by replaying Silver's five dims nights, and
+each was asked "who was this customer at night n?", with the answer checked
+against the generator's own dump of that night. The snapshot that stamps
+versions with the **run time** answered every 2017 question with nobody. The
+ones on **business time** were exact for nights 1–4, and all of them still
+showed the 19 people deleted on night 5, because a delete gets the run time
+whatever the setting. 35 checks, 35 as predicted — the bug was present
+before the fix, as the experiment requires.
+
+- Seen (missing / extra / different per night): `check` strategy 1/0/0,
+  326/0/0, 8,068/0/0, 22,497/0/0, 43,690/0/0 — everyone missing every night.
+  `timestamp` on `dim_updated_at`, replayed: 0/0/0 on nights 1–4 for `ignore`,
+  `invalidate` and `new_record`; night 5: 0/**19**/0 for all three. Today:
+  `ignore` +19, the other two exact. `invalidate` closed the 19 at
+  `2026-10-11 15:07:29.7` (inside the night-5 run, 15:07:22–15:07:45);
+  `new_record` added 19 deletion rows valid from 15:07:32. One run over
+  today's state, no replay: 0/1/24/52 people missing on nights 1–4, no
+  history (0 extra versions); the replayed ones kept 43 = RAW's 10 + 33 updates.
+- Mechanism: a dbt snapshot only knows the moment it runs. With `check` it
+  has nothing else to date a version by. With `timestamp` it uses the row's
+  `updated_at` — but a deleted row is *absent*, so there is no `updated_at` to
+  read, and the clock is all that is left.
+- Why it would be invisible in production: a nightly snapshot run hours after
+  each dump is off by hours, which no row count shows; only a **replay or a
+  late start** makes the error years wide. A point-in-time join on a run-time
+  snapshot does not fail — it returns NULL dimensions for every historical fact.
+- Two more found on the way: `HASH(* EXCLUDE (…))` is refused at compile
+  (`002079`) — the conflict test hashes `RECORD` instead; and a dbt default
+  selector built from `fqn: "*"` does not reach sources — `source freshness`
+  silently had nothing to do until `source: "*"` was added.
+- Prevention rules:
+  1. **An SCD2 snapshot uses business time** (`timestamp` strategy on a column
+     that is true in the source) — never `check` where history will be
+     replayed or the snapshot can start late.
+  2. **A snapshot is fed one delivery at a time, oldest first**
+     (`scripts/snapshot_nights.py`); a bare `dbt snapshot` selects nothing, and
+     a production snapshot without `as_of_night` refuses to compile.
+  3. **A delete's time in a snapshot is the run time** — say so wherever the
+     dimension is documented (`dim_*` views), and run snapshots close to each
+     delivery.
+  4. **Every point-in-time claim is checked against an answer key built
+     outside the pipeline** (here: the generator, re-run in memory).

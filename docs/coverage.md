@@ -76,9 +76,9 @@ session · **X** skip (no honest use here).
 | Stages, file formats, `COPY INTO` options (`ON_ERROR`, `VALIDATION_MODE`) | ★★★ | ✓ S13 (external stage via storage integration; internal stage + `PUT`; `VALIDATION_MODE = RETURN_ERRORS`, `ABORT_STATEMENT`, `SKIP_FILE`, `CONTINUE` on one bad row — `s13_loading` C) |
 | `COPY INTO` load history — an already-loaded file is skipped (64 days); and a re-delivered file with **new content**? (compare with Auto Loader's Drill 1 skip) | ★★★ | ✓ S13 (same staged file skipped, `FORCE` reloads; a **re-`PUT` of identical bytes is loaded again** — the opposite failure to Auto Loader's; on the external S3 stage: open, Drill 3) |
 | Snowpipe auto-ingest vs `COPY` (14-day history; needs an S3 event notification on the bucket) | ★★★ | ✓ S13 (`SILVER_CHANGES_PIPE` loaded the bridge's 7 files, 504,039 rows, by `REFRESH`; S3 notification set, same region; pipe-then-COPY reloads, COPY-then-pipe did not) — **auto-ingest firing on a new file: carried to the next export** |
-| `VARIANT` / `FLATTEN` — land raw, then type | ★★★ | ✓ S13 for `VARIANT` (one RAW table, Parquet rows whole; timestamps arrive typed and exact — answer key matched); `FLATTEN` B S14 (staging's schema-drift check: `FLATTEN(OBJECT_KEYS(RECORD))`) |
+| `VARIANT` / `FLATTEN` — land raw, then type | ★★★ | ✓ S13 for `VARIANT` (one RAW table, Parquet rows whole; timestamps arrive typed and exact — answer key matched); ✓ S14 `FLATTEN` (`tests/raw_fields_declared.sql`: every field and type in RAW must be declared; passes on 504,039 rows, fails on exactly the one field undeclared on purpose) |
 | Primary keys are not enforced; MERGE with duplicate source rows (vs Delta, which refuses only duplicates matching an *existing* row — exp_04 A1/A2) | ★★★ | ✓ S13 (`s13_loading` E: duplicate PK accepted; two source rows — even identical — for an existing key refused `100090`; for a new key inserted twice, silently — same as Delta) |
-| MERGE + anti-join delete (no `NOT MATCHED BY SOURCE` in Snowflake) | ★★★ | B Gold (S14–S15) |
+| MERGE + anti-join delete (no `NOT MATCHED BY SOURCE` in Snowflake) | ★★★ | partly S14: deletes arrive in-band in the change log, so current state needs no anti-join (newest change, then drop deletes — decisions S14); the snapshot's `hard_deletes='invalidate'` is dbt's anti-join (source vs open versions). **Hand-written MERGE + anti-join: B S15** (the order facts' incremental) |
 | Zero-copy clone, CI gating (write-audit-publish) | ★★★ | B S16 |
 | Time Travel, `UNDROP` | ★★★ | B S18 |
 | Masking policies, row access policies, tag-based masking | ★★ | B S18 (Enterprise) |
@@ -97,12 +97,12 @@ session · **X** skip (no honest use here).
 
 | Topic | Weight | Status |
 |---|---|---|
-| Snapshots: timestamp vs check strategy, hard deletes, business time vs run time | ★★★ | B S14 (exp_05) |
+| Snapshots: timestamp vs check strategy, hard deletes, business time vs run time | ★★★ | ✓ S14 (exp_05: `check` = run time knows nobody in 2017; `timestamp` replayed = the dumps exactly on nights 1–4; every `hard_deletes` closes a delete at run time; a late start loses history; production `timestamp` + `invalidate`, one night per run) |
 | Incremental: merge, delete+insert, append, microbatch; lookback windows | ★★★ | B S15, S17 (exp_06) |
-| Tests, unit tests, model contracts, source freshness | ★★★ | B S14–S15 |
+| Tests, unit tests, model contracts, source freshness | ★★★ | ✓ S14 (generic + singular tests incl. `no_conflicting_changes`, `scd2_shape`; a unit test that fails on filter-deletes-first; enforced contracts on every GOLD model; source freshness on `LOADED_AT`) — more in S15 |
 | Slim CI (`state:modified`, defer) + clone | ★★ | B S16 |
 | Airflow: DAG, backfill, idempotent tasks, sensors, retries | ★★★ | B S15–S16 |
-| One dbt project, two targets (Snowflake + Databricks) | ★★ | B S14 (Snowflake), after the trial (Databricks) |
+| One dbt project, two targets (Snowflake + Databricks) | ★★ | ✓ S14 Snowflake (key-pair service user, transformer role only); Databricks after the trial |
 | CI: lint + tests | ★★ | ✓ S3 |
 
 ## 4. What will be missed — theory only
@@ -152,7 +152,8 @@ session · **X** skip (no honest use here).
   vault, right to erasure driven by tags and a forget list read inside every PII
   write, physical delete proven on fresh compute, governance by groups / masks /
   row filter, jobs as code deployed by CI as one robot and run as another.
-- **Planned:** SCD2 (S14), late data with lookback (S17), backfill (Airflow,
+- **Built S14:** SCD2 by dbt snapshot on business time, replayed night by night and checked against an independent answer key; current state from a change log; schema-drift check on landed VARIANT data; one role per session (secondary roles off).
+- **Planned:** late data with lookback (S17), backfill (Airflow,
   S15–S16), write-audit-publish (clone gating, S16), GDPR Snowflake half (S18 —
   crypto-shredding decided again there), cost guards (S13), governance in
   Snowflake — masks and row access (S18).
