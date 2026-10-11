@@ -56,11 +56,10 @@ TABLES = {
 EXPORTED_CHANGES = ("insert", "update_postimage", "delete")
 META = ["_change_type", "_commit_version", "_commit_timestamp"]
 
-# One clock with Silver and Snowflake (UTC), and timestamps written as plain microseconds since 1970.
-# Spark's default Parquet timestamp is the legacy INT96 type; TIMESTAMP_MICROS is the standard one
-# every reader agrees on.
+# One clock with Silver and Snowflake (UTC). The Parquet timestamp type is left at serverless' default:
+# setting `spark.sql.parquet.outputTimestampType` is refused there (CONFIG_NOT_AVAILABLE, Session 13).
+# Which type was written is read on the Snowflake side, by INFER_SCHEMA on the first files.
 spark.conf.set("spark.sql.session.timeZone", "UTC")
-spark.conf.set("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
 
 
 class BridgeRefused(Exception):
