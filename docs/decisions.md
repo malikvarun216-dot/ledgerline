@@ -3294,3 +3294,140 @@ state at the moment it runs. Chosen on exp_05's numbers (35 of 35 predictions he
   (named error); a default selector (`dbt_project/selectors.yml`) keeps
   snapshots out of a bare `dbt build` / `dbt snapshot`; `scd2_shape` test (one
   open version per key, versions meet end to start).
+
+## Orders reach the person through a fourth nightly dump, `customer_order_link` — and every dimension gets nights 6–8 (Session 15)
+
+**In plain words:** an order only says `customer_id`, and Olist issues a new
+`customer_id` for every order — it is "this order's customer record", not the
+person. The person is `customer_unique_id`, which is what the customer history
+(`GOLD.dim_customer`) is keyed on. Nothing in Silver links the two: the
+generator deliberately keeps `customer_id` out of the customer dump (Session 1).
+So no fact could be joined to "who this customer was on the day they ordered".
+The link now arrives the way every other source table does: a nightly full dump
+`dims/customer_order_link/` (`customer_id`, `customer_unique_id`,
+`dim_updated_at` = the order's purchase time, when the link came into being),
+through the same Auto Loader → Silver MERGE → bridge → Snowpipe path as
+customer, product and seller.
+
+- Chosen: a fourth dimension in the existing dims pipeline. Its rows only ever
+  appear — Olist never re-points an order at another person — so the Silver
+  MERGE's `WHEN NOT MATCHED BY SOURCE DELETE` has nothing to delete, and it
+  takes no part in the generator's deletions (a deleted customer's orders still
+  happened; their link stays). One night = every link whose order was placed by
+  that night.
+- Chosen with it: **nights 6–8 for every dimension** (2018-04-27, 2018-08-25,
+  2018-12-23 — the same 120-day stride; the Night 5 command with `--nights 8`).
+  The dims stop at 2017-12-28, but orders run to 2018-10-17: the link held only
+  **45,124** of **99,441** orders at night 5, **99,441** at night 8. Nights 1–5
+  are recomputed byte-identical by the write-once landing (it refuses the run
+  otherwise), so this is only new files.
+- Rejected: **load the link straight into Snowflake** (a two-column file built
+  from Olist, `PUT` + `COPY` into a new RAW table) — faster, but a second way
+  into RAW beside the bridge, which RAW was designed not to have (Session 13);
+  and Databricks would never see the link, so Silver orders could not be joined
+  to the person there either.
+- Rejected: **a dbt seed** — seeds are for small reference tables kept by hand
+  (a country list); 99,441 rows of source data in git is a source pretending to
+  be configuration, and it would never grow with new orders.
+- Rejected: **add `customer_unique_id` to the order event** (an Avro field with a
+  default — BACKWARD compatible) — right for a new system, but the 394,090
+  events already in the topic would keep `NULL`; the link would still be needed
+  for all of history.
+- Side effect, wanted: the nights produce new Silver versions, so the next
+  bridge export is the first one Snowpipe has to pick up **on its own**
+  (auto-ingest, carried since S13), and `snapshot_nights.py` gets three new
+  nights to replay.
+- Trade-off: one more dimension to keep in step through five layers (generator
+  spec, Bronze `DIMS`, Silver `DIMS`, bridge `TABLES`, dbt `silver_tables()`).
+  Each layer is a list, and each one's checks (golden counts, merge-vs-generator
+  numbers, the RAW drift check) fail loudly if a layer is missed.
+
+## Gold facts are dbt incremental models with a custom MERGE strategy that reads the delete flag; the point-in-time join is a view (Session 15)
+
+**In plain words:** `GOLD.fct_orders` (one row per order) and `GOLD.fct_order_items`
+(one row per item = one unit sold) are not rebuilt on every run, unlike Gold's
+current-state tables (Session 14). Each run reads only the change rows newer
+than the newest Silver version already in the fact, keeps each key's newest
+change, and applies it with one MERGE that inserts, updates **and deletes**,
+reading the change row's own `delete` flag. "Which customer, product and seller
+was this, at the moment of the order?" is answered by a view,
+`GOLD.order_items_at_sale`, that joins the facts to the SCD2 dimensions on
+`valid_from <= ordered_at < valid_to` at query time.
+
+- Chosen: `materialized='incremental'`, `incremental_strategy='merge_changes'`
+  — a strategy of our own (`macros/merge_changes.sql`; dbt calls any macro named
+  `get_incremental_<name>_sql`). High-water mark = `max(silver_version)` read
+  from the fact itself. Version guard `s.silver_version >= t.silver_version` on
+  update and delete. The first build reads the whole log and drops deleted keys.
+- Rejected: **dbt's built-in `merge` strategy** — it writes only `UPDATE` and
+  `INSERT`. A delete row in the batch would be written *onto* the fact (the
+  order stays, now saying "delete"), and a delete for an order never loaded
+  would be *inserted*. Measured in `s15_merge` B rather than assumed.
+- Rejected: **`delete+insert`** (dbt deletes every key in the batch, then
+  inserts the batch) — deletes the deleted orders for free, but only if the
+  delete rows are then filtered out of the insert, and it rewrites every
+  touched row even when nothing changed. Two statements, not atomic on every
+  adapter. Kept as the answer if a platform lacks MERGE.
+- Rejected: **a post-hook `DELETE … WHERE key IN (deleted keys)`** — the usual
+  workaround, but it is a second statement that a failed run can skip, and
+  the model's SQL no longer says what the table holds.
+- Rejected: **a full rebuild, as for current state** — right at 504K log rows
+  (Session 14), but the facts are where the incremental pattern is honest:
+  they grow with every order forever, and their changes are mostly appends.
+- **Late-arriving dimension** — an order's person comes from another source
+  (`customer_order_link`, nightly). An order loaded before its link has
+  `customer_unique_id` NULL. The high-water mark never looks at that order
+  again (its change has not moved), so the incremental SELECT also re-selects
+  unlinked orders **whose link now exists**. *Correction, same session:* the
+  first version re-selected every unlinked order, so each run rewrote all
+  99,441 orders while the link was still absent; a no-op run is now 0 rows.
+  Rejected: an "unknown customer" row (key −1) assigned forever — standard
+  Kimball for a dimension that never arrives, but here the link always comes
+  within a night, and a fact frozen on −1 would be wrong after it does.
+- **Point-in-time join as a view, not a stored version key.** Rejected:
+  storing the SCD2 version (`dbt_scd_id`) on the fact at load time — the
+  textbook surrogate-key lookup. Here a snapshot night can open or close a
+  version **after** the facts it covers were loaded (a customer's move is
+  first seen in the dump after the order), so a stored key goes stale and needs
+  its own re-resolution logic. A view is always right; it costs a range join
+  per query, cheap at 112,650 items. Revisit with clustering in S21.
+- Known limit, kept for exp_06 (S17, on schedule): a bridge file loaded *late*,
+  holding versions below the high-water mark, is skipped for good —
+  `fct_equals_rebuild` (incremental = full rebuild, key and version) is the
+  test that would catch it.
+- Known limit, measured (`s15_merge` B step 3): the high-water mark is read from
+  the fact, and a deleted row leaves the fact, so a delete that is the newest
+  change sits above the mark and is read again on every run, changing nothing.
+  Harmless; a separate watermark table would remove it, at the cost of a second
+  thing to keep in step.
+
+### Addendum (2026-10-12, same session) — the point-in-time view falls back to the customer's first version, flagged; graded against an answer key
+
+**In plain words:** when no customer version covers an order's time, the view now
+shows the person's **earliest** version and says so (`customer_inferred = true`),
+instead of leaving the customer blank. Chosen on numbers graded against an answer
+key the pipeline never touched: Olist's `customers` table holds the address
+recorded **on each order** (one row per `customer_id`).
+
+- Measured, per order (99,441, all linked): the strict join
+  `valid_from <= created_at < valid_to` answered **97,653**, city right on
+  **97,651** (the 2 wrong: a move first seen in a later dump than the order).
+  It could not answer **1,634** orders of known people — the order is earlier
+  than the person's first version, because a dump shows each person at their
+  latest observation before the night, so an earlier order in the same 120-day
+  window precedes it. The first version is right for **1,591** of them (97.4%);
+  the latest version for 1,587. 154 orders' people never appear in any dump
+  (deleted by the generator before their first night) — no version at all.
+- Rejected: **NULL for those 1,634** (the strict join alone) — throws away
+  1,591 right answers to avoid 43 wrong ones, and every analyst query on city
+  silently loses 1.6% of orders.
+- Rejected: **set the first version's `valid_from` to the beginning of time**
+  in the snapshot (a common SCD2 convention) — same answers, but it rewrites
+  history in the table itself, so a "when did we first know this person?"
+  question can no longer be answered; the flag keeps both.
+- Found on the way, recorded honestly: Olist customers barely move (91 real
+  moves). Joining every order to the person's **latest** version — no point in
+  time at all — is right for 99,157 of 99,287 orders; the point-in-time join
+  with the fallback, 99,242. The pattern is the correct one and the measured
+  gain here is **85 orders**. On a dataset where people move, that gap is the
+  whole point; the answer key is what makes the size of it a fact, not a claim.

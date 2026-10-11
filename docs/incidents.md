@@ -2335,3 +2335,104 @@ before the fix, as the experiment requires.
      delivery.
   4. **Every point-in-time claim is checked against an answer key built
      outside the pipeline** (here: the generator, re-run in memory).
+
+## [2026-10-12] — The PII job failed on the first new contact night: the runner could not read the hashing salt — a fix carried for five sessions, missed the day it was due (Session 15)
+
+**In plain words:** the job that turns raw contact rows into the pseudonymised vault
+(`ledgerline-pii` → `contact_vault`, run as the service principal `ledgerline-jobs`)
+needs a secret — the salt it hashes emails with — only when a **new** contact night
+arrives. No new night had arrived since Session 12, so it had never needed it, and the
+runner had never been granted it. Session 15 landed contact nights 6–8 (with the dims
+nights 6–8 and the new link lane). The job saw them, asked for the salt, and was refused:
+`PERMISSION_DENIED: User does not have USE SCHEMA on Schema 'workspace.ledgerline_secrets'`.
+Three attempts (two automatic retries), 27 s, **0 rows written**. Its downstream task
+`erase` was skipped ("Upstream failed").
+
+**Why nothing caught it earlier:** every run since Session 12 found no new night and never
+reached the line that reads the salt, so every run was green. The gap was known and written
+down — Session 12's `### Next`: *"before the next contact night lands: grant
+`ledgerline-jobs` read on the UC secret `pii_hash_salt` … or the vault fails"* — and carried
+by name through S12b, S13, S14 and into S15's start. Session 15 read it, filed it under
+"unchanged from S12", and then handed the human the command that lands the next contact
+night. A reminder in a list is not checked by the step it is about.
+
+**Impact:** contained. The vault stays at night 5 (nothing half-written: the salt is read
+before any write). The landing files are in the PII lane with its 30-day S3 lifecycle, as
+designed. The real cost is the skipped `erase`: until the vault runs, the scheduled erasure
+— and the 2026-10-13 VACUUM check on fresh compute — do not run either. An unrelated grant
+blocks the GDPR job.
+
+**Fix (forward, not a rollback):** grant `ledgerline-jobs` `USE SCHEMA` on
+`workspace.ledgerline_secrets` and read on the one secret `pii_hash_salt` (not the Kafka
+keys), then *Repair run*. The grant goes into `databricks/pii/governance.py` section 5 with
+the others, so a rebuilt workspace has it.
+
+**Prevention:**
+1. A carried item phrased "before X" becomes a **precondition of the step that does X**, not a
+   line in `### Next`: the step is not handed to the human until the item is done or the
+   step is changed. Here: no contact night lands until the runner can read the salt.
+2. A code path that runs only on new data gets exercised by a test run **as its runner**
+   when it is built (S12 tested the vault as the owner, who passes every grant — the S12
+   lesson about owners, again, one level down: secrets).
+3. Session start reads `### Next` against **today's plan**, item by item, and names any
+   item today's work would trigger.
+
+**Resolved (2026-10-12, same session) — how the grant was actually found.** Three refusals, each
+naming the next step: (1) `no USE SCHEMA on workspace.ledgerline_secrets` → granted in the schema's
+grant dialog (which lists **no** secret privilege at all); (2) `User does not have READ SECRET on
+Secret 'workspace.ledgerline_secrets.pii_hash_salt'` → (3) `GRANT READ SECRET ON SECRET …` in SQL is
+refused everywhere on Free Edition, SQL warehouse **and** notebook: `[UC_SECRETS_NOT_ENABLED]`.
+Granted instead in Catalog Explorer: schema → Overview → **Secrets** tab → `pii_hash_salt` →
+Permissions → `READ SECRET` to `ledgerline-jobs` (the left-hand tree shows a secrets-only schema as
+"No data"). Repair run: `contact_vault` succeeded (its own asserts: vault = newest night, no
+forget-listed person back), `erase` succeeded; 261,768 rows written. CLAUDE.md's constraints table
+gets the finding; `governance.py` section 5 records both grants and why the second is a click.
+
+## [2026-10-12] — DELIBERATE (Session 15, `snowflake/experiments/s15_merge.py`): Snowflake has no `NOT MATCHED BY SOURCE` — the anti-join replaces it on a snapshot and destroys a change batch; dbt's own `merge` turns deletes into data
+
+**In plain words:** two ways to get deletes wrong, run on purpose in the scratch
+schema `LEDGERLINE.S15`. (1) Snowflake's MERGE cannot delete "rows missing from the
+source", so for a nightly snapshot the delete is a second step: delete every target
+row with no matching snapshot row (an anti-join). Fed a *snapshot*, that equals what
+Delta's `WHEN NOT MATCHED BY SOURCE DELETE` did in Silver, every night. Fed one
+night's *change rows* by mistake, it deleted 2,945 healthy sellers and kept exactly
+the 100 it should have deleted. (2) dbt's built-in incremental `merge` only updates
+and inserts, so a `delete` row in the change log was written onto the fact as data,
+and a delete for an order never loaded was inserted as a row.
+
+**What happened — 46 checks, 46 as predicted:**
+- **A1** — MERGE (insert / update) + `DELETE … WHERE NOT EXISTS (snapshot)`, one
+  transaction, seller nights 1–8: deletes 0,0,0,0,100,100,100,100; after every night
+  the table equals Silver as of that night (0 extra, 0 missing) — Silver being the
+  result of Delta's `NOT MATCHED BY SOURCE`.
+- **A2** — ONE MERGE whose source is the snapshot `FULL OUTER JOIN` the target, a
+  missing target row arriving flagged `gone` → `WHEN MATCHED AND gone THEN DELETE`:
+  identical numbers, one statement.
+- **A3 (the trap, CLAUDE.md rule 1 on Snowflake)** — night 4's state (3,095), fed
+  night 5's change rows (50 updates + 100 deletes) as if they were a snapshot:
+  updated 50, the anti-join deleted **2,945**, **150** rows left — **100** of them the
+  sellers Silver deleted that night (a delete row *is* in the batch, so its key is
+  "present"; the MERGE does not read `change_type`). Against Silver: 100 extra,
+  2,945 missing. The same batch applied by its flag (`WHEN MATCHED AND change_type =
+  'delete' THEN DELETE`): (0, 50, 100), equal to Silver.
+- **B** — the same tiny change log, two dbt incremental models. Step 2 (O1 ships at v7,
+  O2 deleted at v9, a delete for never-loaded O4 at v8): `merge_changes` → O1 shipped,
+  O3; **dbt `merge` → 4 rows: O2 still there saying `delete`, O4 inserted saying
+  `delete`.** Step 3 (step 2 again): both unchanged. 2 change rows (the deletes) sit
+  above `merge_changes`' high-water mark and are re-read every run, changing nothing.
+
+**Why it would be invisible:** in A3 every statement succeeds and the counts look
+like a normal night — 50 updated, some deleted. In B, a row count of fact orders is
+*higher*, not lower, and `unique` / `not_null` tests pass: the deleted orders are
+valid-looking rows. Only a comparison with an independent answer (Silver; the
+change log rebuilt in full) shows either.
+
+**Prevention:**
+1. An anti-join delete is applied only to a source that is a full snapshot — never to
+   a change batch (rule 1, both platforms). Production Gold has none: its deletes are
+   in-band (`merge_changes`); the anti-join lives in dbt's snapshot `hard_deletes` only.
+2. Facts use `incremental_strategy='merge_changes'`, which refuses to compile without
+   `silver_version` and `silver_change_type`; never dbt's `merge` on a change log with
+   deletes.
+3. `fct_equals_rebuild` on every fact: incremental result = full rebuild from the log,
+   key and version, both directions.

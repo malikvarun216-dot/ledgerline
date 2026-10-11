@@ -3464,3 +3464,150 @@ sold ↔ decrements) rebuilt in dbt; Airflow begins (S15–S16).
   `dbt parse` with slim CI (S16).
 - **Drill 3** adds: a snapshot run over two nights at once (guard), an
   undeclared RAW field (drift check), the secondary-roles regression.
+
+---
+
+## Session 15 — Gold facts: orders reach the person, deletes travel in-band, and Snowpipe loads on its own
+Date: 2026-10-11 → 2026-10-12
+
+**In plain words:** Gold now has its facts — one row per order and one per item
+sold — built incrementally by dbt with a MERGE of our own that also deletes,
+reading each change's delete flag. Orders could not be joined to the customer
+history, because an order names only a per-order `customer_id`; the link to the
+person now arrives as a fourth nightly dump through the whole pipeline, and the
+dimensions got nights 6–8 so that every order (to 2018-10-17) has one. A view
+answers "who was the customer, what was the product, where was the seller, when
+this was sold", graded against Olist's own per-order addresses. The two Kafka
+sources tie out on Gold as they did on Silver. Snowpipe picked the new files up
+by itself. On the way, the PII job failed on a grant that had been carried as a
+reminder for five sessions.
+
+### Scope, as it actually ran
+Planned (S14 `### Next`, `coverage.md` S15): facts as dbt incremental `merge`
+with deletes (the MERGE + anti-join row), the `customer_id` → person mapping,
+the point-in-time fact ↔ SCD2 join, the reconciliation in dbt, Airflow begins.
+**Built and verified: all but Airflow**, moved whole to S16 by choice at the
+start. Carried in and done: Snowpipe auto-ingest; drop `S13` / `S14`; snapshot
+replay of new nights. Carried in and **not** done: the `07_spend.sql` reading;
+the Snowsight Query History look. Added: the link lane and nights 6–8; the PII
+grant incident.
+
+### Built
+- **Generator:** `customer_order_link` lane (`customer_id`, `customer_unique_id`,
+  `dim_updated_at` = purchase time; never deleted or changed); 3 new tests (166).
+- **Databricks:** the link in Bronze `DIMS` + golden counts, Silver `DIMS` +
+  golden MERGE numbers for 32 nights, bridge `TABLES`, `drop_scratch` keep list;
+  `governance.py` §5 records the runner's grants on the salt secret.
+- **dbt:** `stg_customer_order_link`, `int_customer_order_link` (STAGING views);
+  `macros/merge_changes.sql` (custom incremental strategy: delete / update /
+  insert by the change flag, version guard); `fct_orders` (incremental, re-tries
+  orders whose link has since arrived), `fct_order_items` (incremental),
+  `order_items_at_sale` (point-in-time view; first-version fallback flagged
+  `customer_inferred`) — all with enforced contracts; tests
+  `fct_equals_rebuild` (generic), `reconcile_sold_vs_decrements` (singular), a
+  unit test of `fct_orders`' incremental SELECT with `this` mocked;
+  `models/experiments/exp15_*` (enabled only with `exp15`).
+- **Snowflake:** `S15` scratch schema, S13 / S14 dropped (`05`); `12_check_raw.sql`
+  knows the eighth table; `snowflake/experiments/s15_merge.py`.
+
+### Verified
+- **Landing:** the Night 5 command with `--nights 8` (+ `--pii-from 2017-08-30`):
+  20 files new, every earlier night `identical` — write-once held; the locally
+  generated counts for nights 1–5 equal Session 8's golden numbers.
+- **Bronze:** four dims `OK` against the landing zone and the golden counts
+  (link 1 → 99,441 over 8 nights); plain re-run wrote nothing.
+- **Silver:** 32 of 32 nights' (inserted, updated, deleted) = the generator's
+  pandas numbers (customer night 8: 194 / 0 / 100; link: inserts only);
+  Silver = newest night 0/0 for all four (customer 95,696, product 32,551,
+  seller 2,695, link 99,441); change feed = merge log per version; re-run no-op.
+- **PII job:** after the grants, `contact_vault` and `erase` green, 261,768 rows
+  written (incident below).
+- **Bridge:** plan then export — customer v8–10 (52,587), product v7–11 (450),
+  seller v9–13 (445), link v0–8 (99,441) = 152,923, as predicted from the
+  generator; all eight tables rebuild Silver 0/0; second export nothing to do.
+- **Snowpipe auto-ingest (carried since S13): verified.** Files written 19:40:02,
+  loaded 19:40:27 — no `REFRESH`. RAW 504,039 → **656,962**. `12_check_raw.sql`:
+  all empty after adding the new table name (check A had flagged 99,441 rows of
+  `customer_order_link` — the guard working).
+- **Snapshots:** `snapshot_nights.py` plan = nights 6, 7, 8 for each dim;
+  9 runs green.
+- **dbt build 70 / 70** (0 warnings). `fct_orders` 99,441, `fct_order_items`
+  112,650; `fct_equals_rebuild` passes on both; relationships items → orders.
+- **Late-arriving link, end to end:** facts built before the link existed —
+  99,441 orders unlinked (the `not_null` warning, 99,441); after the link
+  loaded, one build linked all 99,441 with **no new order version**
+  (`fct_order_items` merged 0); the next run merged 0 and 0. The first version
+  of the re-try rewrote 99,441 rows on a no-op run — fixed the same session to
+  "only orders whose link exists" (unit test extended with O5).
+- **Reconciliation on Gold:** `reconcile_sold_vs_decrements` passes — 0 SKUs
+  where units sold (items) ≠ units decremented (stock events).
+- **Point in time** (`order_items_at_sale`): product 112,650 / 112,650, seller
+  112,650 / 112,650 found; customer 110,447 found, 2,019 inferred (order before
+  the person's first version), 184 none (people never in a dump). **Graded per
+  order against Olist's `customers` rows (the address on each order):** strict
+  join 97,653 answered, 97,651 right; first-version fallback 1,591 of 1,634
+  right; "as now" (latest version, no point in time) 99,157 of 99,287 — the
+  point-in-time join with fallback 99,242. 1,273 items match a product version
+  closed by a delete at run time (the exp_05 limit).
+- **`s15_merge`: 46 checks, 46 as predicted** (incidents.md): MERGE + anti-join
+  (two statements, and one MERGE over a full outer join) = Delta's
+  `NOT MATCHED BY SOURCE` on seller nights 1–8; the anti-join on a change batch
+  deleted 2,945 and kept the 100 deletes; dbt `merge` kept two deletes as rows.
+- Roles: the experiment printed empty secondary roles (transformer only).
+- `ruff check` clean; `pytest` 166.
+
+### Built but NOT verified
+- `07_spend.sql` (credits used by S14–S15 and Snowpipe's serverless share) — not
+  read; carried.
+- The incremental facts on a **real** new Silver order version (no new orders
+  arrived; only the dims moved) — the MERGE path ran on the experiment's log
+  and on re-tried rows, not on a live order update.
+- A late bridge file below the high-water mark — exp_06's subject (S17).
+
+### Incidents (2 new)
+1. The PII job failed on the first new contact night since S12: `ledgerline-jobs`
+   lacked `USE SCHEMA` on the secrets schema and `READ SECRET` on
+   `pii_hash_salt` — carried as a reminder since S12, missed the day it was due.
+   SQL cannot grant UC secrets on Free Edition; granted in Catalog Explorer.
+2. DELIBERATE `s15_merge`: the anti-join on a change batch; dbt's `merge` and deletes.
+
+### Decisions (2 new + 1 addendum)
+The link as a fourth nightly dump + nights 6–8; facts as dbt incremental with
+`merge_changes` and the point-in-time join as a view; addendum: first-version
+fallback, flagged, chosen on the answer key.
+
+### Cost
+Databricks $0. Snowflake: not read this session (`07_spend.sql` carried).
+AWS: 20 small files to the landing bucket, 4 to the bridge — cents.
+
+### Learning check
+Recorded in `learning.md` Part B (B78–B82).
+
+### Next
+**Session 16 — Airflow + CI gating:** Airflow (local) with a DAG: bridge export
+→ wait for RAW → snapshot nights → `dbt build`; backfill, idempotent tasks,
+retries, sensors; **zero-copy clone CI (write-audit-publish)**, **slim CI**
+(`state:modified`, defer — needs a schema per run: revisit the S14 "dbt creates
+no schemas" decision), **Delta `SHALLOW`/`DEEP CLONE`**, `dbt parse` in CI;
+theory hook: disaster recovery.
+
+**Carried, by name:**
+- `07_spend.sql` as ACCOUNTADMIN, including Snowpipe (result 3) — S14–S15 spend.
+- Snowsight once: Query History on tag `ledgerline:dbt` — the `merge_changes`
+  MERGE on `fct_orders`; `GOLD.ORDER_ITEMS_AT_SALE` for one `customer_inferred` row.
+- Drop scratch schema `LEDGERLINE.S15` (findings recorded) — SYSADMIN, by the human.
+- **2026-10-13:** the scheduled `ledgerline-pii` run's VACUUM — check `erase`
+  output, then time travel to vault v1 on the SQL warehouse must fail on a
+  missing file (unblocked by the grant).
+- **No `ALTER PIPE … REFRESH` before 2026-10-18.**
+- From S13 / S12, unchanged: a rebuild after **~2026-10-30** needs a baseline;
+  **~2026-11-05** drop `workspace.s12`; **~2026-10-27** Bronze replaced-files
+  deadline; **~2027-01-04** `ledgerline-ci` secret; topics empty / Git token
+  ~2026-12-25; **Snowflake trial ends ~2026-11-10**.
+- **exp_06 (S17)**: a bridge file loaded late, below the facts' high-water mark;
+  `fct_equals_rebuild` must catch it; lookback / microbatch fixes it. Also
+  D3 (deferred, bound to S17).
+- **Drill 3** adds: the anti-join fed a change batch (production has none —
+  assert it stays that way); dbt `merge` swapped in for `merge_changes`
+  (`fct_equals_rebuild` must fail); a contact night landing with the salt grant
+  revoked (the job must fail before writing — it did).
