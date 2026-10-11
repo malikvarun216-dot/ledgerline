@@ -66,17 +66,25 @@ def last_clone(table):
 
 
 def location(table):
-    return spark.sql(f"DESCRIBE DETAIL {table}").first().location
+    """The table's storage folder, without a trailing slash (first run: the raw string differed from the
+    folder parsed out of a file path, and A's assert failed on the comparison, not on the clone)."""
+    return spark.sql(f"DESCRIBE DETAIL {table}").first().location.rstrip("/")
 
 
 def file_folders(table):
     """Which table folder each file the table reads lives in: {folder: rows}."""
     return {
-        r.folder: r.n
+        r.folder.rstrip("/"): r.n
         for r in spark.table(table)
         .select(F.regexp_extract("_metadata.file_path", r"^(.*/tables/[^/]+)", 1).alias("folder"))
         .groupBy("folder").agg(F.count("*").alias("n")).collect()
     }
+
+
+def whose(table, source):
+    """file_folders, each folder named: 'clone' (the table's own), 'source', or the raw path."""
+    names = {location(table): "clone", location(source): "source"}
+    return {names.get(f, f): n for f, n in file_folders(table).items()}
 
 
 def same_table(a, b):
@@ -134,12 +142,14 @@ a_props = props(DEEP)
 print(f"   clone history: {[(h.version, h.operation) for h in a_hist]}")
 print(f"   constraint carried: {a_props.get('delta.constraints.stock_not_negative')!r}; "
       f"CDF carried: {a_props.get('delta.enableChangeDataFeed')!r}")
-print(f"   folders read: {file_folders(DEEP)}")
+print(f"   clone at  {location(DEEP)}")
+print(f"   source at {location(SRC)}")
+print(f"   rows read, by folder: {whose(DEEP, SRC)}")
 assert same_table(DEEP, SRC), "a deep clone must hold the source's rows exactly"
 assert int(a.operationMetrics["numCopiedFiles"]) == SRC_FILES, "a deep clone copies every current file"
 assert int(a.operationMetrics["sourceNumOfFiles"]) == SRC_FILES
 assert a_props.get("delta.constraints.stock_not_negative") == "stock_qty >= 0"
-assert set(file_folders(DEEP)) == {location(DEEP)}, "a deep clone reads only its own folder"
+assert set(whose(DEEP, SRC)) == {"clone"}, "a deep clone reads only its own folder"
 try:
     spark.sql(f"SELECT count(*) FROM {DEEP} VERSION AS OF 1").first()
     a_tt = "the clone answered for version 1 — it has the source's history"
@@ -157,12 +167,12 @@ print(f"   time travel to the source's v1 on the clone: {a_tt}")
 spark.sql(f"CREATE TABLE {SHALLOW} SHALLOW CLONE {SRC}")
 b = last_clone(SHALLOW)
 print(f"B: {b.operation} metrics {dict(b.operationMetrics)}")
-b_folders = file_folders(SHALLOW)
+b_folders = whose(SHALLOW, SRC)
 print(f"   clone location {location(SHALLOW)}")
 print(f"   folders read: {b_folders}")
 assert same_table(SHALLOW, SRC)
 assert int(b.operationMetrics["numCopiedFiles"]) == 0, "a shallow clone copies no data file"
-assert set(b_folders) == {location(SRC)}, "every row of a shallow clone is read from the source's files"
+assert set(b_folders) == {"source"}, "every row of a shallow clone is read from the source's files"
 
 # COMMAND ----------
 
@@ -176,7 +186,7 @@ spark.sql(
     f"""UPDATE {SHALLOW} SET stock_qty = stock_qty + 1000
         WHERE sku_key IN (SELECT sku_key FROM {SHALLOW} ORDER BY sku_key LIMIT 100)"""
 )
-c_folders = file_folders(SHALLOW)
+c_folders = whose(SHALLOW, SRC)
 src_sum_after = spark.table(SRC).agg(F.sum("stock_qty")).first()[0]
 shallow_sum = spark.table(SHALLOW).agg(F.sum("stock_qty")).first()[0]
 print(f"C: source sum {src_sum_before:,} -> {src_sum_after:,}; clone sum {shallow_sum:,} "
@@ -184,8 +194,8 @@ print(f"C: source sum {src_sum_before:,} -> {src_sum_after:,}; clone sum {shallo
 print(f"   folders read now: {c_folders}")
 assert src_sum_after == src_sum_before, "a write to a clone must never reach the source"
 assert shallow_sum - src_sum_before == 100_000
-assert c_folders.get(location(SHALLOW), 0) >= 100, "the rewritten rows live in the clone's own folder"
-assert c_folders.get(location(SRC), 0) > 0, "the untouched rows are still read from the source's files"
+assert c_folders.get("clone", 0) >= 100, "the rewritten rows live in the clone's own folder"
+assert c_folders.get("source", 0) > 0, "the untouched rows are still read from the source's files"
 
 # COMMAND ----------
 
@@ -274,7 +284,7 @@ am = a.operationMetrics
 print(f"A deep:    copied {am['numCopiedFiles']} of {am['sourceNumOfFiles']} files; "
       f"history {len(a_hist)}; time travel to source v1 -> {a_tt}")
 print(f"B shallow: copied {b.operationMetrics['numCopiedFiles']}; reads only the source folder")
-own = c_folders.get(location(SHALLOW))
+own = c_folders.get("clone")
 print(f"C write:   source unchanged; clone +100,000 units, {own} rows from its own folder")
 print(f"D v0:      clone sum {past_sum:,} = source v0")
 print(f"E re-run:  copied {e.operationMetrics['numCopiedFiles']} of {e_src_files} files")
