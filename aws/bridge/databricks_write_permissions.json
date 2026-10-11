@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BridgeObjectsReadWrite",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::ledgerline-bridge-8176114c/*"
+    },
+    {
+      "Sid": "BridgeBucketList",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::ledgerline-bridge-8176114c"
+    },
+    {
+      "Sid": "UnityCatalogSelfAssume",
+      "Effect": "Allow",
+      "Action": ["sts:AssumeRole"],
+      "Resource": "arn:aws:iam::240939827246:role/ledgerline-uc-bridge-write"
+    }
+  ]
+}

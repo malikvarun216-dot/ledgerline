@@ -2882,3 +2882,250 @@ why point-in-time correctness is a data-engineering skill.
   where the model was trained. The 0/1 output at the default 0.5 threshold
   flags 120 of 52,777 orders (6.8 % are late) — a real use would choose a
   threshold by business cost; AUC is the score that means something here.
+
+## The Snowflake trial lives in AWS US East (Ohio), next to Databricks — Mumbai was not offered (Session 13)
+
+**In plain words:** the plan was to put Snowflake in the same AWS region as the
+S3 bucket (Mumbai, `ap-south-1`). The trial sign-up form on 2026-10-11 did not
+list Mumbai at all — its AWS list ran from Thailand to São Paulo, no India
+region. So the bucket is in a different region from Snowflake whatever we pick,
+and the choice became: which *other* thing should Snowflake sit next to?
+Chosen: **US East (Ohio)**, the region of the Databricks workspace.
+
+- Chosen: **AWS US East (Ohio)**, Enterprise edition (decided S9). Both compute
+  platforms in one region; the bucket is one region hop away from each, as
+  Databricks already is.
+- Rejected: **Asia Pacific (Singapore)** — the nearest region to the bucket and
+  to the human's browser. But "nearest" buys nothing measurable: Mumbai →
+  Singapore and Mumbai → Ohio are both one cross-region transfer, a few cents at
+  this volume. Its only real gain is Snowsight feeling faster from India.
+  Against it: Databricks-managed storage (where a UniForm / Iceberg table would
+  live, S20) is in Ohio; US regions get new Snowflake features first; and a
+  credit costs more in Singapore, so the same $400 runs fewer queries.
+- Rejected: **waiting for, or asking sales for, a Mumbai account** — the
+  calendar is the one binding constraint (coverage.md rule 5).
+- Trade-off, and a new risk named now: **Snowpipe auto-ingest.** It works by S3
+  sending a "new file" notice to a queue Snowflake owns; AWS only lets a bucket
+  send notices to a queue *in its own region*, and Snowflake's queue is in Ohio.
+  The expected route is an SNS topic in Mumbai that delivers to Snowflake's queue
+  cross-region. Until that is seen working, the Snowpipe row is **B?**, not B —
+  verify first; if refused, it becomes T with the finding (coverage.md rule 2).
+
+## Day-one cost guards: one project warehouse, two resource monitors, statement caps — side-effect warehouses kept but guarded (Session 13)
+
+**In plain words:** before anything runs, Snowflake gets the guards the plan
+promised. A warehouse (Snowflake's compute) bills per second while it runs, so
+the guards are: stop after 60 seconds idle, a ceiling on credits for the whole
+account, a daily ceiling for the project's warehouse, and a cap on how long one
+query may run. The trial had already made **three warehouses by itself**
+(`COMPUTE_WH`, `SNOWFLAKE_LEARNING_WH`, `SYSTEM$STREAMLIT_NOTEBOOK_WH`, the last
+one able to scale to 10 clusters) — the Flink-pool lesson again: nothing here
+started them, so something here must watch them. Code: `snowflake/01_cost_guards.sql`.
+
+- Chosen: **`LEDGERLINE_WH`**, XSMALL, `AUTO_SUSPEND = 60`, one cluster, 15-minute
+  statement cap, under a **daily** monitor of 4 credits (notify 75 %, suspend
+  100 %); an **account** monitor of 40 credits a month (notify 50 / 80 %,
+  suspend 100 %, suspend immediately 110 %); an account-wide statement cap of
+  one hour; the three side-effect warehouses set to 60 s idle; the user's
+  default warehouse = `LEDGERLINE_WH`. Every statement is create-if-missing then
+  set ("converge"), so a re-run repairs drift.
+- Rejected: **drop the side-effect warehouses.** Cleaner on paper, but Snowsight
+  worksheets, notebooks and the learning database expect them, and an idle
+  suspended warehouse costs $0. The account monitor and statement cap cover them.
+- Rejected: **`CREATE OR REPLACE RESOURCE MONITOR`** for re-runnability — a
+  replaced monitor starts counting from zero and is detached from its
+  warehouses, so a re-run would silently reset the guard.
+- Rejected: **separate warehouses per workload** (load / transform / ad hoc) —
+  the production shape, but at one person's volume it multiplies 60-second
+  minimum charges and monitors for no isolation anyone needs. Revisit in S21
+  (multi-cluster, scale up vs out).
+- Trade-off, named: **a resource monitor counts warehouse credits only.**
+  Snowpipe, serverless tasks, automatic clustering and other serverless features
+  do not count against it; they are watched by reading `ACCOUNT_USAGE` (S21) —
+  until then, by checking Admin → Cost management after each session that uses
+  them. Notifications reach only account admins who turned them on.
+
+## Snowflake roles: three functional roles under SYSADMIN, each system role doing only its own job, a managed-access landing schema with future grants (Session 13)
+
+**In plain words:** in Snowflake every privilege is granted to a **role**, and a
+user acts through one role at a time. The project gets three roles named after
+jobs — `LEDGERLINE_LOADER` lands files, `LEDGERLINE_TRANSFORMER` builds Gold
+(dbt), `LEDGERLINE_ANALYST` reads Gold — all rolled up under `SYSADMIN`. The
+landing schema `LEDGERLINE.RAW` is **managed access**: whoever creates a table
+there owns it but cannot hand out access to it; only the schema owner can. And
+the transformer reads every RAW table through a **future grant**, so a table
+the loader creates tomorrow is readable without anyone remembering a GRANT.
+Code: `snowflake/02_roles.sql`.
+
+- Chosen: `USERADMIN` creates roles, `SECURITYADMIN` grants privileges,
+  `SYSADMIN` owns the database, schemas and the warehouse (its ownership moved
+  off `ACCOUNTADMIN`, which made it in `01_cost_guards.sql`), `ACCOUNTADMIN`
+  only for account-level objects (monitors, storage integrations). `ANALYST`
+  is granted to `TRANSFORMER` (dbt can read what analysts read); `LOADER` is
+  not (the transformer never writes RAW). `SELECT ON ALL` **and** `ON FUTURE`
+  tables — a future grant never covers what already exists.
+- Rejected: **do everything as `ACCOUNTADMIN`.** It works on day one and is the
+  most common bad habit: every object is then owned by the one role that can
+  change billing and security, and nothing tests whether a narrower role is
+  enough. The service user the laptop scripts use gets only the functional roles.
+- Rejected: **access roles + functional roles** (database roles holding
+  privileges, granted to functional roles) — the pattern large accounts use so
+  one privilege set is defined once and reused. With one database and three
+  jobs it doubles the objects for no reuse; recorded as the interview answer
+  for "how would this scale?".
+- Rejected: **a normal (non-managed) RAW schema** — the loader would own its
+  tables *and* could grant them to anyone, e.g. hand raw PII to `ANALYST`
+  directly. Managed access moves that decision to the schema owner.
+- Trade-off: managed access means a grant the loader "should" be able to make
+  needs `SECURITYADMIN`; future grants defined at **schema** level override
+  database-level ones for that schema (Snowflake's rule), so every future
+  grant for RAW lives in this one file.
+
+## Snowflake's account clock is UTC, like Silver's — not the trial's Los Angeles default (Session 13)
+
+**In plain words:** a new Snowflake account tells time in Los Angeles. The
+resource monitors' start times came back as `05:19 -0700` on 2026-10-11. Silver
+on Databricks runs in UTC (`spark.sql.session.timeZone = 'UTC'`). With two
+clocks, the same instant prints as two different times, and "today" starts
+seven hours apart on the two platforms — exactly the run-time vs business-time
+confusion exp_05 (SCD2 point in time) exists to catch. Set `TIMEZONE = 'UTC'`
+on the account (`snowflake/02_roles.sql`, step 0).
+
+- Chosen: account parameter `TIMEZONE = 'UTC'`.
+- Rejected: **keep the default and set UTC per session** (dbt profile, scripts)
+  — every path that forgets it (Snowsight, a Task, a Snowpipe load timestamp)
+  silently runs in Los Angeles time.
+- Rejected: **India time**, the human's clock — the data is Brazilian, the
+  platforms are in Ohio and Mumbai; UTC is the one zone nobody has to convert from.
+- Trade-off: Snowsight shows UTC rather than local time.
+
+## Laptop scripts reach Snowflake as a key-pair service user with functional roles only; SQL lives in git (Session 13)
+
+**In plain words:** Snowsight's worksheet showed only the last statement's
+result, and its run key runs only the statement under the cursor — the first
+cost-guard run executed 1 statement out of 17 and looked like it had worked.
+So the project's Snowflake SQL lives in git (`snowflake/*.sql`) and a small
+script (`scripts/sf.py`) runs it and prints every result. The script signs in
+as **`LEDGERLINE_SVC`**, a `TYPE = SERVICE` user: no password exists for it, no
+MFA prompt, only a key pair whose private half stays in `~/.snowflake/` on the
+laptop (`scripts/sf_keypair.py`, run by the human). It holds the loader and
+transformer roles — never `SYSADMIN` or `ACCOUNTADMIN`.
+
+- Chosen: service user + key pair; account-level and security setup
+  (`01`–`03`) still run by the human in Snowsight as `ACCOUNTADMIN`; everything
+  a functional role can do runs through `sf.py`.
+- Rejected: **the human's own user from scripts** — it is `ACCOUNTADMIN`, so
+  it passes every grant and a managed-access or future-grant test proves
+  nothing (the Databricks owner lesson, S12); and a password user now meets MFA.
+- Rejected: **a password service user** (`TYPE = LEGACY_SERVICE`) — Snowflake is
+  phasing out single-factor password sign-in; a password in `.env` is the
+  weaker secret anyway.
+- Rejected: **schemachange / Terraform for the Snowflake objects** — the real
+  tools for versioned Snowflake setup; for four ordered files run once, plain
+  SQL in git that converges on re-run is enough. Recorded as the answer to
+  "how would a team do this?".
+- Trade-off: the private key file is unencrypted on the laptop (protected by
+  the Windows user account); `SNOWFLAKE_PRIVATE_KEY_PATH` joins the test suite's
+  blocked live credentials (`tests/conftest.py`).
+
+### Correction (2026-10-11, same session) — two more side-effect spenders, found by reading every column
+
+The worksheet's `SHOW WAREHOUSES` was cut off at `is_current`; the service user's
+first `sf.py` run printed all 40 columns. Two things the entry above did not
+know:
+
+1. **Every warehouse came with query acceleration on** (`enable_query_acceleration
+   = true`, scale factor 8) and as a **generation-2** warehouse
+   (`resource_constraint = STANDARD_GEN_2`). Query acceleration borrows serverless
+   compute for large scans and bills it beside the warehouse — **neither resource
+   monitor counts it.** At Olist's size it would rarely fire; on S21's TPC-DS
+   sample it would fire silently and change the very numbers S21 measures.
+   Chosen: off on all four warehouses; S21 turns it on deliberately to measure
+   it (its coverage row). Gen 2 kept — the trial's credits are not the binding
+   constraint and its faster MERGE suits dbt — but its per-hour rate is not yet
+   read from the bill: S21 reads `METERING_HISTORY` to put a number on it.
+2. **The role every user has (`PUBLIC`) was granted serverless spend**: AI
+   functions, the `SNOWFLAKE.CORTEX_USER` database role, and the CPU and GPU
+   container compute pools — also outside every resource monitor, and usable
+   by anyone holding the service user's key. Chosen: revoke all four from
+   `PUBLIC` (`01_cost_guards.sql` step 6c). Rejected: **leave them** — "only two
+   users exist" is true today and is exactly the reasoning a leaked key exploits.
+   `PUBLIC` keeps its read access to `SNOWFLAKE_SAMPLE_DATA` (TPC-H and TPC-DS up to
+   `SF100TCL`), which S21 will use.
+
+## The bridge gets its own S3 bucket in Ohio, written by its own Unity Catalog role — the Mumbai landing bucket stays read-only (Session 13)
+
+**In plain words:** Silver's changes must travel from Databricks to Snowflake
+as files on S3. Databricks could not write to S3 at all: its one S3 location,
+`ledgerline_landing`, is read-only on purpose, because it holds the *sources*
+and no pipeline may overwrite them. Chosen: a new bucket,
+**`ledgerline-bridge-8176114c`**, in **us-east-2 (Ohio)** — the region of both
+the Databricks workspace and the Snowflake account — written through a new IAM
+role (`ledgerline-uc-bridge-write`) behind a new Unity Catalog storage
+credential and external location, and read by Snowflake through a second,
+read-only role. Every hop of the bridge stays in one region.
+
+- Chosen: dedicated bucket in Ohio; Databricks role read-write on that bucket
+  only (`aws/bridge/databricks_write_permissions.json`), no prefix conditions
+  (a bucket that holds only the bridge needs none — which also removes the
+  S6 `s3:prefix` listing incident class); Snowflake role read-only (made when
+  Snowflake's storage integration names its principal).
+- Rejected: **a `bridge/` folder in the Mumbai landing bucket.** It would work,
+  and the cost difference is cents, but: every file would cross regions twice
+  (Ohio → Mumbai → Ohio); **Snowpipe auto-ingest would need a detour** — S3 can
+  only notify a queue in the bucket's own region, and Snowflake's queue is in
+  Ohio, so the notice would go through an SNS topic in Mumbai; and Unity Catalog
+  refuses external locations that overlap, while `ledgerline_landing` already
+  covers all of `ledgerline/` — the folder would have to live outside it, or
+  the landing location would have to become writable.
+- Rejected: **make `ledgerline_landing` read-write.** One location for sources
+  and outputs means one bad path in a writer can overwrite a night's dump — the
+  write-once landing (S8) would hold only by convention.
+- Consequence: the Snowpipe row returns from **B?** to **B** — same-region
+  S3 → SQS notifications are the documented path (entry "The Snowflake trial
+  lives in AWS US East (Ohio)" above).
+- Trade-off: one more bucket, two more IAM roles, one more Unity Catalog
+  credential and location to keep (all $0 at rest; storage a few cents a month).
+  The bridge files are not expired: with Databricks on a tier whose inactive
+  accounts may be deleted, they are what lets Snowflake be reloaded.
+
+## The bridge exports each Silver table's change feed by version range, written once and logged — the first export is the whole history (Session 13)
+
+**In plain words:** Snowflake needs to know what changed in Silver, including
+what was **deleted**. Delta's Change Data Feed already records, for every
+commit, each row it inserted, updated or deleted. The export notebook
+(`databricks/bridge/export_silver`) takes each table's feed from the version
+after its last export up to now, writes it as one Parquet file into its own
+folder `silver/<table>/v<from>-<to>/` in the bridge bucket, and only then logs
+the range in `workspace.bridge.export_log`. A folder is never written twice;
+a folder without a log line stops the export until a person looks.
+
+- Chosen: change feed (`insert`, `update_postimage`, `delete`; `update_preimage`
+  left behind — the previous change for that key already carries those values),
+  with `_commit_version` and `_commit_timestamp` on every row; a fixed version
+  range per export (the same rows on every read); one file per range;
+  `errorifexists`; the log written after the files; the first export = the
+  **whole feed from version 0**, so Gold can rebuild the dims night by night
+  (exp_05) — possible only while the feed's oldest files exist (30-day
+  retention from 2026-09-30 → **first export before ~2026-10-30**). Seven
+  tables: the three dims, orders, order items, inventory, inventory events.
+  Not PII (`workspace.pii`; Session 18 decides).
+- Rejected: **re-export whole tables each run** — simplest and correct, but
+  copies every unchanged row every night, and **loses deletes**: a row that is
+  gone is simply absent from a full copy, which only a snapshot comparison
+  (`NOT MATCHED BY SOURCE`) can turn back into a delete. The feed says it.
+- Rejected: **a Delta stream over the change feed with a checkpoint**
+  (`readChangeFeed` + `foreachBatch`) — the production shape on a cluster, but a
+  checkpoint hides the range a file covers; here the folder name *is* the
+  range, the log is readable, and Snowflake's side needs nothing but files.
+- Rejected: **baseline snapshot first, changes after** — the standard way when
+  the history is gone; it would throw away the night-by-night dims history that
+  is still readable. Kept as the documented fallback for a rebuild after the
+  feed's files expire, or after a rename (the feed cannot span one, S11 E5).
+- **At-least-once, named:** a run that dies after writing and before logging
+  leaves an unlogged folder; Snowpipe may already have loaded it, so the export
+  refuses rather than guessing. Gold applies changes keyed on
+  `(key, _commit_version)`, so a range loaded twice changes nothing.
+- Proof built in: the files alone, replayed (each key's newest change, deletes
+  dropped), must equal Silver as of the last exported version — in both
+  directions (`compare_with_silver`).

@@ -16,3 +16,7 @@ databricks-connect>=15.4                     # optional: run Spark locally again
 dbt-core>=1.8
 dbt-snowflake>=1.8                           # primary target
 dbt-databricks>=1.8                          # secondary target, survives trial expiry
+
+# --- Snowflake from the laptop (Session 13) ---
+snowflake-connector-python>=3.12             # scripts/sf.py; key-pair sign-in (also pulled in by dbt-snowflake)
+cryptography>=42                             # scripts/sf_keypair.py
