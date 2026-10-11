@@ -3129,3 +3129,13 @@ a folder without a log line stops the export until a person looks.
 - Proof built in: the files alone, replayed (each key's newest change, deletes
   dropped), must equal Silver as of the last exported version — in both
   directions (`compare_with_silver`).
+
+### Correction (2026-10-11, same session) — two settings serverless refused, both before anything was written
+
+- `spark.sql.parquet.outputTimestampType = TIMESTAMP_MICROS` → `CONFIG_NOT_AVAILABLE`. The
+  export now writes serverless' default timestamp type; which one that is gets read on the
+  Snowflake side (`INFER_SCHEMA`) instead of assumed.
+- `.write.mode("errorifexists")` → `[UNSUPPORTED_OPERATION] errorifexists is not supported` —
+  serverless notebooks run on **Spark Connect**, whose writer knows the mode as `"error"` only
+  (the same behaviour: fail if the folder exists). The entry above says `errorifexists`; the code
+  says `"error"`.

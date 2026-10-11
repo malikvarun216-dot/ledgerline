@@ -24,7 +24,7 @@
 # MAGIC - **Commits that changed no row** (OPTIMIZE, a constraint): range logged, 0 rows, no folder.
 # MAGIC - **A folder in the bucket with no log line** (a run died between the write and the log):
 # MAGIC   **refused** — a person decides, because Snowpipe may already have loaded it.
-# MAGIC - **A range whose folder already exists:** the write fails (`errorifexists`) — never overwritten.
+# MAGIC - **A range whose folder already exists:** the write fails (mode `error`) — never overwritten.
 # MAGIC - **A rename / drop column inside the range:** the change feed refuses
 # MAGIC   (`DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_SCHEMA_CHANGE`, S11 E5) — a new baseline, decided by a person.
 # MAGIC
@@ -153,7 +153,8 @@ def export(name):
         path = folder(name, start, end)
         # One file per range: small enough here (the biggest history is a few hundred thousand rows),
         # and one file = one entry in Snowflake's load history, which is what Session 13 tests.
-        rows.coalesce(1).write.mode("errorifexists").parquet(path)
+        # Mode "error": fail if the folder exists. Its alias "errorifexists" is refused by Spark Connect.
+        rows.coalesce(1).write.mode("error").parquet(path)
         files = sum(1 for f in dbutils.fs.ls(path) if f.name.endswith(".parquet"))
 
     line = spark.createDataFrame(
