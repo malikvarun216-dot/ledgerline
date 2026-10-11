@@ -164,6 +164,94 @@ models:
       - {name: is_current, data_type: boolean}
       - {name: silver_night, data_type: number}
 
+  # ---- Facts (Session 15) -------------------------------------------------------------------------
+  - name: fct_orders
+    description: >
+      One row per order as Silver holds it now. Incremental (merge_changes: in-band deletes, a
+      high-water mark on silver_version); an order whose person is not linked yet is re-tried on
+      every run until the customer_order_link night that holds it has landed.
+    config:
+      contract: {enforced: true}
+    data_tests:
+      - fct_equals_rebuild:
+          arguments: {staging: stg_orders, key: [order_id]}
+    columns:
+      - name: order_id
+        data_type: varchar
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - {name: customer_id, data_type: varchar, description: "Per-ORDER id (Olist issues one per order). Not the person."}
+      - name: customer_unique_id
+        data_type: varchar
+        description: The person, from customer_order_link. NULL until the link's night has landed.
+        data_tests:
+          - not_null:
+              config:
+                severity: warn   # an order placed after the newest dims night waits for the next one
+      - {name: status, data_type: varchar}
+      - {name: source_status, data_type: varchar}
+      - {name: created_at, data_type: timestamp_ntz, description: "Business time the order was placed — the point-in-time join's T."}
+      - {name: approved_at, data_type: timestamp_ntz}
+      - {name: shipped_at, data_type: timestamp_ntz}
+      - {name: delivered_at, data_type: timestamp_ntz}
+      - {name: canceled_at, data_type: timestamp_ntz}
+      - {name: unavailable_at, data_type: timestamp_ntz}
+      - {name: estimated_delivery_at, data_type: timestamp_ntz}
+      - {name: units, data_type: number}
+      - {name: silver_version, data_type: number, description: "Change-feed version of Silver orders this row comes from; the high-water mark."}
+      - {name: silver_change_type, data_type: varchar, description: "insert or update_postimage (a delete removes the row)."}
+
+  - name: fct_order_items
+    description: One row per order item = one unit sold, as Silver holds it now. Incremental, merge_changes.
+    config:
+      contract: {enforced: true}
+    data_tests:
+      - fct_equals_rebuild:
+          arguments: {staging: stg_order_items, key: [order_id, order_item_id]}
+    columns:
+      - name: order_id
+        data_type: varchar
+        constraints: [{type: not_null}]
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('fct_orders'), field: order_id}}
+      - name: order_item_id
+        data_type: number
+        constraints: [{type: not_null}]
+      - {name: product_id, data_type: varchar}
+      - {name: seller_id, data_type: varchar}
+      - {name: sku_key, data_type: varchar}
+      - {name: price, data_type: "number(12,2)"}
+      - {name: freight_value, data_type: "number(12,2)"}
+      - {name: silver_version, data_type: number}
+      - {name: silver_change_type, data_type: varchar}
+
+  - name: order_items_at_sale
+    description: >
+      Each order item with the customer, product and seller as they were when the order was placed
+      (point-in-time join to the SCD2 dimensions, resolved at query time).
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: order_id, data_type: varchar}
+      - {name: order_item_id, data_type: number}
+      - {name: ordered_at, data_type: timestamp_ntz}
+      - {name: order_status, data_type: varchar}
+      - {name: customer_unique_id, data_type: varchar}
+      - {name: customer_city, data_type: varchar}
+      - {name: customer_state, data_type: varchar}
+      - {name: product_id, data_type: varchar}
+      - {name: product_category_name, data_type: varchar}
+      - {name: seller_id, data_type: varchar}
+      - {name: seller_city, data_type: varchar}
+      - {name: seller_state, data_type: varchar}
+      - {name: price, data_type: "number(12,2)"}
+      - {name: freight_value, data_type: "number(12,2)"}
+      - {name: customer_found, data_type: boolean, description: "A customer version covered the order time."}
+      - {name: customer_inferred, data_type: boolean, description: "None did; the person's FIRST version is shown instead (97.4% right, Session 15)."}
+      - {name: product_found, data_type: boolean}
+      - {name: seller_found, data_type: boolean}
+
 unit_tests:
   # B68, as a test: the newest change wins, a key whose newest change is a delete is gone, and a
   # change row loaded twice is one row. Filter-deletes-first would bring C2 back at its insert.
@@ -182,3 +270,36 @@ unit_tests:
       rows:
         - {customer_unique_id: C1, customer_city: sao paulo,      silver_version: 4, silver_night: 4}
         - {customer_unique_id: C3, customer_city: rio de janeiro, silver_version: 3, silver_night: 3}
+
+  # The incremental SELECT (is_incremental forced on): reads only changes above the high-water mark
+  # (O2 at v5 is not read again), RE-TRIES an order whose person was missing once its link exists
+  # (O1, its change unmoved) but not while it is still missing (O5), and passes a delete through to
+  # the MERGE (O4) instead of dropping it.
+  - name: fct_orders_incremental_retries_unlinked_and_reads_only_new_changes
+    model: fct_orders
+    overrides:
+      macros:
+        is_incremental: true
+    given:
+      - input: this
+        rows:
+          - {order_id: O1, customer_id: c1, customer_unique_id: null, status: created,   silver_version: 3, silver_change_type: insert}
+          - {order_id: O2, customer_id: c2, customer_unique_id: P2,   status: delivered, silver_version: 5, silver_change_type: update_postimage}
+          - {order_id: O5, customer_id: c5, customer_unique_id: null, status: created,   silver_version: 4, silver_change_type: insert}
+      - input: ref('stg_orders')
+        rows:
+          - {order_id: O1, customer_id: c1, status: created,   commit_version: 3, change_type: insert}
+          - {order_id: O2, customer_id: c2, status: created,   commit_version: 2, change_type: insert}
+          - {order_id: O2, customer_id: c2, status: delivered, commit_version: 5, change_type: update_postimage}
+          - {order_id: O3, customer_id: c3, status: created,   commit_version: 6, change_type: insert}
+          - {order_id: O4, customer_id: c4, status: created,   commit_version: 7, change_type: delete}
+          - {order_id: O5, customer_id: c5, status: created,   commit_version: 4, change_type: insert}
+      - input: ref('int_customer_order_link')
+        rows:
+          - {customer_id: c1, customer_unique_id: P1}
+          - {customer_id: c2, customer_unique_id: P2}
+    expect:
+      rows:
+        - {order_id: O1, customer_unique_id: P1,   silver_version: 3, silver_change_type: insert}
+        - {order_id: O3, customer_unique_id: null, silver_version: 6, silver_change_type: insert}
+        - {order_id: O4, customer_unique_id: null, silver_version: 7, silver_change_type: delete}

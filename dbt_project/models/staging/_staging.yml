@@ -35,6 +35,26 @@ models:
       - name: dim_updated_at
         data_tests: [not_null]
 
+  - name: stg_customer_order_link
+    description: >
+      Which person (customer_unique_id) each order's customer_id belongs to (Session 15). Rows only
+      ever appear; dim_updated_at = the order's purchase time.
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['customer_id']}}
+    columns:
+      - name: customer_id
+        data_tests: [not_null]
+      - name: customer_unique_id
+        data_tests: [not_null]
+
+  - name: int_customer_order_link
+    description: >
+      The link as Silver holds it now — one row per customer_id. Derived (newest change, deletes
+      dropped), so it is a view in STAGING, not a GOLD model: analysts read the person on the fact.
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+
   - name: stg_orders
     data_tests:
       - no_conflicting_changes: {arguments: {key: ['order_id']}}

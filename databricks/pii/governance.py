@@ -137,9 +137,9 @@ display(spark.sql(f"DESCRIBE HISTORY {VAULT}").select("version", "timestamp", "o
 # MAGIC The bundle job `ledgerline-pii` runs as this service principal, deployed by `ledgerline-ci`. It
 # MAGIC is in `pii_readers` (it must see every row it writes) and gets exactly what the two notebooks
 # MAGIC touch: the `pii` schema's tables and checkpoint volume, and reading the landing files. Nothing
-# MAGIC in `bronze` or `silver`. Deliberately not granted up front: `CREATE …` on the catalog and the
-# MAGIC salt secret — the notebooks only `CREATE … IF NOT EXISTS` objects that exist, and read the salt
-# MAGIC only when a new night arrives. The first job run shows whether Free Edition agrees.
+# MAGIC in `bronze` or `silver`. Not granted: `CREATE …` on the catalog — the notebooks only `CREATE …
+# MAGIC IF NOT EXISTS` objects that exist. The salt secret was left out in S12 too, and the first new
+# MAGIC contact night (S15) failed on it: now granted below (incidents.md 2026-10-12).
 
 # COMMAND ----------
 
@@ -148,6 +148,14 @@ for statement in (
     f"GRANT USE CATALOG ON CATALOG workspace TO `{RUNNER}`",
     f"GRANT USE SCHEMA, SELECT, MODIFY, READ VOLUME, WRITE VOLUME ON SCHEMA workspace.pii TO `{RUNNER}`",
     f"GRANT READ FILES ON EXTERNAL LOCATION ledgerline_landing TO `{RUNNER}`",
+    # The hashing salt, read only when a new contact night arrives — so the first new night after
+    # S12 (2026-10-12, Session 15) was the first run to need it, and it failed (incidents.md). It
+    # needs two grants, found one refusal at a time: USE SCHEMA on the secrets schema (here), and
+    # READ SECRET on the one secret `pii_hash_salt` (not the Kafka keys beside it) — which SQL
+    # cannot grant on Free Edition: any SQL naming a UC secret, warehouse or notebook, answers
+    # UC_SECRETS_NOT_ENABLED. Granted in Catalog Explorer on the secret's Permissions tab, like the
+    # secrets themselves were created (in the browser, S6 / S12). A rebuilt workspace repeats that.
+    f"GRANT USE SCHEMA ON SCHEMA workspace.ledgerline_secrets TO `{RUNNER}`",
 ):
     spark.sql(statement)
     print(statement)

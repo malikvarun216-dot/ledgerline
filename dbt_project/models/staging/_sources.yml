@@ -27,7 +27,7 @@ sources:
               - not_null
               - accepted_values:
                   arguments:
-                    values: ['customer', 'product', 'seller', 'orders', 'order_items', 'inventory', 'inventory_events']
+                    values: ['customer', 'product', 'seller', 'customer_order_link', 'orders', 'order_items', 'inventory', 'inventory_events']
           - name: RECORD
             data_tests:
               - not_null

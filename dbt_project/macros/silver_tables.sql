@@ -1,5 +1,5 @@
 {#-
-  The seven Silver tables as they reach RAW.SILVER_CHANGES: each one's key and every field its
+  The Silver tables (seven, eight with Session 15's customer_order_link) as they reach RAW.SILVER_CHANGES: each one's key and every field its
   Parquet rows carry, with the type Snowflake reads each field as (TYPEOF of the VARIANT value).
 
   ONE list, used three ways, so they cannot disagree:
@@ -62,6 +62,14 @@
             "seller_zip_code_prefix": "VARCHAR",
             "seller_city": "VARCHAR",
             "seller_state": "VARCHAR",
+            "dim_updated_at": "TIMESTAMP_NTZ",
+        }, **dims_lineage),
+    },
+    "customer_order_link": {
+        "key": ["customer_id"],
+        "fields": dict({
+            "customer_id": "VARCHAR",
+            "customer_unique_id": "VARCHAR",
             "dim_updated_at": "TIMESTAMP_NTZ",
         }, **dims_lineage),
     },
