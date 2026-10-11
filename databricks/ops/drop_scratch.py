@@ -23,12 +23,12 @@
 
 KEEP = {
     "silver": {
-        "customer", "product", "seller", "dims_merge_log", "dims_rejected_rows",
+        "customer", "product", "seller", "customer_order_link", "dims_merge_log", "dims_rejected_rows",
         "inventory", "inventory_events", "inventory_cdc_log",
         "orders", "orders_log", "order_items",
     },
     "bronze": {
-        "customer", "product", "seller", "orders", "orders_quarantine",
+        "customer", "product", "seller", "customer_order_link", "orders", "orders_quarantine",
         "inventory_cdc", "inventory_cdc_quarantine", "stream_progress",
     },
 }

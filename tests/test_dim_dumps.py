@@ -355,7 +355,7 @@ def test_partition_layout_is_hive_style_for_auto_loader(olist_frames, sink):
     keys = sink.list_keys("dims/")
 
     assert f"dims/customer/dump_date={START.isoformat()}/customer.csv" in keys
-    assert len(keys) == 2 * 3, "2 nights x 3 dimensions"
+    assert len(keys) == 2 * 4, "2 nights x (3 dimensions + the customer-order link)"
     assert all("dump_date=" in k for k in keys)
 
 
@@ -428,7 +428,8 @@ def test_extending_by_one_night_writes_only_that_night(olist_frames, counting):
     run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE)
 
     third = nights(3)[2]
-    assert sorted(counting.puts) == sorted(dump_key(d, third) for d in ("customer", "product", "seller"))
+    lanes = ("customer", "product", "seller", "customer_order_link")
+    assert sorted(counting.puts) == sorted(dump_key(d, third) for d in lanes)
 
 
 def test_a_run_that_would_change_a_landed_night_writes_nothing(olist_frames, counting):
@@ -465,7 +466,8 @@ def test_delete_from_leaves_earlier_nights_byte_identical(olist_frames, counting
         delete_per_night=1, delete_from=fourth,
     )
 
-    assert sorted(counting.puts) == sorted(dump_key(d, fourth) for d in ("customer", "product", "seller"))
+    lanes = ("customer", "product", "seller", "customer_order_link")
+    assert sorted(counting.puts) == sorted(dump_key(d, fourth) for d in lanes)
     assert {k: v for k, v in snapshot_of(counting).items() if k in before} == before
     night4 = {r["dimension"]: r for r in report if r[DUMP_DATE] == fourth.isoformat()}
     assert night4["product"]["deleted_vs_previous"] == 1
@@ -629,3 +631,53 @@ def test_synthetic_contact_is_deterministic_and_ascii_in_the_address():
     for person in (f"p{i}" for i in range(500)):
         _, email, _ = synthetic_contact(person)
         assert email.isascii(), email
+
+
+# --------------------------------------------------------------------------
+# The customer-order link (Session 15): which person placed each order
+# --------------------------------------------------------------------------
+
+
+def test_link_maps_every_order_placed_by_the_night_to_its_person(olist_frames, sink):
+    """Keyed on the per-order customer_id, so the facts can reach customer_unique_id."""
+    run(olist_frames, sink, start=START, nights=4, stride_days=STRIDE)
+    customers, orders = olist_frames["customers"], olist_frames["orders"]
+
+    for night in nights(4):
+        link = read_dump(sink, "customer_order_link", night)
+        as_of = pd.Timestamp(datetime.combine(night, datetime.max.time()))
+        placed = orders[orders["order_purchase_timestamp"] <= as_of]
+        assert link["customer_id"].is_unique
+        assert set(link["customer_id"]) == set(placed["customer_id"]), night
+        expected = customers.set_index("customer_id")["customer_unique_id"]
+        mapped = link.set_index("customer_id")["customer_unique_id"]
+        assert (mapped == expected.reindex(mapped.index)).all()
+
+
+def test_link_rows_never_change_and_survive_a_customer_deletion(olist_frames, sink):
+    """A deleted customer's orders still happened: the link keeps them, timestamp unmoved."""
+    stride = 60  # four nights reach 2017-07-30: every fixture order placed, one customer deleted
+    run(olist_frames, sink, start=START, nights=4, stride_days=stride, delete_per_night=1)
+    dates = [START + pd.Timedelta(days=i * stride).to_pytimedelta() for i in range(4)]
+
+    universe = sorted(olist_frames["customers"]["customer_unique_id"].unique())
+    gone = deleted_keys(CUSTOMER, universe, night=3, per_night=1, seed=20260919)
+    assert gone, "the fixture must really delete a customer"
+    assert not gone & set(read_dump(sink, "customer", dates[-1])["customer_unique_id"])
+
+    early = read_dump(sink, "customer_order_link", dates[0])
+    late = read_dump(sink, "customer_order_link", dates[-1])
+    assert gone <= set(late["customer_unique_id"]), "the link followed the customer deletion"
+    assert len(late) == len(olist_frames["orders"]), "every order keeps its person"
+
+    both = early.merge(late, on="customer_id", suffixes=("_1", "_4"))
+    assert len(both) == len(early), "a link row disappeared"
+    for column in ("customer_unique_id", UPDATED_AT):
+        assert (both[f"{column}_1"] == both[f"{column}_4"]).all(), column
+
+
+def test_link_dim_updated_at_is_the_purchase_time(olist_frames, sink):
+    run(olist_frames, sink, start=START, nights=4, stride_days=STRIDE)
+    link = read_dump(sink, "customer_order_link", nights(4)[3]).set_index("customer_id")
+    purchased = olist_frames["orders"].set_index("customer_id")["order_purchase_timestamp"]
+    assert (link[UPDATED_AT] == purchased.reindex(link.index)).all()

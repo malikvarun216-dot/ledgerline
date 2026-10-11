@@ -48,6 +48,7 @@ TABLES = {
     "customer": ["customer_unique_id"],
     "product": ["product_id"],
     "seller": ["seller_id"],
+    "customer_order_link": ["customer_id"],  # Session 15; its first export is its whole history
     "orders": ["order_id"],
     "order_items": ["order_id", "order_item_id"],
     "inventory": ["sku_key"],

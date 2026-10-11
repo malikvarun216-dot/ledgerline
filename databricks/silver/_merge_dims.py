@@ -93,6 +93,16 @@ DIMS = {
             "dim_updated_at": "timestamp",
         },
     },
+    # Which person placed each order (Session 15). Rows only ever appear, so the snapshot MERGE's
+    # NOT MATCHED BY SOURCE DELETE finds nothing to delete here — and if it ever does, the circuit
+    # breaker sees it like any other dimension's.
+    "customer_order_link": {
+        "key": "customer_id",
+        "columns": {
+            "customer_unique_id": "string",
+            "dim_updated_at": "timestamp",
+        },
+    },
 }
 REQUIRED = {"dim_updated_at"}  # never NULL, besides the key
 SQL_TYPE = {"zip": "STRING", "int": "INT", "timestamp": "TIMESTAMP", "string": "STRING"}

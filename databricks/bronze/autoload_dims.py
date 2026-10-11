@@ -4,7 +4,7 @@
 # environment_version = "6"
 # ///
 # MAGIC %md
-# MAGIC # Bronze — nightly dimension dumps (customer, product, seller)
+# MAGIC # Bronze — nightly dimension dumps (customer, product, seller, customer_order_link)
 # MAGIC
 # MAGIC **Pattern:** Auto Loader + `Trigger.AvailableNow` + `replaceWhere` on `dump_date` — the code is in
 # MAGIC `_autoload_dims`. Source is read-only (`ledgerline_landing` external location); state lives in a
@@ -28,7 +28,9 @@ LANDING = "s3://ledgerline-landing-dev-fffc8b65/ledgerline/dims"
 CATALOG = "workspace"
 SCHEMA = "bronze"
 STATE = f"/Volumes/{CATALOG}/{SCHEMA}/checkpoints/dims"
-DIMS = ["customer", "product", "seller"]
+# customer_order_link (Session 15): which person each order's customer_id belongs to — a fourth
+# dump through the same path (decisions.md, Session 15).
+DIMS = ["customer", "product", "seller", "customer_order_link"]
 
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.checkpoints")
@@ -60,17 +62,23 @@ run_all()
 # COMMAND ----------
 
 # 2017-12-28 (Session 8) is the first night with deletions: 19 customers, 100 products, 100 sellers.
+# Nights 6-8 and the link (Session 15) from the same command with --nights 8.
 GOLDEN = {
     "customer": {
         "2016-09-04": 1, "2017-01-02": 326, "2017-05-02": 8_068, "2017-08-30": 22_497, "2017-12-28": 43_690,
+        "2018-04-27": 70_473, "2018-08-25": 95_602, "2018-12-23": 95_696,
     },
     "product": {
         "2016-09-04": 32_951, "2017-01-02": 32_951, "2017-05-02": 32_951, "2017-08-30": 32_951,
-        "2017-12-28": 32_851,
+        "2017-12-28": 32_851, "2018-04-27": 32_751, "2018-08-25": 32_651, "2018-12-23": 32_551,
     },
     "seller": {
         "2016-09-04": 3_095, "2017-01-02": 3_095, "2017-05-02": 3_095, "2017-08-30": 3_095,
-        "2017-12-28": 2_995,
+        "2017-12-28": 2_995, "2018-04-27": 2_895, "2018-08-25": 2_795, "2018-12-23": 2_695,
+    },
+    "customer_order_link": {
+        "2016-09-04": 1, "2017-01-02": 329, "2017-05-02": 8_240, "2017-08-30": 23_148, "2017-12-28": 45_124,
+        "2018-04-27": 72_997, "2018-08-25": 99_218, "2018-12-23": 99_441,
     },
 }
 

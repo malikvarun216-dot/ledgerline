@@ -4,7 +4,7 @@
 # environment_version = "6"
 # ///
 # MAGIC %md
-# MAGIC # Silver — customer, product, seller as they are now
+# MAGIC # Silver — customer, product, seller (and the customer-order link) as they are now
 # MAGIC
 # MAGIC **Pattern:** one `MERGE` per night, oldest first, with `WHEN NOT MATCHED BY SOURCE DELETE` —
 # MAGIC the snapshot path. The code is in `_merge_dims`; this notebook runs it and checks the result.
@@ -31,7 +31,7 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SILVER}")
 create_merge_log()
 
 # A night listed here may delete more than MAX_DELETE_FRACTION. Empty unless a person decided.
-ALLOW_MASS_DELETE = {"customer": [], "product": [], "seller": []}
+ALLOW_MASS_DELETE = {"customer": [], "product": [], "seller": [], "customer_order_link": []}
 
 
 def run_all():
@@ -61,19 +61,28 @@ print(f"rows held this run: {run_all()}")
 
 # COMMAND ----------
 
-# (inserted, updated, deleted) per night, from `python generators/dim_dumps.py ... --nights 5`.
+# (inserted, updated, deleted) per night, from `python generators/dim_dumps.py ... --nights 5`;
+# nights 6-8 and the link from the same command with --nights 8 (Session 15).
 GOLDEN_MERGE = {
     "customer": {
         "2016-09-04": (1, 0, 0), "2017-01-02": (325, 0, 0), "2017-05-02": (7_742, 0, 0),
         "2017-08-30": (14_429, 10, 0), "2017-12-28": (21_212, 33, 19),
+        "2018-04-27": (26_833, 53, 50), "2018-08-25": (25_210, 66, 81), "2018-12-23": (194, 0, 100),
     },
     "product": {
         "2016-09-04": (32_951, 0, 0), "2017-01-02": (0, 25, 0), "2017-05-02": (0, 50, 0),
         "2017-08-30": (0, 50, 0), "2017-12-28": (0, 50, 100),
+        "2018-04-27": (0, 50, 100), "2018-08-25": (0, 50, 100), "2018-12-23": (0, 50, 100),
     },
     "seller": {
         "2016-09-04": (3_095, 0, 0), "2017-01-02": (0, 25, 0), "2017-05-02": (0, 50, 0),
         "2017-08-30": (0, 50, 0), "2017-12-28": (0, 50, 100),
+        "2018-04-27": (0, 48, 100), "2018-08-25": (0, 49, 100), "2018-12-23": (0, 48, 100),
+    },
+    "customer_order_link": {
+        "2016-09-04": (1, 0, 0), "2017-01-02": (328, 0, 0), "2017-05-02": (7_911, 0, 0),
+        "2017-08-30": (14_908, 0, 0), "2017-12-28": (21_976, 0, 0),
+        "2018-04-27": (27_873, 0, 0), "2018-08-25": (26_221, 0, 0), "2018-12-23": (223, 0, 0),
     },
 }
 

@@ -8,6 +8,7 @@ Hive-partitioned prefix that Auto Loader can pick up:
     dims/customer/dump_date=2017-05-01/customer.csv
     dims/product/dump_date=2017-05-01/product.csv
     dims/seller/dump_date=2017-05-01/seller.csv
+    dims/customer_order_link/dump_date=2017-05-01/customer_order_link.csv   (Session 15)
 
 Full snapshot, not a delta — that is the whole point. A row that vanishes
 between two nights *is* a deletion, which is what ``WHEN NOT MATCHED BY SOURCE
@@ -141,7 +142,17 @@ CONTACT = DimensionSpec(
     attributes=("customer_name", "customer_email", "customer_phone"),
     root=PII_ROOT,
 )
-ALL_SPECS = {**DIMENSIONS, CONTACT.name: CONTACT}
+# Which person placed each order (Session 15). An order carries only ``customer_id``, issued per
+# order; the person is ``customer_unique_id``. The customer dump leaves ``customer_id`` out on
+# purpose (point 2 above), so without this lane no order could be joined to the customer history.
+# Rows only ever appear: an order is never re-pointed at another person, so the link is neither
+# deleted nor changed — a deleted customer's orders still happened (decisions.md, Session 15).
+CUSTOMER_ORDER_LINK = DimensionSpec(
+    name="customer_order_link",
+    key="customer_id",
+    attributes=("customer_unique_id",),
+)
+ALL_SPECS = {**DIMENSIONS, CONTACT.name: CONTACT, CUSTOMER_ORDER_LINK.name: CUSTOMER_ORDER_LINK}
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +194,31 @@ def customer_snapshot(timeline: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
     return (
         latest[[*CUSTOMER.columns, UPDATED_AT]]
         .sort_values(CUSTOMER.key, kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+# --------------------------------------------------------------------------
+# Customer-order link: which person each per-order customer_id belongs to
+# --------------------------------------------------------------------------
+
+
+def order_links(customers: pd.DataFrame, orders: pd.DataFrame) -> pd.DataFrame:
+    """One row per order's ``customer_id``: its person and the moment the order was placed."""
+    joined = customers[[CUSTOMER_ORDER_LINK.key, "customer_unique_id"]].merge(
+        orders[["customer_id", "order_purchase_timestamp"]], on="customer_id", how="inner"
+    )
+    return joined.rename(columns={"order_purchase_timestamp": "observed_at"})
+
+
+def link_snapshot(links: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
+    """Every link whose order was placed by ``as_of``. ``dim_updated_at`` = that purchase time —
+    when the link came into being — so it never moves from one night to the next."""
+    visible = links[links["observed_at"] <= pd.Timestamp(as_of)].copy()
+    visible[UPDATED_AT] = visible["observed_at"]
+    return (
+        visible[[*CUSTOMER_ORDER_LINK.columns, UPDATED_AT]]
+        .sort_values(CUSTOMER_ORDER_LINK.key, kind="stable")
         .reset_index(drop=True)
     )
 
@@ -603,6 +639,7 @@ def run(
     after this date; ``None`` = no contact files at all. The dims files are the same either way.
     """
     timeline = customer_timeline(frames["customers"], frames["orders"])
+    links = order_links(frames["customers"], frames["orders"])
     first_seen = timeline.groupby(CUSTOMER.key)["observed_at"].min()
     report: list[dict[str, Any]] = []
     plan = PlannedSink(sink)
@@ -669,6 +706,18 @@ def run(
                     }
                 )
                 report.append(stats)
+
+        # Never deleted, never changed: see CUSTOMER_ORDER_LINK.
+        stats = write_night(plan, CUSTOMER_ORDER_LINK, link_snapshot(links, as_of), dump_date)
+        stats.update(
+            {
+                "dimension": CUSTOMER_ORDER_LINK.name,
+                DUMP_DATE: dump_date.isoformat(),
+                "synthetic_changes": 0,
+                "removed_cumulative": 0,
+            }
+        )
+        report.append(stats)
 
     status = land(sink, plan.planned, redeliver)
     for stats in report:
@@ -751,14 +800,14 @@ def main() -> int:
         raise SystemExit(f"refused: {refused}") from None
 
     header = (
-        f"  {'dump_date':<12} {'dimension':<16} {'rows':>8} {'new':>7} "
+        f"  {'dump_date':<12} {'dimension':<19} {'rows':>8} {'new':>7} "
         f"{'changed':>8} {'unchanged':>10} {'gone':>6}  {'landed':<11}"
     )
     print(header)
-    print(f"  {'-' * 12} {'-' * 16} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 6}  {'-' * 11}")
+    print(f"  {'-' * 12} {'-' * 19} {'-' * 8} {'-' * 7} {'-' * 8} {'-' * 10} {'-' * 6}  {'-' * 11}")
     for row in report:
         print(
-            f"  {row[DUMP_DATE]:<12} {row['dimension']:<16} {row['rows']:>8,} {row['new']:>7,} "
+            f"  {row[DUMP_DATE]:<12} {row['dimension']:<19} {row['rows']:>8,} {row['new']:>7,} "
             f"{row['changed']:>8,} {row['unchanged']:>10,} {row['deleted_vs_previous']:>6,}  "
             f"{row['landed']:<11}"
         )
