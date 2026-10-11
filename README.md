@@ -1,117 +1,142 @@
 # ledgerline
 
-A multi-source e-commerce data platform built to exercise every major
-idempotency and write pattern — **each assigned to the layer and source where
-it is the honest industry-standard choice**, not forced in for coverage.
+[![CI](https://github.com/malikvarun216-dot/ledgerline/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/malikvarun216-dot/ledgerline/actions/workflows/ci.yml)
 
-*ledger* is the thesis: a correct, auditable record of what happened.
-*line* nods to order line items.
+**A data platform built to answer one question honestly: when data arrives twice, late, out of order, or gets
+deleted, does the warehouse still tell the truth?**
 
-Where two patterns could both work, both are built, and the choice is recorded
-with its rejected alternative. That comparative judgment is the point.
+ledgerline takes 100,000 real e-commerce orders (the public Olist dataset) and runs them through a production-style
+lakehouse and warehouse: Kafka streams and nightly files into **Databricks**, then **Snowflake** and **dbt** for the
+tables analysts read. Every layer uses the write pattern a real team would choose for that kind of data. Then I
+**break each one on purpose** to see exactly how it fails, and add the guard that stops it.
 
----
+*ledger*: a correct, auditable record of what happened. *line*: the order lines it is built around.
 
-## Architecture
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+  <img alt="Three sources (Kafka orders, Kafka inventory changes, nightly S3 files) flow into Databricks Bronze and Silver, across an S3 bridge into Snowflake RAW via Snowpipe, then dbt Gold. Proven by answer keys, deliberate failures, alarms and an incident log; platform: Unity Catalog, GitHub Actions, Airflow, cost guards" src="docs/images/architecture-light.svg">
+</picture>
 
-Three sources, chosen for distinct **temporal shape** rather than distinct
-transport:
+| 3 | 17 | 112,650 = 112,650 | 167 |
+|:---:|:---:|:---:|:---:|
+| sources, each changing in a different way | failures caused on purpose and written up | units sold match stock decrements, across two separate streams | automated tests |
 
-| Source | Transport | Temporal shape |
+## Why three sources
+
+Each source changes in a different way, and each needs a different way of writing it down correctly:
+
+| Source | How it changes | What the platform must get right |
 |---|---|---|
-| Order events | Confluent topic `orders` | Immutable facts — append-only, never updated |
-| Customer / product / seller dumps | Nightly CSV → S3 | Slowly-changing — *history matters* |
-| Inventory stock CDC | Confluent topic `inventory.cdc` | Fast-changing — *only current state matters* |
+| **Orders** (Kafka) | Facts. Never updated. | Load each event **exactly once**, even after a crash or a replay |
+| **Stock levels** (Kafka, change data capture) | Changes constantly. Only "now" matters. | Apply changes **in order**; never let an old update overwrite a newer one; never let a deleted item come back |
+| **Customers, products, sellers** (nightly files on S3) | Change slowly. History matters. | Know **who the customer was on the day of the order**, not just today |
 
-The inventory feed is **causally coupled** to the order stream: every stock
-decrement traces back to a real `olist_order_items` row. That is what makes the
-cross-source reconciliation — units sold ↔ summed decrements — a genuine check
-rather than two unrelated numbers.
+The stock feed is driven by the real order lines, so the two streams must agree: units sold = units taken out of
+stock, for every one of 34,448 products. That tie-out runs on Silver and again on Gold, and it is how I know nothing
+was lost or doubled on the way.
 
-**Platform split.** Databricks owns Bronze + Silver (Unity Catalog, Delta MERGE,
-Structured Streaming, Auto Loader, DLT). Snowflake owns Gold (dbt snapshots and
-incrementals, Streams & Tasks, Dynamic Tables, query profile). The bridge is
-Parquet in S3 read through a Snowflake external stage.
+## How it works
 
-### Pattern-to-layer mapping
+1. **Bronze (Databricks).** Raw data lands exactly once. Kafka offsets and Delta's transaction log make a replay
+   provably safe, and nightly files are written once and never silently changed.
+2. **Silver (Databricks).** Each source gets its own `MERGE`: snapshot files delete by absence, the change stream
+   applies inserts, updates and deletes in sequence order, and orders fill in as their events arrive. Bad rows
+   are held back with an alarm instead of stopping the night.
+3. **Bridge.** Every change Silver makes (including deletes) is exported as Parquet to S3. **Snowpipe** loads it into
+   Snowflake about 25 seconds after it is written.
+4. **Gold (Snowflake + dbt).** Customer, product and seller history as SCD2 snapshots on business time; order facts
+   as incremental models with a custom MERGE that also deletes; a point-in-time view that answers "who was the
+   customer, and where was the seller, when this was sold". Checked against Olist's own per-order addresses, it
+   was right **97,651 times out of 97,653**.
+
+## Built to fail on purpose
+
+Every guarantee here is attacked deliberately in **experiments** (one failure mode each, with a test asserting the
+bug is really there before the fix) and **drills** (a whole layer attacked at once). Each result goes in
+[docs/incidents.md](docs/incidents.md), and every entry ends with a prevention rule.
+
+The one that changed how I think about "exactly once": I deleted a stream's checkpoint on purpose and restarted it.
+The job succeeded, reported no errors, and loaded no duplicates, so by every normal check it was healthy. It had
+also **silently skipped 74 new messages**, permanently. The table's own log believed those batches were already
+written. Now the stream refuses to start in that state, and the drill proves the refusal fires.
+
+A few more, found the same way:
+
+- The stock feed's "before" and "after" values broke their own sequence order on **237 products**. Every total and
+  every test passed. Only a check that follows each product's chain of changes could see it.
+- Snowflake's first load labelled all **504,039 rows** with the wrong table name, because the file path included the
+  stage's own folder. A check that compares each label with its source now runs after every load.
+- "Delete whatever is missing" is right for a full nightly snapshot and destructive on a batch of changes: on
+  Snowflake it deleted **2,945 sellers** that had simply not changed that night. Measured, not assumed. Production
+  reads each change's own delete flag instead.
+
+## Run like production
+
+- **Treated as live.** The Kafka topics, S3 buckets and tables are handled like production: a mistake is contained
+  and fixed forward, never "fixed" by deleting the data and starting over.
+- **Governed.** Unity Catalog grants, column masks, row filters and tags; synthetic personal data in its own lane,
+  with a right-to-erasure job that is proven to delete physically.
+- **Automated.** GitHub Actions runs lint and 167 tests, then deploys the Databricks jobs as code (Asset Bundles) as
+  one service account, run by another. Job failure emails and SQL alerts, each seen firing.
+- **Cheap.** A **~$22 budget for the whole build**: Databricks Free Edition, a Snowflake trial with resource monitors and
+  60-second auto-suspend, Confluent at about a cent a month at rest.
+
+## Where it is now
+
+Bronze, Silver, the bridge and Gold are built and verified (see [docs/progress.md](docs/progress.md), which records
+what was *verified*, not just what was written). **In progress:** an Airflow DAG that runs a whole night across all
+three platforms, and slim CI for dbt that builds only what a pull request changed, in a zero-copy clone of production.
+**Next:** late-arriving data, Snowflake masking and time travel, Streams, Tasks and Dynamic Tables, and query
+performance on a large sample. The plan for every topic is in [docs/coverage.md](docs/coverage.md).
+
+**Stack:** Python, PySpark, SQL, Databricks (Delta Lake, Structured Streaming, Auto Loader, Unity Catalog, Lakeflow),
+Snowflake (Snowpipe, zero-copy clone), dbt, Kafka (Confluent Cloud), Airflow, AWS S3, GitHub Actions.
+
+**More detail:** [design decisions](docs/decisions.md) (every choice with the option it rejected) ·
+[incidents](docs/incidents.md) · [progress log](docs/progress.md) · [coverage plan](docs/coverage.md) ·
+[runbook](docs/runbook.md)
+
+<details>
+<summary><b>Which write pattern goes where, and why</b></summary>
 
 | Layer | Source | Pattern |
 |---|---|---|
-| Bronze | Order events | Append-only, exactly-once via Kafka offsets (`txnAppId` / `txnVersion`) |
-| Bronze | Dimension dumps | Partition overwrite — Auto Loader + `Trigger.AvailableNow` + `replaceWhere` |
-| Bronze | Inventory CDC | Append-only raw op log — Bronze does **not** interpret ops |
-| Silver | Order events | `MERGE INTO` on `order_id` |
-| Silver | Dimensions | `MERGE` + `WHEN NOT MATCHED BY SOURCE DELETE` |
-| Silver | Inventory CDC | `MERGE` on op flags + in-batch dedup + `seq` guard |
-| Gold | Dimensions | SCD2 via dbt snapshot (`timestamp` strategy) |
-| Gold | Order facts | dbt incremental `MERGE` (`unique_key`) + lookback window |
+| Bronze | Order events | Append-only, exactly once via Kafka offsets (`txnAppId` / `txnVersion`); `mergeSchema` for added fields |
+| Bronze | Dimension dumps | Auto Loader + `Trigger.AvailableNow` + `replaceWhere`; landing is write-once |
+| Bronze | Inventory CDC | Append-only raw op log; Bronze does **not** interpret ops |
+| Silver | Order events | `MERGE INTO` on `order_id`, one row per order filled in as events arrive |
+| Silver | Dimensions | `MERGE` + `WHEN NOT MATCHED BY SOURCE DELETE`, with a 5% delete circuit breaker |
+| Silver | Inventory CDC | `MERGE` on op flags + in-batch dedup + `seq` guard; newest event read from the log |
+| Bridge | Every Silver table | Change Data Feed by version range → Parquet on S3 → Snowpipe → one `VARIANT` table |
+| Gold | Dimensions | SCD2 via dbt snapshot (`timestamp` strategy, business time, one night per run) |
+| Gold | Order facts | dbt incremental with a custom `merge_changes` strategy (in-band deletes, version guard) |
 
-`WHEN NOT MATCHED BY SOURCE DELETE` is on the **snapshot** path only. Applied to
-a CDC micro-batch it is destructive: a CDC batch contains only *changed* rows,
-so every unchanged target row has no matching source row and gets deleted. CDC
-deletes arrive in-band as `op = 'D'`.
+`WHEN NOT MATCHED BY SOURCE DELETE` is on the **snapshot** path only. Applied to a change batch it is destructive:
+a change batch holds only the rows that changed, so every unchanged row looks "missing" and is deleted. Change-feed
+deletes arrive in-band, as `op = 'D'`.
 
----
+Where two patterns could both work, both were built and compared, and the choice is recorded with the one it
+rejected, e.g. a hand-written MERGE vs Lakeflow `AUTO CDC`, a dbt snapshot vs `AUTO CDC` SCD2, or watermark dedup vs
+`MERGE` dedup.
 
-## Status
+</details>
 
-**Session 11 done; Session 12 next** (2026-10-06). Live on Confluent Cloud
-(`orders`, `inventory.cdc`), S3 (nightly dimension dumps) and Databricks Free
-Edition:
-
-- **Bronze** — every source, exactly once (Kafka offsets + `txnVersion`;
-  Auto Loader + `replaceWhere`), with quarantine and provenance headers; a field
-  the producer adds becomes a column (`mergeSchema`).
-- **Silver** — dimensions by snapshot MERGE with delete-by-absence (a bad row is
-  held, not the night); inventory by CDC MERGE (op flags, in-batch dedup, `seq`
-  guard, a tie guard, the newest event read from the log so a delete is never
-  undone); orders as one row per order that fills in as its events arrive.
-  Delta `CHECK` constraints on orders, order items and stock; per SKU, units ordered = units the
-  stock feed decremented (34,448 SKUs, 0 mismatched).
-- **Alarms** — a daily Databricks Job (three Bronze → Silver chains) with a
-  failure email and two SQL alerts, each seen firing; a pipeline-health AI/BI
-  dashboard built from git that reuses the alerts' SQL.
-- **Beside Silver (comparison)** — a Lakeflow declarative pipeline: AUTO CDC as
-  SCD1 (equal to the hand-written MERGE row for row) and SCD2, expectations with
-  warn / drop / fail on real rows; watermarked dedup and a stream-stream join
-  measured on Bronze's replay; Delta schema evolution through the production
-  writer.
-- **Drills** — Bronze (Drill 1) and Silver (Drill 2) attacked on purpose: replays,
-  checkpoint resets, history applied backwards, lost logs; every guard seen
-  firing, and a regression Job that re-runs every experiment.
-- **Experiments** — 4 of 6 deliberate failures done (exactly-once replay,
-  partition overwrite, the MERGE gap, CDC correctness), plus concurrent writes
-  and constraint violations caused on purpose.
-- **Not started** — Gold (Snowflake + dbt), Airflow.
-
-The remaining plan — every Databricks / Snowflake / dbt topic, built or taught as
-theory, each bound to a session — is [`docs/coverage.md`](docs/coverage.md).
-See [`docs/progress.md`](docs/progress.md) for what has been *verified* as
-opposed to merely built — the distinction is maintained deliberately.
-
----
-
-## Quick start
+<details>
+<summary><b>Run it locally</b></summary>
 
 ```bash
 python -m pip install -r requirements-dev.txt
 ```
 
-### 1. Get the data
-
-Olist is on Kaggle and needs a free API token — create it at
-[kaggle.com/settings](https://www.kaggle.com/settings) → API → *Create New
-Token*, save `kaggle.json` to `~/.kaggle/`, then accept the dataset terms once
-at [the dataset page](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
+Get the data: Olist is on Kaggle and needs a free API token. Create it at
+[kaggle.com/settings](https://www.kaggle.com/settings) → API → *Create New Token*, save `kaggle.json` to
+`~/.kaggle/`, then accept the terms once on [the dataset page](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce).
 
 ```bash
 python scripts/fetch_olist.py
 ```
 
-Validates every file against the column contract in `generators/olist.py`.
-Re-run any time with `--check-only`.
-
-### 2. Run the generators
+Run the generators (local output, no credentials needed):
 
 ```bash
 python generators/order_events.py --limit 2000
@@ -125,13 +150,7 @@ python generators/inventory_cdc.py --limit 2000 --delist-count 5
 python generators/dim_dumps.py --nights 6 --stride-days 120 --delete-per-night 20
 ```
 
-All three default to local output (`data/streams/`, `data/dumps/`) and need no
-credentials. Add `--sink kafka` or `--sink s3` from Session 2 onward.
-
-`inventory_cdc.py` exits non-zero if the reconciliation fails, so it doubles as
-a check.
-
-### 3. Tests and lint
+Tests and lint (same as CI):
 
 ```bash
 python -m pytest tests/
@@ -141,49 +160,11 @@ python -m pytest tests/
 python -m ruff check .
 ```
 
----
-
-## Documentation
-
-`docs/` is meant to tell the project's whole story without the chat
-history. A per-session recall log is kept alongside these but is personal
-working notes rather than project record, so it is not in the repo:
-
-| File | What it holds |
-|---|---|
-| [`decisions.md`](docs/decisions.md) | Every architectural choice **with its rejected alternative** |
-| [`incidents.md`](docs/incidents.md) | Every bug and deliberate breakage, each ending in a prevention rule |
-| [`progress.md`](docs/progress.md) | Session log — what was *verified*, not what was built; the experiment tracker |
-| [`coverage.md`](docs/coverage.md) | The plan: every Databricks / Snowflake / dbt topic with a weight and a session — built, or theory || [`runbook.md`](docs/runbook.md) | Procedures for known failure modes, including the cost emergency |
-
-Six of the incidents will be **deliberate** — patterns broken on purpose to
-observe the failure mode, each with a runnable assertion that the bug is
-present before the fix.
-
----
-
-## Cost
-
-Target **~$22 total**. Databricks runs on **Free Edition** ($0, serverless only)
-since Session 6; Confluent Basic is about $0.01/month at rest and cents per full
-produce; S3 is cents; the Snowflake trial is $0 but its **30-day calendar** is
-the binding limit. AWS budget alarms ($20/month, $2/day) exclude credits.
-
-The risk is no longer a forgotten cluster (there are none on Free Edition —
-though **a single node left running a week is ~$120, six times the budget**,
-stays true knowledge). It is resources created as side effects — a Flink pool
-from a new Confluent environment, a Snowflake warehouse without auto-suspend,
-a Snowflake Task left running.
-
-If spend looks wrong, `docs/runbook.md` has the emergency procedure.
-
----
+</details>
 
 ## Data
 
-[Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
-— ~100k orders, 2016-09 to 2018-10. Chosen for two things that cannot be faked:
-a real order status lifecycle with multiple timestamps, and customer location
-that genuinely varies across orders for the same `customer_unique_id`.
-
-`data/` is gitignored. Nothing in this repo redistributes the dataset.
+[Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce):
+about 100k orders, 2016-09 to 2018-10. Chosen because it has a real order lifecycle with several timestamps, and
+customers whose address genuinely changes between orders. `data/` is gitignored; nothing here redistributes the
+dataset.

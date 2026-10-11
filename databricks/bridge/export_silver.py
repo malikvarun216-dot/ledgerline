@@ -103,3 +103,22 @@ if MODE == "export":
     }
     print(f"new versions since the export, rows in them: {pending}")
     assert sum(pending.values()) == 0, "Silver changed rows during the export, or a range was not logged"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## The run's answer, for Airflow (Session 16)
+# MAGIC Every exported folder in the log and its row count — ALL of them, not only this run's — so the next
+# MAGIC task ("wait until RAW holds it all") also waits for an earlier run's files when this run found
+# MAGIC nothing new (a retry, a backfill). Read by `scripts/pipeline_step.py job ledgerline-bridge`.
+
+# COMMAND ----------
+
+import json  # noqa: E402 — a notebook cell, not a module header
+
+summary = {
+    f"{r.table_name}/{r.path.rstrip('/').rsplit('/', 1)[1]}": r.rows
+    for r in spark.table(EXPORT_LOG).where("path IS NOT NULL").collect()
+}
+print(f"{len(summary)} exported folders, {sum(summary.values()):,} rows")
+dbutils.notebook.exit(json.dumps(summary, sort_keys=True))

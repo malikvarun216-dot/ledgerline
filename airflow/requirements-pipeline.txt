@@ -1,0 +1,13 @@
+# The pipeline's own Python, inside the Airflow image but in a venv of its own (/opt/pipeline).
+# Pinned to the versions the laptop runs (2026-10-12), so a task behaves as the same command does
+# by hand. Kept apart from Airflow's environment: dbt and Airflow pin overlapping libraries
+# (jinja2, protobuf, sqlalchemy...) and one would break the other.
+pandas==2.2.3
+numpy==1.26.4
+boto3==1.42.90
+python-dotenv==1.2.3
+dbt-core==1.12.5
+dbt-snowflake==1.12.1
+snowflake-connector-python==4.8.0
+cryptography==50.0.1
+databricks-sdk==0.117.0

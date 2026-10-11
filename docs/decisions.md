@@ -3431,3 +3431,82 @@ recorded **on each order** (one row per `customer_id`).
   with the fallback, 99,242. The pattern is the correct one and the measured
   gain here is **85 orders**. On a dataset where people move, that gap is the
   whole point; the answer key is what makes the size of it a fact, not a claim.
+
+## dbt CI builds land in a database of their own, `LEDGERLINE_CI`, as a CI service user — production keeps "dbt creates no schemas" (Session 16)
+
+**In plain words:** slim CI builds only the dbt models a pull request changed and
+reads every unchanged model from production (`--defer`). The changed models need
+somewhere to be built that is not production, one fresh place per run. That
+place is a separate database, `LEDGERLINE_CI`, made once by SYSADMIN. A new
+service user, used only by GitHub Actions, may create schemas there and nowhere
+else. It can read production but cannot write to it. The S14 rule, that dbt never
+creates a schema in `LEDGERLINE`, stays as it was. This is the revisit S14
+scheduled for this session.
+
+- Chosen: database `LEDGERLINE_CI` (SYSADMIN-owned); role `LEDGERLINE_CI_RUNNER` with
+  `CREATE SCHEMA` on that database only, plus read on `LEDGERLINE.RAW`,
+  `STAGING`, `SNAPSHOTS`, `GOLD` (what `--defer` points at and what a clone
+  copies); user `LEDGERLINE_CI_SVC`, `TYPE = SERVICE`, key pair, secondary roles
+  off (incidents 2026-10-11). Its private key is held in GitHub's secrets and in a
+  file on the laptop (`~/.snowflake/ledgerline_ci_svc.p8`, to test CI locally), the
+  same way `ledgerline-ci` (Databricks, S12) is held: one robot per job.
+  SQL: `snowflake/08_ci_database.sql`.
+- Rejected: **`CREATE SCHEMA` on `LEDGERLINE` for TRANSFORMER**, the common dbt
+  setup. The transformer would own those schemas, and a schema's owner can grant
+  from it, so the S13 rule that only SECURITYADMIN grants would leak through dbt.
+  It would also put throwaway CI schemas beside production in one namespace,
+  where a CI run could pick a name that collides with a real schema.
+- Rejected: **slim CI from the laptop, as `LEDGERLINE_SVC`**. It needs no new
+  user and no secret, but nothing would stop a pull request from merging. A
+  "CI" that someone has to remember to run is a reminder, and S15's PII
+  incident showed what a reminder is worth.
+- Rejected: **reusing `LEDGERLINE_SVC`'s key in GitHub**. The laptop identity
+  holds LOADER and TRANSFORMER and can write production. A leaked CI secret
+  should be able to do less than that.
+- Trade-off: one more identity and one more secret to rotate. CI runs spend
+  warehouse credits on `LEDGERLINE_WH`, which is guarded by the same monitors.
+
+## Airflow runs one DAG per dims night, scheduled on the nights' own dates: land → Silver → bridge → wait for RAW → check → snapshots → dbt (Session 16)
+
+**In plain words:** until now a person ran each step of a night by hand: land the
+dump, run the Silver job, export the bridge, wait for Snowpipe, check RAW, run the
+snapshots, build dbt. Seven steps and three platforms. Airflow, running locally in
+Docker, now runs them in order, and it stops at the first failure so nothing
+downstream sees half a night. A **DAG run** is one night. Its date (Airflow's
+*logical date*) is the night's dump date, so "re-run night 3" means re-running the
+DAG for 2017-05-04 (an example date), which Airflow calls a **backfill**. Each
+step was already safe to repeat: landing is write-once, the Silver merge log knows
+which nights it has applied, the export knows what it has exported, snapshots
+take only nights they lack, and dbt's incremental models are idempotent.
+Re-running every past night should therefore change nothing, and that becomes
+the test.
+
+- Chosen: Airflow 3, LocalExecutor + Postgres in Docker Compose, the repo mounted
+  **read-only**. Every task calls code that already exists and runs from the
+  laptop (generator CLI, `snapshot_nights.py`, `run_dbt.py`), or starts a
+  Databricks job through the Jobs API **as `ledgerline-ci`** (OAuth secret, as in
+  CI). Snowflake is reached **as `LEDGERLINE_SVC`**. Schedule: an
+  `EventsTimetable` listing the landed nights' dump dates (120 days apart, in
+  business time), `max_active_runs = 1` so nights run oldest first, the same
+  rule `snapshot_nights.py` enforces for snapshots.
+- The bridge export becomes a bundle job (`ledgerline-bridge`, run as
+  `ledgerline-jobs`), so a robot can start it. Until now it was a notebook a
+  person ran with a widget.
+- "Wait for RAW" is a **sensor**: a task that re-checks a condition until it holds
+  or times out, here "RAW holds every version the export wrote". It runs in
+  *reschedule* mode, so it gives up its worker slot between checks. Snowpipe
+  loads on its own time (25 s in S15), so a fixed sleep would be either too
+  long or too short.
+- Rejected: **Databricks Workflows as the orchestrator**. This is the S6 reasoning
+  again: it would put orchestration on the free tier whose idle accounts may be
+  deleted, inside one of the systems it coordinates.
+- Rejected: **one DAG run per calendar day** (`@daily`, logical date = today).
+  Nights here are 120 business days apart and landed whenever the work happens.
+  A daily schedule would run 119 empty days out of every 120, and its date would
+  mean nothing to the data. On the nights' own dates, `{{ ds }}` is the dump date
+  the landing writes.
+- Rejected: **Celery executor / the full official compose file** (Redis, workers,
+  Flower). That needs about 4 GB more memory for nothing a single laptop needs.
+  LocalExecutor runs tasks as processes beside the scheduler.
+- Kept: the Databricks job emails and the SQL Alerts (S8/S9). They are a second
+  line of defence that does not depend on Airflow running.

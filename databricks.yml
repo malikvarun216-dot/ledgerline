@@ -61,6 +61,25 @@ resources:
               customer_unique_id: ""
               request_id: ""
 
+    # Session 16: started by Airflow (scripts/pipeline_step.py job ledgerline-bridge), never on a
+    # schedule of its own — it runs after Silver, inside the night's DAG run. Grants for the runner:
+    # databricks/bridge/runner_grants.py.
+    ledgerline_bridge:
+      name: ledgerline-bridge
+      description: >-
+        Export every Silver table's new change-feed versions to the bridge bucket as Parquet, written
+        once and logged; Snowpipe loads them into Snowflake RAW. Safe to re-run: nothing new, nothing written.
+      max_concurrent_runs: 1  # two exports at once would both read "from" = last logged version + 1
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+      tasks:
+        - task_key: export
+          notebook_task:
+            notebook_path: ./databricks/bridge/export_silver.py
+            base_parameters:
+              mode: export
+
 targets:
   free:
     default: true

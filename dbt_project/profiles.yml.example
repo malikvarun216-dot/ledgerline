@@ -21,6 +21,23 @@ ledgerline:
       query_tag: "ledgerline:dbt"
       client_session_keep_alive: false
 
+    # Slim CI (Session 16; decisions.md "dbt CI builds land in a database of their own"). Signs in
+    # as the CI service user, role LEDGERLINE_CI_RUNNER: builds ONLY in LEDGERLINE_CI, in the one
+    # schema the run names (DBT_CI_SCHEMA — generate_schema_name puts every model there), and
+    # reads production for everything it did not build (--defer). It cannot write LEDGERLINE.
+    ci:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_CI_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_CI_PRIVATE_KEY_PATH') }}"
+      role: LEDGERLINE_CI_RUNNER
+      warehouse: LEDGERLINE_WH
+      database: LEDGERLINE_CI
+      schema: "{{ env_var('DBT_CI_SCHEMA') }}"
+      threads: 4
+      query_tag: "ledgerline:dbt-ci"
+      client_session_keep_alive: false
+
     # Second target, after the Snowflake trial ends (~2026-11-10): Gold on Databricks.
     # Not used yet — filled in and verified in that session.
     # databricks:

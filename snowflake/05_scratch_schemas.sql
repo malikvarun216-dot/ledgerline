@@ -43,3 +43,17 @@ GRANT USAGE ON SCHEMA LEDGERLINE.S15 TO ROLE LEDGERLINE_TRANSFORMER;
 GRANT CREATE TABLE, CREATE VIEW ON SCHEMA LEDGERLINE.S15 TO ROLE LEDGERLINE_TRANSFORMER;
 
 SHOW GRANTS ON SCHEMA LEDGERLINE.S15;
+
+-- Session 16: the clone experiment (zero-copy clone of a table; a clone of a past state; the
+-- source dropped under its clone) builds here, as the transformer. S15 is dropped: its findings
+-- are in incidents.md / progress.md (s15_merge, 46 of 46), and nothing reads it.
+USE ROLE SYSADMIN;
+CREATE SCHEMA IF NOT EXISTS LEDGERLINE.S16
+  COMMENT = 'Session 16 experiments: zero-copy clone, clone at a past point, source dropped under a clone. Scratch.';
+DROP SCHEMA IF EXISTS LEDGERLINE.S15;
+
+USE ROLE SECURITYADMIN;
+GRANT USAGE ON SCHEMA LEDGERLINE.S16 TO ROLE LEDGERLINE_TRANSFORMER;
+GRANT CREATE TABLE, CREATE VIEW ON SCHEMA LEDGERLINE.S16 TO ROLE LEDGERLINE_TRANSFORMER;
+
+SHOW GRANTS ON SCHEMA LEDGERLINE.S16;

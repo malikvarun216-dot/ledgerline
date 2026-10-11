@@ -2436,3 +2436,46 @@ change log rebuilt in full) shows either.
    deletes.
 3. `fct_equals_rebuild` on every fact: incremental result = full rebuild from the log,
    key and version, both directions.
+
+## [2026-10-12] — Slim CI selected 18 dbt nodes for a change that did not exist: 20 files were CRLF on disk and LF in git, and dbt checksums the disk (Session 16)
+
+**In plain words:** slim CI builds only the dbt nodes whose code differs from the base
+branch. Its first dry run on the laptop, against a base with **no dbt change at all**,
+selected 18 nodes: the three SCD2 snapshots' children (`dim_customer`, `dim_product`,
+`dim_seller`, `order_items_at_sale` and their tests) and the eight
+`no_conflicting_changes` tests. Nothing in them had changed except the invisible
+characters at the end of each line. The base copy came out of git with LF (`\n`). The
+working copies had been saved by a Windows editor with CRLF (`\r\n`). dbt fingerprints a
+file's bytes, so to dbt they were different files.
+
+**How it was found:** dbt's own sub-selectors, one at a time. `state:modified.body`
+flagged the three snapshots. Every config, relation and contract selector came back
+empty. The manifests' `raw_code` fields differed only in `\n` vs `\r\n`. The tests came
+through `state:modified.macros`: the macro file `no_conflicting_changes.sql` had the same
+CRLF. Then `git ls-files --eol` listed **19** tracked files `i/lf w/crlf` (generators,
+tests, scripts, Snowflake SQL, dbt), plus `docs/progress.md` as `w/mixed` (3,466 CRLF lines).
+
+**Why nothing caught it:** `.gitattributes` pins `eol=lf` (incident 2026-09-19), but it
+only acts when git **writes** a file: on checkout, and on commit, where it normalises.
+An editor that saves CRLF afterwards is never corrected on disk. Every commit stored LF,
+so the repository, CI and `git status` all looked right. Only a tool that reads the
+working tree's bytes could see the difference, and dbt's state comparison is such a tool.
+On GitHub's Linux runner a checkout is LF, so CI would not have hit it. The laptop, where
+a red CI run is supposed to be reproduced, would have disagreed with CI.
+
+**Impact:** none on data. No CI run has been made. Locally, slim CI would have rebuilt and
+tested 18 nodes on every run: credits for nothing, and a "changed" list nobody could
+trust.
+
+**Fix (forward):** the 20 working-tree files were rewritten with LF. `git diff` shows no
+content change (git already held LF). Rerun: **0 nodes selected**, which is correct. The
+CI-only change to `generate_schema_name` (every node into the run's own schema) does not
+count as a change: dbt ignores database/schema differences that come from the target.
+
+**Prevention:**
+1. `tests/test_line_endings.py`: no tracked file may be `w/crlf` or `w/mixed` in the
+   working tree (`git ls-files --eol`). It runs on the laptop with every `pytest` and
+   failed once more after the first fix, on `progress.md`. The guard works; Git Bash's
+   `grep $'\r'` had missed that file.
+2. A tool that compares *files* (dbt state, Auto Loader, a checksum) is tested on the
+   machine where it disagrees with CI, never only where it agrees.

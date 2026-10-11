@@ -31,18 +31,24 @@ MAX_ROWS = 50
 WIDTH = 110  # widest cell printed; longer values are cut
 
 
-def connect(role: str | None = None):
+def connect(role: str | None = None, as_ci: bool = False):
+    """Sign in as the laptop's service user — or, with ``as_ci``, as the CI user (Session 16), whose
+    name and key come from SNOWFLAKE_CI_USER / SNOWFLAKE_CI_PRIVATE_KEY_PATH."""
     import snowflake.connector
 
-    required = ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PRIVATE_KEY_PATH")
+    user_var, key_var = (
+        ("SNOWFLAKE_CI_USER", "SNOWFLAKE_CI_PRIVATE_KEY_PATH") if as_ci
+        else ("SNOWFLAKE_USER", "SNOWFLAKE_PRIVATE_KEY_PATH")
+    )
+    required = ("SNOWFLAKE_ACCOUNT", user_var, key_var)
     missing = [n for n in required if not os.environ.get(n)]
     if missing:
         raise SystemExit(f"missing in .env: {', '.join(missing)}")
     return snowflake.connector.connect(
         account=os.environ["SNOWFLAKE_ACCOUNT"],
-        user=os.environ["SNOWFLAKE_USER"],
+        user=os.environ[user_var],
         authenticator="SNOWFLAKE_JWT",
-        private_key_file=os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"],
+        private_key_file=os.path.expanduser(os.environ[key_var]),
         role=role or os.environ.get("SNOWFLAKE_ROLE") or None,
         warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE") or None,
         database=os.environ.get("SNOWFLAKE_DATABASE") or None,

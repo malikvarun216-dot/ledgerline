@@ -1,0 +1,82 @@
+name: dbt-ci
+
+# Session 16 — decisions.md "dbt CI builds land in a database of their own".
+#
+#   parse     every push and pull request: the dbt project must parse (refs resolve, YAML valid,
+#             contracts well-formed). No Snowflake connection, no secret.
+#   slim-ci   pull requests only: build and test ONLY what the PR changed (state:modified+), in a
+#             throwaway schema LEDGERLINE_CI.PR_<number>_<attempt>, reading everything unchanged
+#             from production (--defer). Signs in as LEDGERLINE_CI_SVC, which cannot write production.
+#             The schema is dropped at the end, pass or fail. Same script as on the laptop:
+#             python scripts/slim_ci.py --base origin/dev
+
+on:
+  push:
+    branches: [dev, main]
+    paths: ["dbt_project/**", "scripts/slim_ci.py", "scripts/run_dbt.py", ".github/workflows/dbt_ci.yml"]
+  pull_request:
+    branches: [dev, main]
+    paths: ["dbt_project/**", "scripts/slim_ci.py", "scripts/run_dbt.py", ".github/workflows/dbt_ci.yml"]
+
+concurrency:
+  group: dbt-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the laptop's versions (2026-10-12), like airflow/requirements-pipeline.txt.
+  DBT_INSTALL: "dbt-core==1.12.5 dbt-snowflake==1.12.1 python-dotenv==1.2.3"
+
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # dbt renders the profile to parse, but parse opens no connection: placeholders suffice.
+      SNOWFLAKE_ACCOUNT: parse-only
+      SNOWFLAKE_USER: parse-only
+      SNOWFLAKE_PRIVATE_KEY_PATH: /dev/null
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install ${{ env.DBT_INSTALL }}
+      - run: cp dbt_project/profiles.yml.example dbt_project/profiles.yml
+      - name: dbt parse
+        run: python scripts/run_dbt.py parse --target snowflake
+
+  slim-ci:
+    # Never for a fork's pull request: its code is unreviewed and it gets no secrets anyway.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: parse
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_CI_USER: LEDGERLINE_CI_SVC
+      SNOWFLAKE_CI_PRIVATE_KEY_PATH: ${{ runner.temp }}/ci_svc.p8
+      # The production target is only PARSED (base branch's manifest); these are never used to sign in.
+      SNOWFLAKE_USER: parse-only
+      SNOWFLAKE_PRIVATE_KEY_PATH: /dev/null
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the base branch must be present: production's manifest is parsed from it
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install ${{ env.DBT_INSTALL }}
+      - run: cp dbt_project/profiles.yml.example dbt_project/profiles.yml
+      - name: CI key (secret -> file readable by this user only)
+        env:
+          KEY: ${{ secrets.SNOWFLAKE_CI_PRIVATE_KEY }}   # via env, never pasted into the script text
+        run: |
+          umask 077
+          printf '%s\n' "$KEY" > "$SNOWFLAKE_CI_PRIVATE_KEY_PATH"
+      - name: Slim CI
+        run: >-
+          python scripts/slim_ci.py
+          --base origin/${{ github.base_ref }}
+          --schema PR_${{ github.event.pull_request.number }}_${{ github.run_attempt }}

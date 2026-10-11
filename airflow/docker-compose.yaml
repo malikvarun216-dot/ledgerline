@@ -1,0 +1,115 @@
+# ledgerline — Airflow 3, local, in Docker (Session 16; decisions.md "Airflow runs one DAG per
+# dims night").
+#
+#   docker compose -f airflow/docker-compose.yaml up -d --build      # start (first time: builds)
+#   http://localhost:8080   user admin / password admin  (bound to this machine only)
+#   docker compose -f airflow/docker-compose.yaml down               # stop (keeps the database)
+#
+# Trimmed from Airflow's official compose file: LocalExecutor (tasks run as processes beside the
+# scheduler) instead of Celery + Redis + workers, which a laptop does not need. Five services:
+#   postgres        Airflow's own metadata database (DAG runs, task states, XComs)
+#   airflow-init    one-off: migrates the database and creates the admin user, then exits
+#   api-server      the web UI and the API tasks report their state to (Airflow 3)
+#   scheduler       decides what runs when, and runs it (LocalExecutor)
+#   dag-processor   parses the DAG files (a separate process since Airflow 3)
+#
+# The repository is mounted READ-ONLY at /opt/ledgerline: a task can run the project's scripts but
+# cannot change them. dbt writes its target/ and logs/ to /tmp instead. Credentials come from the
+# project's .env (the same ones the laptop uses); the Snowflake key files from ~/.snowflake, also
+# read-only, with their paths rewritten for the container.
+
+x-airflow-common: &airflow-common
+  build: .
+  image: ledgerline-airflow:3.1.0
+  env_file:
+    - ../.env
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # Every component must sign and check task tokens with the SAME secret. Local only (the UI is
+    # bound to 127.0.0.1), so a fixed value in git is acceptable; never reuse it anywhere else.
+    AIRFLOW__API_AUTH__JWT_SECRET: ledgerline-local-airflow-only
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # The pipeline's view of the world, inside the container:
+    LEDGERLINE_ROOT: /opt/ledgerline
+    PIPELINE_PYTHON: /opt/pipeline/bin/python
+    SNOWFLAKE_PRIVATE_KEY_PATH: /opt/keys/ledgerline_svc.p8
+    SNOWFLAKE_CI_PRIVATE_KEY_PATH: /opt/keys/ledgerline_ci_svc.p8
+    DBT_TARGET_PATH: /tmp/dbt/target
+    DBT_LOG_PATH: /tmp/dbt/logs
+    PYTHONDONTWRITEBYTECODE: "1"
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ..:/opt/ledgerline:ro
+    - ${USERPROFILE:-~}/.snowflake:/opt/keys:ro
+  depends_on: &airflow-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db:

@@ -1,6 +1,9 @@
 """Make the key pair the laptop's Snowflake service user signs in with. Run once, by the human.
 
     python scripts/sf_keypair.py
+    python scripts/sf_keypair.py --user LEDGERLINE_CI_SVC --out ~/.snowflake/ledgerline_ci_svc.p8
+
+The second form (Session 16) makes the CI user's key: same script, another identity, another file.
 
 Why a key pair (decisions.md, Session 13 "Laptop scripts reach Snowflake as a service user"):
 the scripts need to sign in without a person — no password to type, no MFA prompt. Snowflake
@@ -36,7 +39,9 @@ USER = "LEDGERLINE_SVC"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="where the private key goes")
+    parser.add_argument("--user", default=USER, help="the Snowflake user the ALTER USER line names")
     args = parser.parse_args(argv)
+    args.out = args.out.expanduser()  # PowerShell passes "~" to a program unexpanded
 
     if args.out.exists():
         print(f"refused: {args.out} already exists. Delete it on purpose, or pass --out for a new one.")
@@ -62,12 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("Paste this into the Snowflake worksheet (it is the PUBLIC key):")
     print()
-    print(f"ALTER USER {USER} SET RSA_PUBLIC_KEY = '{public_b64}';")
+    print(f"ALTER USER {args.user} SET RSA_PUBLIC_KEY = '{public_b64}';")
     print()
-    print(f"Expected fingerprint (DESC USER {USER} -> RSA_PUBLIC_KEY_FP): {fingerprint}")
+    print(f"Expected fingerprint (DESC USER {args.user} -> RSA_PUBLIC_KEY_FP): {fingerprint}")
     print()
     print("Then add to .env:")
-    print(f"SNOWFLAKE_PRIVATE_KEY_PATH={args.out}")
+    var = "SNOWFLAKE_PRIVATE_KEY_PATH" if args.user == USER else "SNOWFLAKE_CI_PRIVATE_KEY_PATH"
+    print(f"{var}={args.out}")
     return 0
 
 
