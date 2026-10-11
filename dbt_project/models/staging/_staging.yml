@@ -1,0 +1,64 @@
+version: 2
+
+# Staging = RAW.SILVER_CHANGES split by table and typed, one view per Silver table. Every change
+# row is kept (inserts, update post-images, deletes); nothing is picked or filtered here.
+# Common columns: change_type, commit_version, commit_ts (Databricks commit time — NOT business
+# time), night (1, 2, 3 ... over the table's versions), source_file, source_row, loaded_at.
+
+models:
+  - name: stg_customer
+    description: Customer (one person = customer_unique_id), every night's change.
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['customer_unique_id']}}
+    columns:
+      - name: customer_unique_id
+        data_tests: [not_null]
+      - name: dim_updated_at
+        description: Business time — when this version became true in Olist. Never the run time.
+        data_tests: [not_null]
+
+  - name: stg_product
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['product_id']}}
+    columns:
+      - name: product_id
+        data_tests: [not_null]
+      - name: dim_updated_at
+        data_tests: [not_null]
+
+  - name: stg_seller
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['seller_id']}}
+    columns:
+      - name: seller_id
+        data_tests: [not_null]
+      - name: dim_updated_at
+        data_tests: [not_null]
+
+  - name: stg_orders
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['order_id']}}
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+
+  - name: stg_order_items
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['order_id', 'order_item_id']}}
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+
+  - name: stg_inventory
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['sku_key']}}
+    columns:
+      - name: sku_key
+        data_tests: [not_null]
+
+  - name: stg_inventory_events
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['event_id']}}
+    columns:
+      - name: event_id
+        data_tests: [not_null]

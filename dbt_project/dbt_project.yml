@@ -1,0 +1,49 @@
+# ledgerline — dbt: Gold on Snowflake (Session 14), Databricks as the second target after the trial.
+#
+# Run through the wrapper, which reads .env and points dbt at this folder:
+#   python scripts/run_dbt.py build
+#   python scripts/run_dbt.py snapshot --vars "{as_of_night: 3}"
+#
+# Layers (schemas made by SYSADMIN in snowflake/06_gold_schemas.sql — dbt creates tables, never
+# schemas; decisions.md, Session 14):
+#   STAGING    one view per Silver table: RAW.SILVER_CHANGES typed, every change kept
+#   SNAPSHOTS  dbt snapshots: the SCD2 history of customer, product, seller
+#   GOLD       what analysts read: current state and the SCD2 dimensions (contracts enforced)
+
+name: ledgerline
+version: "0.14.0"
+config-version: 2
+profile: ledgerline
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # exp_05 / rebuilds: replay the dimension nights one at a time. Night n = the n-th change-feed
+  # version of that Silver table (each dims night is one MERGE = one version). Unset = everything.
+  as_of_night: null
+
+models:
+  ledgerline:
+    +persist_docs: {relation: true, columns: true}
+    staging:
+      +schema: staging
+      +materialized: view
+    gold:
+      +schema: gold
+      +materialized: table
+
+snapshots:
+  ledgerline:
+    +schema: snapshots
+
+tests:
+  ledgerline:
+    +severity: error
+
+query-comment:
+  comment: "ledgerline dbt {{ node.unique_id if node else 'operation' }}"
+  append: true

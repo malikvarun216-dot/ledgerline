@@ -16,9 +16,15 @@ ALTER USER LEDGERLINE_SVC SET
   DEFAULT_WAREHOUSE = LEDGERLINE_WH
   DEFAULT_NAMESPACE = LEDGERLINE.RAW;
 
+-- One role per session (Session 14, incidents.md 2026-10-11 "Every Snowflake session ... BOTH roles").
+-- A user created since 2024 defaults to DEFAULT_SECONDARY_ROLES = ('ALL'): every role it holds is
+-- active in every session, whatever role it signed in with. Then dbt "as the transformer" could also
+-- write RAW as the loader. Empty = the session has exactly the role it chose.
+ALTER USER LEDGERLINE_SVC SET DEFAULT_SECONDARY_ROLES = ();
+
 GRANT ROLE LEDGERLINE_LOADER      TO USER LEDGERLINE_SVC;
 GRANT ROLE LEDGERLINE_TRANSFORMER TO USER LEDGERLINE_SVC;
 
 -- Check: TYPE = SERVICE, HAS_PASSWORD = false; after the ALTER USER ... RSA_PUBLIC_KEY line,
--- RSA_PUBLIC_KEY_FP equals the fingerprint the script printed.
+-- RSA_PUBLIC_KEY_FP equals the fingerprint the script printed; DEFAULT_SECONDARY_ROLES = [].
 DESC USER LEDGERLINE_SVC;

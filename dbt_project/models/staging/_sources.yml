@@ -1,0 +1,33 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      The Databricks bridge, as Snowpipe loaded it (snowflake/11_raw_landing.sql). One VARIANT row
+      per Silver change; never written by dbt.
+    database: LEDGERLINE
+    schema: RAW
+    tables:
+      - name: silver_changes
+        identifier: SILVER_CHANGES
+        description: >
+          Each Parquet row whole (RECORD) with the Silver table it came from (TABLE_NAME), the file
+          and row number, and when Snowpipe loaded it. Loaded only by SILVER_CHANGES_PIPE.
+        # Freshness: how long since Snowpipe last loaded anything. The bridge export is run by hand
+        # until Airflow schedules it (S15-S16), so this WILL warn between sessions — that is the
+        # honest reading, not a reason to loosen it. Error = a week with nothing new.
+        config:
+          loaded_at_field: LOADED_AT
+          freshness:
+            warn_after: {count: 2, period: day}
+            error_after: {count: 7, period: day}
+        columns:
+          - name: TABLE_NAME
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['customer', 'product', 'seller', 'orders', 'order_items', 'inventory', 'inventory_events']
+          - name: RECORD
+            data_tests:
+              - not_null

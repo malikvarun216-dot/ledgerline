@@ -1,0 +1,33 @@
+# ledgerline — dbt connection profile. Copy to dbt_project/profiles.yml (gitignored).
+# It holds no secret: every value comes from .env, which scripts/run_dbt.py loads before dbt starts.
+#
+#   Copy-Item dbt_project/profiles.yml.example dbt_project/profiles.yml
+
+ledgerline:
+  target: snowflake
+  outputs:
+    # Primary target. Signs in as the key-pair service user (no password, no MFA), as the
+    # TRANSFORMER role only: it reads RAW and builds STAGING / SNAPSHOTS / GOLD, nothing else.
+    snowflake:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: LEDGERLINE_TRANSFORMER
+      warehouse: LEDGERLINE_WH
+      database: LEDGERLINE
+      schema: STAGING          # default only; every folder sets its own schema in dbt_project.yml
+      threads: 4
+      query_tag: "ledgerline:dbt"
+      client_session_keep_alive: false
+
+    # Second target, after the Snowflake trial ends (~2026-11-10): Gold on Databricks.
+    # Not used yet — filled in and verified in that session.
+    # databricks:
+    #   type: databricks
+    #   host: "{{ env_var('DATABRICKS_HOST') }}"
+    #   http_path: "{{ env_var('DATABRICKS_SQL_HTTP_PATH') }}"
+    #   token: "{{ env_var('DATABRICKS_TOKEN') }}"
+    #   catalog: workspace
+    #   schema: gold
+    #   threads: 4

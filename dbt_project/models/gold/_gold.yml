@@ -1,0 +1,184 @@
+version: 2
+
+# GOLD is what the analyst role reads (future grants, snowflake/06_gold_schemas.sql). Every model
+# here has an ENFORCED CONTRACT: dbt checks the SQL's columns and types against this file before
+# it builds, and refuses the build if they differ — a renamed or retyped column cannot reach an
+# analyst by accident. Staging has no contracts: it is ours, and changes with Silver.
+
+models:
+  - name: customer_current
+    description: One row per person (customer_unique_id) as Silver holds them now.
+    config:
+      contract: {enforced: true}
+    columns:
+      - name: customer_unique_id
+        data_type: varchar
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - {name: customer_zip_code_prefix, data_type: varchar}
+      - {name: customer_city, data_type: varchar}
+      - {name: customer_state, data_type: varchar}
+      - name: dim_updated_at
+        data_type: timestamp_ntz
+        description: Business time — when this version became true in Olist.
+        constraints: [{type: not_null}]
+      - name: _first_seen_dump_date
+        data_type: date
+      - name: _last_changed_dump_date
+        data_type: date
+      - name: silver_version
+        data_type: number
+        description: The Silver change-feed version this row comes from.
+      - name: silver_night
+        data_type: number
+        description: The n-th change-feed version of the table (for the dimensions, the n-th dump).
+
+  - name: product_current
+    config:
+      contract: {enforced: true}
+    columns:
+      - name: product_id
+        data_type: varchar
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - {name: product_category_name, data_type: varchar}
+      - {name: product_weight_g, data_type: number}
+      - {name: product_length_cm, data_type: number}
+      - {name: product_height_cm, data_type: number}
+      - {name: product_width_cm, data_type: number}
+      - {name: product_photos_qty, data_type: number}
+      - name: dim_updated_at
+        data_type: timestamp_ntz
+        description: Business time — when this version became true in Olist.
+        constraints: [{type: not_null}]
+      - name: _first_seen_dump_date
+        data_type: date
+      - name: _last_changed_dump_date
+        data_type: date
+      - name: silver_version
+        data_type: number
+        description: The Silver change-feed version this row comes from.
+      - name: silver_night
+        data_type: number
+        description: The n-th change-feed version of the table (for the dimensions, the n-th dump).
+
+  - name: seller_current
+    config:
+      contract: {enforced: true}
+    columns:
+      - name: seller_id
+        data_type: varchar
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - {name: seller_zip_code_prefix, data_type: varchar}
+      - {name: seller_city, data_type: varchar}
+      - {name: seller_state, data_type: varchar}
+      - name: dim_updated_at
+        data_type: timestamp_ntz
+        description: Business time — when this version became true in Olist.
+        constraints: [{type: not_null}]
+      - name: _first_seen_dump_date
+        data_type: date
+      - name: _last_changed_dump_date
+        data_type: date
+      - name: silver_version
+        data_type: number
+        description: The Silver change-feed version this row comes from.
+      - name: silver_night
+        data_type: number
+        description: The n-th change-feed version of the table (for the dimensions, the n-th dump).
+
+  - name: inventory_current
+    config:
+      contract: {enforced: true}
+    columns:
+      - name: sku_key
+        data_type: varchar
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - {name: product_id, data_type: varchar}
+      - {name: seller_id, data_type: varchar}
+      - name: stock_qty
+        data_type: number
+        data_tests:
+          - not_null
+      - {name: seq, data_type: number}
+      - {name: _event_ts, data_type: timestamp_ntz}
+      - {name: silver_version, data_type: number}
+      - {name: silver_night, data_type: number}
+
+  - name: dim_customer
+    description: SCD2 customer from the customer_history snapshot. Point in time = valid_from <= T < valid_to.
+    config:
+      contract: {enforced: true}
+    data_tests:
+      - scd2_shape: {arguments: {key: customer_unique_id}}
+    columns:
+      - name: customer_unique_id
+        data_type: varchar
+        data_tests: [not_null]
+      - {name: customer_zip_code_prefix, data_type: varchar}
+      - {name: customer_city, data_type: varchar}
+      - {name: customer_state, data_type: varchar}
+      - {name: valid_from, data_type: timestamp_ntz}
+      - {name: valid_to, data_type: timestamp_ntz}
+      - {name: is_current, data_type: boolean}
+      - {name: silver_night, data_type: number}
+
+  - name: dim_product
+    description: SCD2 product from the product_history snapshot. Point in time = valid_from <= T < valid_to.
+    config:
+      contract: {enforced: true}
+    data_tests:
+      - scd2_shape: {arguments: {key: product_id}}
+    columns:
+      - name: product_id
+        data_type: varchar
+        data_tests: [not_null]
+      - {name: product_category_name, data_type: varchar}
+      - {name: product_weight_g, data_type: number}
+      - {name: product_length_cm, data_type: number}
+      - {name: product_height_cm, data_type: number}
+      - {name: product_width_cm, data_type: number}
+      - {name: product_photos_qty, data_type: number}
+      - {name: valid_from, data_type: timestamp_ntz}
+      - {name: valid_to, data_type: timestamp_ntz}
+      - {name: is_current, data_type: boolean}
+      - {name: silver_night, data_type: number}
+
+  - name: dim_seller
+    description: SCD2 seller from the seller_history snapshot. Point in time = valid_from <= T < valid_to.
+    config:
+      contract: {enforced: true}
+    data_tests:
+      - scd2_shape: {arguments: {key: seller_id}}
+    columns:
+      - name: seller_id
+        data_type: varchar
+        data_tests: [not_null]
+      - {name: seller_zip_code_prefix, data_type: varchar}
+      - {name: seller_city, data_type: varchar}
+      - {name: seller_state, data_type: varchar}
+      - {name: valid_from, data_type: timestamp_ntz}
+      - {name: valid_to, data_type: timestamp_ntz}
+      - {name: is_current, data_type: boolean}
+      - {name: silver_night, data_type: number}
+
+unit_tests:
+  # B68, as a test: the newest change wins, a key whose newest change is a delete is gone, and a
+  # change row loaded twice is one row. Filter-deletes-first would bring C2 back at its insert.
+  - name: current_state_newest_change_then_drop_deletes
+    model: customer_current
+    given:
+      - input: ref('stg_customer')
+        rows:
+          - {customer_unique_id: C1, customer_city: campinas,       change_type: insert,           commit_version: 1, night: 1, dim_updated_at: "2016-08-01 10:00:00"}
+          - {customer_unique_id: C1, customer_city: sao paulo,      change_type: update_postimage, commit_version: 4, night: 4, dim_updated_at: "2017-07-01 10:00:00"}
+          - {customer_unique_id: C2, customer_city: curitiba,       change_type: insert,           commit_version: 2, night: 2, dim_updated_at: "2016-12-01 10:00:00"}
+          - {customer_unique_id: C2, customer_city: curitiba,       change_type: delete,           commit_version: 5, night: 5, dim_updated_at: "2016-12-01 10:00:00"}
+          - {customer_unique_id: C3, customer_city: rio de janeiro, change_type: insert,           commit_version: 3, night: 3, dim_updated_at: "2017-03-01 10:00:00"}
+          - {customer_unique_id: C3, customer_city: rio de janeiro, change_type: insert,           commit_version: 3, night: 3, dim_updated_at: "2017-03-01 10:00:00"}
+    expect:
+      rows:
+        - {customer_unique_id: C1, customer_city: sao paulo,      silver_version: 4, silver_night: 4}
+        - {customer_unique_id: C3, customer_city: rio de janeiro, silver_version: 3, silver_night: 3}

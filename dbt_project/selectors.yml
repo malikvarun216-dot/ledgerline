@@ -1,0 +1,15 @@
+# A bare `dbt build` / `dbt snapshot` must never run the dimension snapshots: they run one Silver
+# night per run, oldest first, through scripts/snapshot_nights.py (decisions.md, Session 14).
+# The default selector applies to every command given no --select; an explicit --select wins.
+selectors:
+  - name: everything_but_snapshots
+    default: true
+    definition:
+      union:
+        - method: fqn
+          value: "*"
+        - method: source          # fqn does not reach sources: without this, `source freshness`
+          value: "*"              # found nothing to do (Session 14)
+        - exclude:
+            - method: resource_type
+              value: snapshot
