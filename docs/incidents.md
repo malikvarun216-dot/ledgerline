@@ -2186,3 +2186,58 @@ at the stage (`orders/v…/part….parquet`). It starts at the bucket
   4. **Never `ALTER PIPE … REFRESH` a re-created pipe over files it may already
      have loaded**; duplicates in RAW are detected by `(SOURCE_FILE, SOURCE_ROW)`
      appearing twice (same check file).
+
+## [2026-10-11] — DELIBERATE (Session 13, `snowflake/experiments/s13_loading.py`): how Snowflake decides "already loaded" — three of 21 predictions wrong
+
+**In plain words:** five experiments on Snowflake's loading, each prediction
+written into the script before it ran. The surprise: Snowflake's memory of
+loaded files is about **the upload, not the content** — the same bytes uploaded
+again under the same name were loaded again — and the memory of a pipe and of a
+`COPY` is **one-way**: the pipe seemed to respect what `COPY` loaded, `COPY`
+ignored what the pipe loaded. Everything ran in the scratch schema
+`LEDGERLINE.S13`; production RAW was only read through its stage.
+
+| part | question | predicted | seen |
+|---|---|---|---|
+| A | the bridge's seller file `COPY`'d twice; then `FORCE` | skipped; loaded twice | ✓ `Copy executed with 0 files processed.`; ✓ 3,370 → 6,740 |
+| B1 | a CSV `PUT` to an internal stage and loaded | 3 rows | ✓ |
+| **B2** | **the same bytes `PUT` again (`OVERWRITE`), same name** | skipped | **loaded again — 6 rows**; `PUT` said `UPLOADED`, `LIST` shows the same md5 |
+| **B3** | the file with one value corrected, same name | loaded again | loaded again — 9 rows (the prediction's count assumed B2 skipped) |
+| C | one row with `ABC` in a NUMBER column: `VALIDATION_MODE`; default; `SKIP_FILE`; `CONTINUE`; `CONTINUE` again | 1 error, 0 rows; refused; `LOAD_FAILED`; `PARTIALLY_LOADED` 3; skipped | ✓ all five (`100038 Numeric value 'ABC' is not recognized`) |
+| D1 | a pipe loads the file, then `COPY` of the same file | `COPY` loads it again | ✓ 6,740 — two `Loaded` lines, one with `PIPE_NAME = P_D1`, one without |
+| **D2** | **`COPY` loads the file, then a pipe `REFRESH`** | the pipe loads it again | **the pipe loaded nothing** in 120 s; no pipe line in `COPY_HISTORY` (D1's pipe took 30 s) |
+| E | `PRIMARY KEY` with a duplicate; MERGE with two different / two identical source rows for an existing key; two for a new key | accepted; refused; refused; inserted twice | ✓ `100090 Duplicate row detected during DML action` for both refusals; ID 3 inserted twice, no error |
+
+- Why B was mispredicted: I assumed the load history is keyed on the file's
+  content (its checksum). It is keyed on the **staged file**: a fresh upload of a
+  name — even byte-identical — is a new file to `COPY`. Not determined: whether
+  the key is the new last-modified time or the new ciphertext (`PUT`
+  encrypts each upload with a fresh key). **Not tested on the external S3
+  stage** — the bridge itself — where a re-written object keeps its ETag only
+  if its bytes are identical.
+- Why D2 was mispredicted: I assumed the two memories are fully separate. They
+  are separate in one direction only — **inferred**, because "the pipe loaded
+  nothing" is not a recorded skip. Consistent with the pipe checking the
+  table's load metadata before loading.
+- The comparison that matters: **Auto Loader and Snowflake fail in opposite
+  directions on a re-delivered file.** Auto Loader (default `allowOverwrites =
+  false`) skipped a corrected re-delivery — the correction was **lost**
+  silently (Drill 1). Snowflake `COPY` loads a re-staged file again — the rows are
+  **duplicated** silently. Neither raises an error.
+- Same on both platforms: a primary key is not enforced; a MERGE refuses
+  duplicate source rows that match one existing row, and **inserts duplicate
+  source rows for a new key twice** (Delta exp_04 A1/A2).
+- Prevention rules:
+  1. **A loader's "already loaded" memory is never the only guard against
+     duplicates.** RAW is append-only by design; the layer that applies changes
+     is idempotent by `(table, key, _commit_version)` (decisions.md, the bridge
+     export entry), and `12_check_raw.sql` check C counts any
+     `(SOURCE_FILE, SOURCE_ROW)` loaded twice.
+  2. **RAW is loaded by its pipe only — never by `COPY`** (D1: a `COPY` reloads
+     every file the pipe loaded). Already the decision; now measured.
+  3. **Dedup the source of every MERGE on its key**, on Snowflake as on Delta
+     (E4) — Gold's staging models carry the `row_number() = 1` step.
+  4. **The bridge never re-writes a file under an existing name** (export mode
+     `error`): a re-delivery is a new version range, so the question B asks
+     never reaches production. Re-delivery on the external stage stays an open
+     test (Drill 3).

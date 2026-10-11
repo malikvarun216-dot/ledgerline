@@ -71,13 +71,13 @@ session · **X** skip (no honest use here).
 
 | Topic | Weight | Status |
 |---|---|---|
-| Warehouses: size, auto-suspend, resource monitors | ★★★ | B S13 (day one) |
-| Roles: hierarchy, custom roles, future grants, managed-access schemas | ★★★ | B S13 (day one) |
-| Stages, file formats, `COPY INTO` options (`ON_ERROR`, `VALIDATION_MODE`) | ★★★ | B S13 |
-| `COPY INTO` load history — an already-loaded file is skipped (64 days); and a re-delivered file with **new content**? (compare with Auto Loader's Drill 1 skip) | ★★★ | B S13 |
-| Snowpipe auto-ingest vs `COPY` (14-day history; needs an S3 event notification on the bucket) | ★★★ | B S13 |
-| `VARIANT` / `FLATTEN` — land raw, then type | ★★★ | B S13 |
-| Primary keys are not enforced; MERGE with duplicate source rows (vs Delta, which refuses only duplicates matching an *existing* row — exp_04 A1/A2) | ★★★ | B S13–S14 |
+| Warehouses: size, auto-suspend, resource monitors | ★★★ | ✓ S13 (`LEDGERLINE_WH` XSMALL 60 s; account monitor 40 credits/month + daily 4; statement caps; the trial's 3 side-effect warehouses guarded, query acceleration found on and turned off; `PUBLIC`'s Cortex / GPU grants revoked) |
+| Roles: hierarchy, custom roles, future grants, managed-access schemas | ★★★ | ✓ S13 (LOADER / TRANSFORMER > ANALYST under SYSADMIN, each system role in its own job; `RAW` managed access; `SELECT ON FUTURE TABLES`; key-pair `TYPE = SERVICE` user) |
+| Stages, file formats, `COPY INTO` options (`ON_ERROR`, `VALIDATION_MODE`) | ★★★ | ✓ S13 (external stage via storage integration; internal stage + `PUT`; `VALIDATION_MODE = RETURN_ERRORS`, `ABORT_STATEMENT`, `SKIP_FILE`, `CONTINUE` on one bad row — `s13_loading` C) |
+| `COPY INTO` load history — an already-loaded file is skipped (64 days); and a re-delivered file with **new content**? (compare with Auto Loader's Drill 1 skip) | ★★★ | ✓ S13 (same staged file skipped, `FORCE` reloads; a **re-`PUT` of identical bytes is loaded again** — the opposite failure to Auto Loader's; on the external S3 stage: open, Drill 3) |
+| Snowpipe auto-ingest vs `COPY` (14-day history; needs an S3 event notification on the bucket) | ★★★ | ✓ S13 (`SILVER_CHANGES_PIPE` loaded the bridge's 7 files, 504,039 rows, by `REFRESH`; S3 notification set, same region; pipe-then-COPY reloads, COPY-then-pipe did not) — **auto-ingest firing on a new file: carried to the next export** |
+| `VARIANT` / `FLATTEN` — land raw, then type | ★★★ | ✓ S13 for `VARIANT` (one RAW table, Parquet rows whole; timestamps arrive typed and exact — answer key matched); `FLATTEN` B S14 (staging's schema-drift check: `FLATTEN(OBJECT_KEYS(RECORD))`) |
+| Primary keys are not enforced; MERGE with duplicate source rows (vs Delta, which refuses only duplicates matching an *existing* row — exp_04 A1/A2) | ★★★ | ✓ S13 (`s13_loading` E: duplicate PK accepted; two source rows — even identical — for an existing key refused `100090`; for a new key inserted twice, silently — same as Delta) |
 | MERGE + anti-join delete (no `NOT MATCHED BY SOURCE` in Snowflake) | ★★★ | B Gold (S14–S15) |
 | Zero-copy clone, CI gating (write-audit-publish) | ★★★ | B S16 |
 | Time Travel, `UNDROP` | ★★★ | B S18 |
@@ -127,10 +127,10 @@ session · **X** skip (no honest use here).
 | Topic | Weight | Status |
 |---|---|---|
 | Replication / failover (needs a second account) | ★★ | T S18 |
-| SSO, SCIM, network policies (a wrong policy locks you out) | ★★ | T S13 |
-| Snowpipe Streaming + Kafka connector (needs Kafka Connect; costs money on Confluent) | ★★ | T S13 |
+| SSO, SCIM, network policies (a wrong policy locks you out) | ★★ | T ✓ S13 |
+| Snowpipe Streaming + Kafka connector (needs Kafka Connect; costs money on Confluent) | ★★ | T ✓ S13 |
 | Fail-safe recovery (only Snowflake support can do it) | ★ | T S18 |
-| PrivateLink, Tri-Secret Secure (Business Critical edition) | ★ | T S13 |
+| PrivateLink, Tri-Secret Secure (Business Critical edition) | ★ | T ✓ S13 |
 | Hybrid tables, Cortex AI | ★ | T S19 |
 
 **No honest use in this project.**
@@ -172,7 +172,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S12** ✓ | GDPR, lakehouse half (synthetic PII, pseudonymise, erasure) + **UC grants, column masks, row filters, tags, Asset Bundles from CI** (all B?) — done 2026-10-06: every B? verified on Free Edition and built; physical delete vs crypto-shredding measured; the erasure racing the MERGE | account console; networking; Terraform; customer-managed keys |
 | **S12b** ✓ (kept, done 2026-10-06) | **ML point-in-time features, MLflow, model in UC** — all three verified on Free Edition and built; leakage measured | — |
 | — | **Gate: every Databricks-only row above done before the Snowflake trial starts** | — |
-| **S13** | Snowflake day one: Enterprise trial, cost guards (auto-suspend, resource monitor), **roles**; bridge (CDF export incl. `delete` rows → Parquet → stage → `COPY INTO`); **load-history test, Snowpipe beside `COPY`, `VARIANT` first, PK demo** | SSO / SCIM / network policies; Snowpipe Streaming; PrivateLink |
+| **S13** ✓ (2026-10-11) | Snowflake day one: Enterprise trial, cost guards (auto-suspend, resource monitor), **roles**; bridge (CDF export incl. `delete` rows → Parquet → stage → `COPY INTO`); **load-history test, Snowpipe beside `COPY`, `VARIANT` first, PK demo** | SSO / SCIM / network policies; Snowpipe Streaming; PrivateLink |
 | **S14–S16** | dbt snapshot (**exp_05**, `hard_deletes` decided), incremental, **tests / unit tests / contracts / freshness**, MERGE + anti-join, zero-copy clone CI + **slim CI + Delta clone**, Airflow DAG with backfill | disaster recovery |
 | **S17** | **exp_06** late arrival + lookback, **dbt microbatch** | — |
 | **S18** | GDPR, Snowflake half: masking + **row access + tag-based masking**, Time Travel / `UNDROP`, erasure | replication / failover; Fail-safe |

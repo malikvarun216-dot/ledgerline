@@ -3188,3 +3188,123 @@ the next contact night; the 30-day S3 expiry (~2026-11-05); `ledgerline-ci`'s
 secret (~2027-01-04); the ~2026-10-27 Bronze-files deadline; the Gold-window
 items; Drill 3's list; dashboard; clean-up (also drop `workspace.s12` after
 2026-10-13).
+
+---
+
+## Session 13 — Snowflake day one, and Silver's changes reach it through a bridge of their own
+Date: 2026-10-11
+
+**In plain words:** the Snowflake trial exists — Enterprise, in Ohio beside
+Databricks because the sign-up form offered no Mumbai — with every cost guard
+set before the first query, roles that each do one job, and a key-pair service
+user so the laptop runs Snowflake SQL from git. Then the bridge: Databricks
+exports each Silver table's change feed (deletes included) as Parquet to a new
+Ohio bucket; Snowpipe loads it into one `VARIANT` landing table. Rebuilt inside
+Snowflake from those rows, Silver orders match Session 10's answer key to the
+second. One mistake on the way (every landed row labelled `silver`), fixed
+forward; five loading experiments, three predictions wrong.
+
+### Scope, as it actually ran
+Planned (`coverage.md`, S13): trial + edition, cost guards, roles, the bridge,
+load-history test, Snowpipe beside `COPY`, `VARIANT` first, PK demo; theory
+hooks SSO / SCIM / network policies, Snowpipe Streaming, PrivateLink. **All
+built or taught**, except **Snowpipe's auto-ingest firing on a new file** (set
+up, not yet seen — no new Silver data today) and **`FLATTEN`** (moved to S14
+with an honest use). Added: the region decision; query acceleration and
+`PUBLIC`'s serverless grants found and closed; a second bucket and two IAM roles.
+
+### Built
+- `snowflake/00`–`05` (account facts, cost guards, roles, service user,
+  storage integration, scratch schema — run by the human as ACCOUNTADMIN),
+  `10_bridge_stage`, `11_raw_landing`, `12_check_raw`, `repairs/2026-10-11_raw_table_name`,
+  `experiments/s13_loading.py`.
+- `scripts/sf.py` (runs SQL as `LEDGERLINE_SVC`, prints every result),
+  `scripts/sf_keypair.py` (the human makes the key; the private key never printed).
+- `aws/bridge/*.json` — the Databricks write role and the Snowflake read role.
+- `databricks/bridge/export_silver` + `_export_silver` — change feed by version
+  range → one Parquet file per folder, write-once, logged in
+  `workspace.bridge.export_log`; verifies the files alone rebuild Silver.
+- AWS: bucket `ledgerline-bridge-8176114c` (us-east-2), roles
+  `ledgerline-uc-bridge-write`, `ledgerline-snowflake-bridge-read`, S3 event
+  `snowpipe-silver-parquet`. Databricks: credential `ledgerline_bridge_write`,
+  external location `ledgerline_bridge`, schema `workspace.bridge`.
+- `tests/conftest.py`: `SNOWFLAKE_PRIVATE_KEY_PATH` blocked in tests.
+
+### Verified
+- Account `ZANVOYN-IG57260`, region `AWS_US_EAST_2`, version 10.36.101;
+  **Enterprise** — `CREATE MASKING POLICY` succeeded (then dropped);
+  `SHOW ORGANIZATION ACCOUNTS` returned 0 rows. $400, 30 days (~2026-11-10), no card.
+- Guards: monitors 40 / MONTHLY / ACCOUNT and 4 / DAILY / WAREHOUSE, 0.00 used
+  at creation; `LEDGERLINE_WH` `auto_suspend` 60, monitor attached (read as
+  ACCOUNTADMIN after the ownership move); `STATEMENT_TIMEOUT_IN_SECONDS` 3600 at
+  ACCOUNT; `TIMEZONE` UTC at ACCOUNT; `enable_query_acceleration` false on every
+  warehouse; `PUBLIC`'s grants 110 → 106.
+- Roles: ~30 statements green; `RAW` shows MANAGED ACCESS; future grant
+  `SELECT` on `LEDGERLINE.RAW.<TABLE>` → TRANSFORMER. `LEDGERLINE_SVC` signs in
+  by key pair (fingerprint matched by a successful sign-in), sees role LOADER.
+- Bridge export: plan then export — customer 43,709 / 43 / 19 (insert / update /
+  delete), product 32,951 / 175 / 100, seller 3,095 / 175 / 100, orders 99,441 /
+  18,587 / 0, order_items 112,650, inventory 34,448 / 0 / 100, inventory_events
+  158,446; 7 folders = 7 log lines; **the Parquet alone rebuilds every Silver
+  table with 0 rows different in both directions**; a second export finds nothing.
+- Snowflake: `LIST` through the integration (28 objects, 4 per folder);
+  `INFER_SCHEMA` → timestamps `TIMESTAMP_NTZ`; pipe `REFRESH` → 7 files, **504,039
+  rows**, `COPY_HISTORY` per file = export log; after the label repair,
+  `12_check_raw.sql` returns 0 problem rows on all five checks and its summary
+  equals the export log per table and change type. **Orders rebuilt in Snowflake
+  = answer key:** 99,441 orders; `created_at` 99,441 / 150,624,256,503,496;
+  `delivered_at` 96,476 / 146,251,032,384,713; units 112,650.
+- Pipe's SQS queue in us-east-2; S3 event notification accepted; pipe RUNNING.
+- `s13_loading.py`: 21 checks, 18 as predicted, 3 not (incidents.md).
+- `ruff` clean; `pytest` 163.
+
+### Built but NOT verified
+- **Snowpipe auto-ingest firing** on a newly exported file (the notification
+  exists; no new file has been written since).
+- Re-delivery of a file on the **external** S3 stage (B tested an internal stage).
+- Why D2's pipe loaded nothing after a `COPY` (inferred: the pipe consults the
+  table's load metadata).
+- The Parquet timestamp *type* serverless writes (INT96 or micros) — irrelevant
+  to correctness (values exact), not read.
+
+### Incidents (2 new)
+1. The first Snowpipe load labelled all 504,039 rows `silver` — the path starts
+   at the bucket (fixed forward; four prevention rules).
+2. DELIBERATE `s13_loading`: a re-`PUT` of identical bytes is loaded again; the
+   pipe/COPY memory is one-way; keys and MERGE as on Delta.
+
+### Decisions (8 new)
+Region (Ohio, Mumbai not offered); day-one cost guards (+ correction: query
+acceleration, `PUBLIC`'s serverless grants); roles; UTC; key-pair service user
+and SQL in git; the Ohio bridge bucket; the change-feed export (+ correction:
+two serverless refusals); RAW as one `VARIANT` table loaded only by Snowpipe.
+
+### Cost
+Databricks $0. AWS: one bucket, a few MB. Snowflake: see the end of this entry.
+
+### Learning check
+**Skipped by choice** (*"skip Qs for now"*). Five questions parked as **B68–B72**; theory hooks B65–B67 in C11.
+
+### Next
+**Session 14 — Gold begins (dbt on Snowflake):** dbt project with the Snowflake
+target as `LEDGERLINE_TRANSFORMER`; staging models that type `RAW.SILVER_CHANGES`
+(with the `FLATTEN(OBJECT_KEYS(RECORD))` schema-drift check); current-state
+models by `(key, _commit_version)` (MERGE + anti-join delete); **exp_05** — the
+dims SCD2 snapshot, run time vs business time, `hard_deletes` decided, compared
+with the Lakeflow SCD2 (S11); tests / unit tests / contracts / freshness.
+
+**Carried, by name:**
+- **Snowpipe auto-ingest firing**: at the next bridge export with new Silver
+  rows, confirm `RAW` grows by itself (no `REFRESH`) and `12_check_raw.sql` is empty.
+- **No `ALTER PIPE … REFRESH` before 2026-10-18.**
+- **First-export deadline met** (2026-10-11); a rebuild after **~2026-10-30**
+  needs a baseline snapshot (the feed's oldest files expire).
+- Drop `LEDGERLINE.S13` once S14 has read nothing from it (findings recorded).
+- From S12, unchanged: **2026-10-13** VACUUM check on fresh compute; grant
+  `ledgerline-jobs` read on `pii_hash_salt` before the next contact night;
+  **~2026-11-05** S3 PII expiry → drop `workspace.s12`; **~2026-10-27** Bronze
+  replaced-files deadline; **~2027-01-04** `ledgerline-ci` secret; topics empty /
+  Git token ~2026-12-25.
+- **Drill 3** adds: re-delivery of a changed file on the **external** stage; a
+  `COPY` into RAW refused by process; the export's orphan-folder refusal staged.
+- The bridge export into the bundle / a Job after Silver (Airflow, S15–S16).
