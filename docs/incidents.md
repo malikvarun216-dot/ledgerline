@@ -2479,3 +2479,116 @@ count as a change: dbt ignores database/schema differences that come from the ta
    `grep $'\r'` had missed that file.
 2. A tool that compares *files* (dbt state, Auto Loader, a checksum) is tested on the
    machine where it disagrees with CI, never only where it agrees.
+
+## [2026-10-12] — DELIBERATE (Session 16, `experiments/delta_clone.py`): a shallow clone's source vacuumed from under it — Unity Catalog kept the files, and a first reading proved nothing
+
+**In plain words:** a *shallow clone* copies a Delta table's metadata only and reads
+the source's data files. The textbook warning: VACUUM the source after those files
+are replaced, and the clone breaks with "file not found". Case F did exactly that
+on purpose, on Unity Catalog managed tables, and the clone **did not break**. The
+interesting part came first: the first run's "it still reads" proved nothing,
+because VACUUM had deleted **0 files**, so there was no deletion for the clone to
+survive.
+
+- First run: source written, shallow-cloned, overwritten (every original file now
+  "removed" in its log), retention set to 0 hours, `VACUUM`. Result
+  `numFilesToDelete 0`, `numDeletedFiles 0`; clone read 34,348 rows. The notebook
+  printed "VACUUM kept the files a shallow clone uses", a claim the run had not tested.
+- The control, added before re-running: the same steps on a twin with **no** clone.
+  Twin: `numFilesToDelete 1` (1,039,828 bytes), `numDeletedFiles 1`. Cloned source:
+  `numFilesToDelete 0`. Same retention, same operation, seconds apart: the only
+  difference is the clone. **Unity Catalog protects files a shallow clone still
+  references.**
+- The rest, all as predicted: deep clone copied 2 of 2 files (and the source's
+  deletion vector) into its own folder, has its own 1-version history (time travel
+  to the source's v1 → `DELTA_VERSION_NOT_FOUND`), and carried the CHECK constraint
+  and CDF setting. Shallow clone copied 0 and read all rows from the source's
+  folder. A write to the shallow clone left the source at 991,030 units and put
+  only the 100 rewritten rows in the clone's folder. A clone `VERSION AS OF 0`
+  equals v0 (991,530) **without** the constraint added at v1. A re-run deep clone
+  copied 8 of 10 files (only the new ones).
+- Found on the way: `DESCRIBE DETAIL` returns an **empty `location`** for managed
+  tables on Free Edition. The first assert compared folders against it and failed
+  on the comparison, not on the clone. Each row's `_metadata.file_path` still shows
+  the storage folder.
+
+**Why the first reading was invisible as a non-result:** "the clone still reads"
+looks like a pass whichever of two things happened: the platform protected the
+files, or nothing was deleted at all. Only a twin without the clone separates them.
+
+**Prevention:**
+1. An experiment whose expected failure does **not** happen gets a control that
+   shows the trigger actually fired (here: VACUUM deleting files somewhere), before
+   any explanation is written down.
+2. Folders and ownership on Free Edition are read from `_metadata.file_path`, never
+   from `DESCRIBE DETAIL … location`.
+
+## [2026-10-12] — Gold and the SCD2 history had been transient tables since Session 14 — dbt's default, chosen by nobody (Session 16)
+
+**In plain words:** every table dbt built on Snowflake (all of Gold and the three SCD2
+snapshot tables) was a *transient* table. Transient tables have no Fail-safe, the
+7-day recovery window that follows Time Travel. Nothing in the project asked for
+that: dbt-snowflake does it by default. It showed up only when the clone experiment
+tried to copy `GOLD.FCT_ORDERS` into the permanent CI database:
+`002120: Transient object cannot be cloned to a permanent object.`
+
+**Why nothing caught it:** a transient table looks and queries exactly like a
+permanent one. The only visible difference is the `kind` column of `SHOW TABLES`
+(`TRANSIENT`), which nobody had read. Every test, contract and row count passed. The
+difference shows only in a recovery (no Fail-safe) or a clone, and neither had
+happened yet.
+
+**Impact:** none so far: no data lost, nothing needed recovering. Exposure: for 1–2
+days (S14 to today) the SCD2 history had only 1 day of Time Travel and no Fail-safe.
+Here it could have been rebuilt from RAW, with every hard delete re-dated to the
+repair day (exp_05). In a normal shop it could not have been rebuilt at all.
+
+**Fix (forward):** `+transient: false` for models and snapshots. Full refresh of the
+two incremental facts. Snapshot tables copied in place and swapped
+(`snowflake/repairs/2026-10-12_permanent_snapshots.py`). Decision entry the same day.
+
+**Prevention:**
+1. A check that every table in `STAGING`, `SNAPSHOTS` and `GOLD` is `kind = 'TABLE'`
+   (permanent), run after every build (`tests/gold_tables_permanent.sql`).
+2. A tool's default for storage, retention or durability is read and written down
+   as a decision the day the tool is adopted, the way Snowflake's trial defaults
+   were read on day one (S13). dbt's were not.
+
+## [2026-10-12] — DELIBERATE (Session 16, `snowflake/experiments/s16_clone.py`): zero-copy clones, the CI role's limits, and write-audit-publish by schema swap — 20 checks, 19 as predicted
+
+**In plain words:** a Snowflake *clone* is a new table (or schema) that shares the
+original's storage files instead of copying them, so it is instant and costs nothing
+until one side changes. The experiment measured what a clone shares, what it owns,
+and how it can publish a tested build, as the transformer and as the new CI user.
+
+- **Table clones (A):** 99,441 rows cloned in 1.7–2.1 s, identical (MINUS both ways).
+  `SHOW TABLES` reports the clone at the source's full size, because it shows what a
+  table reads, not what it owns. 100 rows changed in the clone, 0 in the source. A
+  clone `BEFORE (STATEMENT => <the update>)` equals the source: Time Travel as a
+  table. **Source dropped: both clones still read all 99,441 rows.** Snowflake keeps
+  shared storage alive while any table uses it (compare Delta's shallow clone, which
+  reads its source's files: `experiments/delta_clone`).
+- **Storage metrics:** `INFORMATION_SCHEMA.TABLE_STORAGE_METRICS` had **no row** for
+  tables minutes old (computed in the background). The byte checks were skipped,
+  not guessed. Its column is `TABLE_DROPPED` (the first run guessed `DELETED`).
+- **Schema clone (B1, B2):** the CI role cloned production's GOLD schema fine (only
+  SELECT needed), but every cloned table **keeps its original owner**
+  (LEDGERLINE_TRANSFORMER), so `CREATE OR REPLACE` on one is refused
+  (`003001`). The source schema's future grants were not copied. **Wrong
+  prediction:** the clone **lost `MANAGED ACCESS`** (options `''`; GOLD shows
+  `MANAGED ACCESS`). A cloned schema is not governed like its source.
+- **Table clone (B3):** first run refused, `002120 Transient object cannot be cloned
+  to a permanent object`, which found the transient-Gold incident above. After the
+  repair: the clone is **owned by the role that cloned it** and may be replaced.
+  This is what `dbt clone` does, and why slim CI clones tables, never schemas.
+- **Write-audit-publish (B4):** `PUBLISHED` (production stand-in) → `AUDIT` cloned
+  from it → a bad run (one duplicated order) failed the audit (1 duplicate), and
+  PUBLISHED's count and `HASH_AGG` were unchanged. A good run passed (0), and `ALTER
+  SCHEMA PUBLISHED SWAP WITH AUDIT` published it in one metadata step. The previous
+  state stayed whole under the audit name: rollback = swap again.
+
+**Prevention / what production takes from it:** CI clones tables, not schemas
+(ownership and managed access do not survive a schema clone). A swap-based publish
+of GOLD would need a role owning both schemas, and the swapped-in schema would need
+its managed access and future grants re-applied. Recorded as the reason
+production does not swap GOLD (decisions.md, Session 16, publish entry).

@@ -3510,3 +3510,68 @@ the test.
   LocalExecutor runs tasks as processes beside the scheduler.
 - Kept: the Databricks job emails and the SQL Alerts (S8/S9). They are a second
   line of defence that does not depend on Airflow running.
+
+## Gold and the SCD2 snapshots are permanent tables, not dbt's default transient — snapshots copied in place, not replayed (Session 16)
+
+**In plain words:** Snowflake has three kinds of table. **Permanent** tables keep
+deleted or changed data for a while: Time Travel (here 1 day), then 7 days of
+**Fail-safe**, a last-resort recovery window that only Snowflake support can use.
+**Transient** tables have Time Travel but **no Fail-safe**: cheaper storage, less
+protection. **Temporary** tables last one session. dbt-snowflake builds every table as
+*transient* unless told otherwise, so since Session 14 all of Gold and all three SCD2
+history tables were transient. Nobody chose that. It came out when a zero-copy clone
+refused to copy a transient table into a permanent one (`s16_clone` B3). Gold and
+snapshots are now permanent (`+transient: false` in `dbt_project.yml`).
+
+- Chosen: **permanent** for every dbt table. Tables dbt rebuilds whole become
+  permanent on their next build. The two incremental facts get one `--full-refresh`,
+  a rebuild from RAW whose result `fct_equals_rebuild` checks. The three snapshot
+  tables are **copied row for row** into permanent tables and swapped into their
+  names (`snowflake/repairs/2026-10-12_permanent_snapshots.py`), so every
+  `dbt_valid_from` / `dbt_valid_to` stays exactly as it was.
+- Rejected: **keep transient**, as dbt's default assumes ("analytics tables can be
+  rebuilt"). True of the facts here, which rebuild from RAW, a permanent table. But
+  SCD2 history is the one table a normal source cannot give back: once a customer's
+  old address is overwritten upstream, the snapshot is the only record. A default
+  that leaves history without Fail-safe teaches the wrong habit. Fail-safe at this
+  size costs cents.
+- Rejected: **replay the snapshots night by night** into new tables. That is the
+  rebuild path, and it reproduces versions on business time (exp_05). But it dates
+  every hard delete at **run time** (`hard_deletes='invalidate'`, exp_05), so the
+  history would change on the day of the repair. A copy changes nothing.
+  Production would copy.
+- Rejected: **make the CI database transient** so transient tables can be cloned
+  into it. It would fix CI and leave the real problem in place.
+- Found alongside (`s16_clone` B1): **a schema clone drops `MANAGED ACCESS`**, and its
+  tables keep their original owner (the transformer), so the CI role cannot replace
+  them. CI therefore clones **tables** (what `dbt clone` does), never whole schemas.
+
+## Code changes are gated by slim CI on clones; the nightly Gold build still publishes in place — write-audit-publish measured, not adopted yet (Session 16)
+
+**In plain words:** "write-audit-publish" means: build the new data somewhere
+nobody reads (write), test it there (audit), and only then make it what analysts
+see (publish). There are two places a bad change can come from. **Bad code**: a
+pull request that breaks a model. That is now stopped before merge by slim CI,
+which builds the changed models on zero-copy clones of production in
+`LEDGERLINE_CI`. **Bad data**: a night whose rows break a test. That is still built
+straight into GOLD: `dbt build` runs each model's tests right after the model and
+skips everything downstream of a failure, but the failed model's table has already
+been replaced. An analyst can read it until someone fixes it.
+
+- Chosen: slim CI for code (built, verified locally). For data, keep publishing in
+  place for now. The window of exposure is between a nightly `dbt_build` failure
+  and the fix, and Airflow marks the run failed and stops there.
+- Rejected for now: **WAP by schema swap** (`s16_clone` B4 works:
+  `ALTER SCHEMA GOLD SWAP WITH GOLD_AUDIT`). It needs a role owning both schemas,
+  which today only SYSADMIN does. The transformer would have to own GOLD, against
+  the S14 rule. The swapped-in schema also needs its `MANAGED ACCESS` and the
+  analyst's future grants re-applied, because a schema clone drops both (B1).
+- Rejected for now: **WAP by table clone**: build into a `GOLD_AUDIT` schema, test,
+  then `dbt clone` each table into GOLD (zero-copy, owned by the transformer, so
+  allowed). It is the cleaner design, but views (`order_items_at_sale`, the
+  `dim_*`) cannot be cloned: they must be re-created pointing at GOLD. It also
+  adds a second Gold-sized step to every night. Worth it once a bad night has
+  actually reached analysts.
+- **Carried to Drill 3, by name:** a night whose data fails a Gold test. Measure
+  what an analyst reads between the failure and the fix. If that exposure is real,
+  build WAP by table clone then.

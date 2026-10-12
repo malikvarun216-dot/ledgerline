@@ -29,6 +29,8 @@ vars:
 models:
   ledgerline:
     +persist_docs: {relation: true, columns: true}
+    # PERMANENT tables, not dbt-snowflake's default TRANSIENT (no Fail-safe): decisions.md, Session 16.
+    +transient: false
     staging:
       +schema: staging
       +materialized: view
@@ -39,6 +41,7 @@ models:
 snapshots:
   ledgerline:
     +schema: snapshots
+    +transient: false   # SCD2 history is the one table a source cannot give back (Session 16)
 
 tests:
   ledgerline:

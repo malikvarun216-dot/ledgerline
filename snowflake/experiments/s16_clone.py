@@ -103,9 +103,14 @@ def part_a(cur) -> None:
     check("A1 SHOW TABLES bytes: clone = source", sizes.get("ORDERS_CLONE") == sizes.get("ORDERS_SRC"), True)
     cur.execute("""SELECT table_name, id, clone_group_id, active_bytes
         FROM LEDGERLINE.INFORMATION_SCHEMA.TABLE_STORAGE_METRICS
-        WHERE table_schema = 'S16' AND table_name IN ('ORDERS_SRC', 'ORDERS_CLONE') AND NOT deleted""")
+        WHERE table_schema = 'S16' AND table_name IN ('ORDERS_SRC', 'ORDERS_CLONE')
+          AND table_dropped IS NULL""")
     metrics = {r[0]: r[1:] for r in cur.fetchall()}
-    print(f"  A1 storage metrics (id, clone_group_id, active_bytes): {metrics}")
+    print(f"  A1 storage metrics (id, clone_group_id, active_bytes): {metrics or 'none yet'}")
+    if not metrics:
+        # Session 16, first run: the view had no row for a table minutes old — storage metrics are
+        # computed in the background. The byte checks are skipped, not guessed; re-read later.
+        print("  A1 (storage metrics lag behind new tables: byte checks skipped this run)")
     if {"ORDERS_SRC", "ORDERS_CLONE"} <= metrics.keys():
         # PREDICTION: the clone joins the source's clone group and OWNS no bytes — it only points.
         check("A1 clone is in the source's clone group",
