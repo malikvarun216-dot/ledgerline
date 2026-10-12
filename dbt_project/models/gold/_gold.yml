@@ -169,7 +169,8 @@ models:
     description: >
       One row per order as Silver holds it now. Incremental (merge_changes: in-band deletes, a
       high-water mark on silver_version); an order whose person is not linked yet is re-tried on
-      every run until the customer_order_link night that holds it has landed.
+      every run until the customer_order_link night that holds it has landed. Permanent table
+      (not dbt's transient default) since Session 16.
     config:
       contract: {enforced: true}
     data_tests:
