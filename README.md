@@ -2,28 +2,26 @@
 
 [![CI](https://github.com/malikvarun216-dot/ledgerline/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/malikvarun216-dot/ledgerline/actions/workflows/ci.yml)
 
-**A data platform built to answer one question honestly: when data arrives twice, late, out of order, or gets
-deleted, does the warehouse still tell the truth?**
+**An e-commerce lakehouse and data warehouse on Databricks and Snowflake, built to stay correct when data
+arrives twice, late, out of order, or is deleted.**
 
-ledgerline takes 100,000 real e-commerce orders (the public Olist dataset) and runs them through a production-style
-lakehouse and warehouse: Kafka streams and nightly files into **Databricks**, then **Snowflake** and **dbt** for the
-tables analysts read. Every layer uses the write pattern a real team would choose for that kind of data. Then I
-**break each one on purpose** to see exactly how it fails, and add the guard that stops it.
-
-*ledger*: a correct, auditable record of what happened. *line*: the order lines it is built around.
+ledgerline runs 100,000 real e-commerce orders (the public Olist dataset) through a production-style platform:
+Kafka streams and nightly S3 files into **Databricks** (Bronze and Silver on Delta Lake), then **Snowflake** and
+**dbt** for the tables analysts read. Each layer uses the write pattern suited to its data, and each guarantee is
+verified by deliberate failure testing.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
-  <img alt="Three sources (Kafka orders, Kafka inventory changes, nightly S3 files) flow into Databricks Bronze and Silver, across an S3 bridge into Snowflake RAW via Snowpipe, then dbt Gold. Proven by answer keys, deliberate failures, alarms and an incident log; platform: Unity Catalog, GitHub Actions, Airflow, cost guards" src="docs/images/architecture-light.svg">
+  <img alt="Kafka (orders, inventory CDC) and Amazon S3 (daily snapshots) flow into Databricks Bronze and Silver, then via Change Data Feed, S3 and Snowpipe into Snowflake staging, SCD Type 2 history and Gold. Platform: Airflow, GitHub Actions, Unity Catalog, Snowflake clones for CI" src="docs/images/architecture-light.svg">
 </picture>
 
 | 3 | 17 | 112,650 = 112,650 | 167 |
 |:---:|:---:|:---:|:---:|
-| sources, each changing in a different way | failures caused on purpose and written up | units sold match stock decrements, across two separate streams | automated tests |
+| sources with different change patterns | failure scenarios tested and documented | units sold reconcile with stock changes across two streams | automated tests |
 
-## Why three sources
+## Sources
 
-Each source changes in a different way, and each needs a different way of writing it down correctly:
+Each source changes in a different way, and each needs a different write pattern:
 
 | Source | How it changes | What the platform must get right |
 |---|---|---|
@@ -49,18 +47,18 @@ was lost or doubled on the way.
    customer, and where was the seller, when this was sold". Checked against Olist's own per-order addresses, it
    was right **97,651 times out of 97,653**.
 
-## Built to fail on purpose
+## Failure testing
 
-Every guarantee here is attacked deliberately in **experiments** (one failure mode each, with a test asserting the
-bug is really there before the fix) and **drills** (a whole layer attacked at once). Each result goes in
-[docs/incidents.md](docs/incidents.md), and every entry ends with a prevention rule.
+Each guarantee is tested by breaking it deliberately: **experiments** (one failure mode each, with a test asserting
+the bug is present before the fix) and **drills** (a whole layer attacked at once). Each result is written up in
+[docs/incidents.md](docs/incidents.md) with a prevention rule.
 
-The one that changed how I think about "exactly once": I deleted a stream's checkpoint on purpose and restarted it.
+Example: a stream's checkpoint was deleted on purpose and the stream restarted.
 The job succeeded, reported no errors, and loaded no duplicates, so by every normal check it was healthy. It had
 also **silently skipped 74 new messages**, permanently. The table's own log believed those batches were already
 written. Now the stream refuses to start in that state, and the drill proves the refusal fires.
 
-A few more, found the same way:
+Other findings from the same process:
 
 - The stock feed's "before" and "after" values broke their own sequence order on **237 products**. Every total and
   every test passed. Only a check that follows each product's chain of changes could see it.
@@ -70,24 +68,25 @@ A few more, found the same way:
   Snowflake it deleted **2,945 sellers** that had simply not changed that night. Measured, not assumed. Production
   reads each change's own delete flag instead.
 
-## Run like production
+## Operations
 
-- **Treated as live.** The Kafka topics, S3 buckets and tables are handled like production: a mistake is contained
+- **Production practices.** The Kafka topics, S3 buckets and tables are handled like production: a mistake is contained
   and fixed forward, never "fixed" by deleting the data and starting over.
 - **Governed.** Unity Catalog grants, column masks, row filters and tags; synthetic personal data in its own lane,
   with a right-to-erasure job that is proven to delete physically.
 - **Automated.** GitHub Actions runs lint and 167 tests, then deploys the Databricks jobs as code (Asset Bundles) as
   one service account, run by another. Job failure emails and SQL alerts, each seen firing.
-- **Cheap.** A **~$22 budget for the whole build**: Databricks Free Edition, a Snowflake trial with resource monitors and
+- **Cost.** A **~$22 budget for the whole build**: Databricks Free Edition, a Snowflake trial with resource monitors and
   60-second auto-suspend, Confluent at about a cent a month at rest.
 
-## Where it is now
+## Status
 
-Bronze, Silver, the bridge and Gold are built and verified (see [docs/progress.md](docs/progress.md), which records
-what was *verified*, not just what was written). **In progress:** an Airflow DAG that runs a whole night across all
-three platforms, and slim CI for dbt that builds only what a pull request changed, in a zero-copy clone of production.
-**Next:** late-arriving data, Snowflake masking and time travel, Streams, Tasks and Dynamic Tables, and query
-performance on a large sample. The plan for every topic is in [docs/coverage.md](docs/coverage.md).
+Bronze, Silver, the bridge and Gold are built and verified ([docs/progress.md](docs/progress.md) records what was
+*verified*, not just what was written). Every dbt change is tested by **slim CI** on GitHub Actions, which builds
+only the changed models on **zero-copy clones** of production. Gold and its history tables are permanent tables.
+**In progress:** an Airflow DAG that runs each night end to end across all three platforms. **Next:** late-arriving
+data, Snowflake masking and Time Travel, Streams, Tasks and Dynamic Tables, and query performance on a large sample.
+The plan for every topic is in [docs/coverage.md](docs/coverage.md).
 
 **Stack:** Python, PySpark, SQL, Databricks (Delta Lake, Structured Streaming, Auto Loader, Unity Catalog, Lakeflow),
 Snowflake (Snowpipe, zero-copy clone), dbt, Kafka (Confluent Cloud), Airflow, AWS S3, GitHub Actions.
