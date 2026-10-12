@@ -68,7 +68,7 @@ def last_clone(table):
 def location(table):
     """The table's storage folder, without a trailing slash (first run: the raw string differed from the
     folder parsed out of a file path, and A's assert failed on the comparison, not on the clone)."""
-    return spark.sql(f"DESCRIBE DETAIL {table}").first().location.rstrip("/")
+    return (spark.sql(f"DESCRIBE DETAIL {table}").first().location or "").rstrip("/")
 
 
 def file_folders(table):
@@ -82,9 +82,16 @@ def file_folders(table):
 
 
 def whose(table, source):
-    """file_folders, each folder named: 'clone' (the table's own), 'source', or the raw path."""
-    names = {location(table): "clone", location(source): "source"}
-    return {names.get(f, f): n for f, n in file_folders(table).items()}
+    """Rows of `table` by where they are read from: 'source' (a folder the source's own rows live in) or
+    'clone' (any other folder). Found by reading files, because on Free Edition DESCRIBE DETAIL returns
+    an EMPTY location for managed tables (first run, Session 16): the storage path is hidden, but each
+    row's `_metadata.file_path` still shows it."""
+    source_folders = set(file_folders(source))
+    out = {}
+    for folder, n in file_folders(table).items():
+        key = "source" if folder in source_folders else "clone"
+        out[key] = out.get(key, 0) + n
+    return out
 
 
 def same_table(a, b):
@@ -142,9 +149,10 @@ a_props = props(DEEP)
 print(f"   clone history: {[(h.version, h.operation) for h in a_hist]}")
 print(f"   constraint carried: {a_props.get('delta.constraints.stock_not_negative')!r}; "
       f"CDF carried: {a_props.get('delta.enableChangeDataFeed')!r}")
-print(f"   clone at  {location(DEEP)}")
-print(f"   source at {location(SRC)}")
-print(f"   rows read, by folder: {whose(DEEP, SRC)}")
+print(f"   DESCRIBE DETAIL location: clone {location(DEEP)!r}, source {location(SRC)!r}")
+print(f"   source's folder(s): {sorted(file_folders(SRC))}")
+print(f"   clone's folder(s):  {sorted(file_folders(DEEP))}")
+print(f"   rows read, by owner: {whose(DEEP, SRC)}")
 assert same_table(DEEP, SRC), "a deep clone must hold the source's rows exactly"
 assert int(a.operationMetrics["numCopiedFiles"]) == SRC_FILES, "a deep clone copies every current file"
 assert int(a.operationMetrics["sourceNumOfFiles"]) == SRC_FILES
@@ -168,7 +176,6 @@ spark.sql(f"CREATE TABLE {SHALLOW} SHALLOW CLONE {SRC}")
 b = last_clone(SHALLOW)
 print(f"B: {b.operation} metrics {dict(b.operationMetrics)}")
 b_folders = whose(SHALLOW, SRC)
-print(f"   clone location {location(SHALLOW)}")
 print(f"   folders read: {b_folders}")
 assert same_table(SHALLOW, SRC)
 assert int(b.operationMetrics["numCopiedFiles"]) == 0, "a shallow clone copies no data file"
