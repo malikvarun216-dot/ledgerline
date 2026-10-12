@@ -3611,3 +3611,167 @@ theory hook: disaster recovery.
   assert it stays that way); dbt `merge` swapped in for `merge_changes`
   (`fct_equals_rebuild` must fail); a contact night landing with the salt grant
   revoked (the job must fail before writing — it did).
+
+
+---
+
+## Session 16 — Copies that share storage, CI on clones of production, and a Gold that was transient by default
+Date: 2026-10-12
+
+**In plain words:** the session measured both platforms' "instant copy" features.
+Delta's shallow and deep clones; Snowflake's zero-copy clone. It then used the
+Snowflake one for **slim CI**: every pull request now builds and tests only the dbt
+models it changes, in a throwaway schema made from zero-copy clones of production,
+signed in as a CI robot that can read production and never write it. Verified on
+the laptop and on GitHub. On the way, the clone experiment found that **all of
+Gold and the SCD2 history had been transient tables** (dbt's default: no Fail-safe)
+since Session 14. They are now permanent, the history copied row for row. Airflow
+is built (image, compose, DAG, step script, the bridge as a job, grants), but no
+task has run yet: **carried to S17 by name**.
+
+### Scope, as it actually ran
+Planned (`coverage.md` S16): Delta `SHALLOW`/`DEEP CLONE` (B), zero-copy clone CI
+gating / write-audit-publish (B), slim CI + clone (B), Airflow (B), disaster
+recovery (T). **Done:** both clone rows, slim CI (local + GitHub), DR theory.
+**Carried:** Airflow, run end to end (built, not run). Stopped by choice to
+save the week's usage for other work; the trial calendar (~2026-11-10) still
+leaves room. Carried in from S15 and **not** done: `07_spend.sql`, the Snowsight
+Query History look. Done: `S15` scratch dropped.
+
+### Built
+- **Databricks:** `experiments/delta_clone` (cases A–F + a no-clone control);
+  `databricks/bridge/runner_grants` (what `ledgerline-jobs` needs to export);
+  `export_silver` ends with a JSON summary of every exported folder (for
+  Airflow); bundle job `ledgerline-bridge` (no schedule; started by Airflow).
+- **Snowflake:** `08_ci_database.sql`: database `LEDGERLINE_CI`, role
+  `LEDGERLINE_CI_RUNNER` (CREATE SCHEMA there; SELECT on RAW / STAGING /
+  SNAPSHOTS / GOLD), service user `LEDGERLINE_CI_SVC` (key pair, secondary roles
+  off); `S16` scratch (`05`); `experiments/s16_clone.py`;
+  `repairs/2026-10-12_permanent_snapshots.py`.
+- **dbt:** target `ci` (one schema per run in `LEDGERLINE_CI`);
+  `generate_schema_name` routes every node there for `ci`; macro
+  `drop_ci_schema` (refuses any other target); `+transient: false` for models
+  and snapshots; test `gold_tables_permanent`.
+- **CI:** `scripts/slim_ci.py` (base manifest parsed from git, `state:modified+`,
+  `dbt clone` of changed incrementals, `build --defer`, schema dropped);
+  `.github/workflows/dbt_ci.yml` (parse on every push; slim CI on PRs, as the CI
+  user); `actionlint` in `ci.yml`; `tests/test_line_endings.py`.
+- **Airflow (not run):** `airflow/` (Airflow 3.1.0, LocalExecutor + Postgres,
+  repo mounted read-only, pipeline venv apart from Airflow's); DAG
+  `ledgerline_nightly` (7 tasks, `EventsTimetable` on the 8 night dates,
+  `max_active_runs=1`, `depends_on_past`); `scripts/pipeline_step.py` (land /
+  job / raw-has / check-raw).
+- `scripts/sf.py` signs in as the CI user with `as_ci`; `sf_keypair.py --user`;
+  `conftest.py` blocks the CI credentials too. README rewritten with an
+  architecture diagram.
+
+### Verified
+- **Delta clones** (`delta_clone`, all predictions but F's held): deep clone
+  copied 2 of 2 files (1,060,050 B, plus the source's deletion vector) into its
+  own folder; own history (time travel to the source's v1 →
+  `DELTA_VERSION_NOT_FOUND`); CHECK constraint and CDF setting carried. Shallow
+  clone copied 0, read all 34,348 rows from the source's folder. An `UPDATE` of
+  100 rows on it: source 991,030 → 991,030, clone +100,000, 100 rows in its own
+  folder. `DEEP CLONE … VERSION AS OF 0` = v0 (991,530), without the v1
+  constraint. Re-run deep clone copied 8 of 10 files. **F:** VACUUM under a
+  shallow clone deleted 0 files; the control twin with no clone deleted 1
+  (1,039,828 B), so **Unity Catalog keeps files a shallow clone uses**.
+  `DESCRIBE DETAIL` location is empty for managed tables on Free Edition.
+- **Snowflake clones** (`s16_clone`, 20 checks, 19 as predicted): 99,441 rows
+  cloned in 1.7–2.1 s, identical; source dropped, both clones read 99,441;
+  `CLONE … BEFORE (STATEMENT => …)` = the source. Schema clone by the CI role:
+  tables keep owner LEDGERLINE_TRANSFORMER (replace refused, `003001`), future
+  grants not copied, **`MANAGED ACCESS` lost** (the wrong prediction). Table clone:
+  owned by the CI role, replaceable. Write-audit-publish: a bad run (1 duplicate)
+  failed the audit with production's count and `HASH_AGG` unchanged; a good run
+  published by `SWAP`, the old state left under the audit name.
+  `TABLE_STORAGE_METRICS` had no rows for minutes-old tables (byte checks skipped).
+- **CI user:** fingerprint `SHA256:cJMMjiHG…` = the key file's (computed
+  locally); `DEFAULT_SECONDARY_ROLES = []`; secondary roles empty in session;
+  `CREATE TABLE` in `LEDGERLINE.GOLD` refused.
+- **Transient → permanent:** `SHOW TABLES` showed GOLD and SNAPSHOTS
+  `TRANSIENT`, RAW permanent. Repair: three snapshot tables copied, count + `HASH_AGG`
+  equal (96,108 / 33,276 / 3,415), swapped, old dropped (UNDROP-able 1 day);
+  `snapshot_nights.py` plan: nothing to run. `dbt build --full-refresh`: 70 of 71
+  (both `fct_equals_rebuild`, reconciliation 0 SKUs off). The new guard first ran
+  before Gold was rebuilt (6 transient), then passed once it waited for the Gold
+  models. All 9 tables `IS_TRANSIENT = NO`.
+- **Slim CI, laptop** (as `LEDGERLINE_CI_SVC`): with no change, **0** selected
+  (after the line-ending fix; 18 before). Against `origin/dev` with the transient
+  change: 67 selected, 2 incrementals cloned, PASS=67, schema dropped.
+- **Slim CI, GitHub** (PR #1): first push ran no `dbt-ci` job at all (incident);
+  after the fix `ci / lint-and-test`, `dbt-ci / parse` (29 s), `dbt-ci / slim-ci`
+  (51 s) green. Snowflake's query history for the CI user: schema `PR_1_1`
+  created, `fct_orders` cloned from `LEDGERLINE.gold.fct_orders`, unit test +
+  incremental MERGE, view rebuilt, schema dropped (16 s). `LEDGERLINE_CI`
+  empty after. PR merged into `dev`.
+- **Bridge job grants:** `runner_grants` printed SELECT + USE SCHEMA on silver,
+  MODIFY + SELECT + USE SCHEMA on bridge, READ + WRITE FILES on
+  `ledgerline_bridge`. `ledgerline-ci` has Can Manage Run on `ledgerline-silver`.
+- **Airflow:** image `ledgerline-airflow:3.1.0` built; the DAG loads in a
+  container with its 7 tasks in order; the pipeline venv imports dbt 1.12.5,
+  Snowflake, Databricks SDK, pandas, boto3; the UI lists `ledgerline_nightly`,
+  paused, 0 runs.
+- `ruff` clean; `pytest` 167 (+1 `test_line_endings`); `actionlint` clean.
+
+### Built but NOT verified
+- **Airflow end to end.** No task has run: not `land_night` (should report all
+  nights `identical`), not the `ledgerline-bridge` job as `ledgerline-jobs` (S12
+  rule: a deploy is done when one run as the run-as identity is green), not the
+  sensor, not a backfill.
+- `TABLE_STORAGE_METRICS` byte checks (a clone owning 0 bytes): skipped, metrics
+  lagged.
+- `07_spend.sql`: S14–S16 credits not read.
+
+### Incidents (5 new)
+1. Slim CI's phantom changes: 20 files CRLF on disk, LF in git; dbt checksums the disk.
+2. DELIBERATE `delta_clone`: VACUUM under a shallow clone, and a first reading
+   that proved nothing until the control.
+3. Gold and the SCD2 history transient since S14: dbt's default, chosen by nobody.
+4. DELIBERATE `s16_clone`: zero-copy clones, the CI role's limits, WAP by swap.
+5. The `dbt-ci` workflow never ran (`runner` context at job level) and the PR was green.
+
+### Decisions (4 new)
+CI builds in `LEDGERLINE_CI` as a CI service user; Airflow one DAG run per dims
+night; Gold and snapshots permanent (copied in place, not replayed); slim CI gates
+code, the nightly build still publishes in place (WAP measured, carried to Drill 3).
+
+### Cost
+Databricks $0. Snowflake: not read (`07_spend.sql` carried); this session's
+warehouse work was short (clones, one full refresh, two slim CI runs). AWS: no
+landing this session.
+
+### Learning check
+**Skipped by choice** (pause to save the week's usage); five questions parked as
+**B83–B87** in `learning.md`. Theory hook disaster recovery taught (C11 S16).
+
+### Next
+**Session 17 — Airflow, run, then exp_06 (late data):**
+1. **Airflow, carried by name:** `docker compose -f airflow/docker-compose.yaml up -d`;
+   run tasks one at a time (`airflow tasks test`): `land_night` for one landed night
+   (all `identical`, nothing written), `silver`, `bridge_export` (first run of the
+   `ledgerline-bridge` job **as `ledgerline-jobs`**; the S12 rule), `wait_for_raw`,
+   `check_raw`, `snapshots`, `dbt_build`; then unpause and **backfill** nights 1–8:
+   every task idempotent, nothing changes. Stop the stack after (`down`).
+2. **exp_06** (due S17): a bridge file loaded late, below the facts' high-water
+   mark; `fct_equals_rebuild` must catch it; lookback / microbatch fixes it.
+   D3 (deferred) is asked then.
+
+**Carried, by name:**
+- `07_spend.sql` as ACCOUNTADMIN, including Snowpipe: S14–S16 spend.
+- Snowsight once: Query History on tag `ledgerline:dbt-ci` (the PR run), and a
+  `GOLD` table's Details tab (kind, retention).
+- Drop scratch schema `LEDGERLINE.S16` and `workspace.s16` once S17 starts
+  (findings recorded).
+- **2026-10-13:** the scheduled `ledgerline-pii` run's VACUUM: check `erase`
+  output, then time travel to vault v1 on the SQL warehouse must fail on a
+  missing file.
+- **No `ALTER PIPE … REFRESH` before 2026-10-18.**
+- **Drill 3** adds: a night whose data fails a Gold test: measure what an analyst
+  reads before the fix (decides whether WAP by table clone is built); the anti-join
+  fed a change batch; dbt `merge` swapped in for `merge_changes`; a contact night
+  with the salt grant revoked; a workflow file broken on purpose (actionlint must fail).
+- From S13 / S12, unchanged: a rebuild after **~2026-10-30** needs a baseline;
+  **~2026-11-05** drop `workspace.s12`; **~2026-10-27** Bronze replaced-files
+  deadline; **~2027-01-04** `ledgerline-ci` secret; topics empty / Git token
+  ~2026-12-25; **Snowflake trial ends ~2026-11-10**.

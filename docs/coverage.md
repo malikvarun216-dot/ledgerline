@@ -100,8 +100,8 @@ session · **X** skip (no honest use here).
 | Snapshots: timestamp vs check strategy, hard deletes, business time vs run time | ★★★ | ✓ S14 (exp_05: `check` = run time knows nobody in 2017; `timestamp` replayed = the dumps exactly on nights 1–4; every `hard_deletes` closes a delete at run time; a late start loses history; production `timestamp` + `invalidate`, one night per run) |
 | Incremental: merge, delete+insert, append, microbatch; lookback windows | ★★★ | ✓ S15 merge — a custom strategy `merge_changes` (in-band deletes, version guard), high-water mark, late-arriving dimension re-tried, incremental = full rebuild test; dbt's `merge` shown keeping deletes as rows (`s15_merge` B); delete+insert in words; **microbatch + lookback: B S17 (exp_06)** |
 | Tests, unit tests, model contracts, source freshness | ★★★ | ✓ S14 (generic + singular tests incl. `no_conflicting_changes`, `scd2_shape`; a unit test that fails on filter-deletes-first; enforced contracts on every GOLD model; source freshness on `LOADED_AT`); ✓ S15 (contracts on incremental facts; a unit test of an incremental model with `this` mocked; `fct_equals_rebuild`; the cross-source reconciliation as a singular test, 0 SKUs off) |
-| Slim CI (`state:modified`, defer) + clone | ★★ | ✓ S16 locally (`scripts/slim_ci.py` as `LEDGERLINE_CI_SVC`: base manifest parsed from `origin/dev`, 67 nodes selected, incrementals `dbt clone`d from production, PASS=67, schema dropped; 0 selected with no change — after the CRLF incident). **GitHub Actions run: B S16 (after the secrets)** |
-| Airflow: DAG, backfill, idempotent tasks, sensors, retries | ★★★ | B S16 (moved whole from S15 by choice, 2026-10-11: S15 kept to the facts) |
+| Slim CI (`state:modified`, defer) + clone | ★★ | ✓ S16 locally (`scripts/slim_ci.py` as `LEDGERLINE_CI_SVC`: base manifest parsed from `origin/dev`, 67 nodes selected, incrementals `dbt clone`d from production, PASS=67, schema dropped; 0 selected with no change — after the CRLF incident). ✓ S16 **on GitHub** (PR #1: `dbt-ci / parse` + `slim-ci` green; Snowflake query history as `LEDGERLINE_CI_SVC`: schema `PR_1_1` created, `fct_orders` cloned from production, incremental path + unit test, view rebuilt, schema dropped — 16 s) |
+| Airflow: DAG, backfill, idempotent tasks, sensors, retries | ★★★ | **B S17** — built S16 (Airflow 3 in Docker, DAG `ledgerline_nightly`: 7 tasks, `EventsTimetable` on the night dates, sensor in reschedule mode, `depends_on_past`; image built, DAG loads, UI up), **not run**: carried by name, S16 stopped by choice |
 | One dbt project, two targets (Snowflake + Databricks) | ★★ | ✓ S14 Snowflake (key-pair service user, transformer role only); Databricks after the trial |
 | CI: lint + tests | ★★ | ✓ S3 |
 
@@ -118,7 +118,7 @@ session · **X** skip (no honest use here).
 | Account console: SCIM, account groups, multiple workspaces | ★★ | T ✓ S12 |
 | Networking: PrivateLink, customer VPC, IP access lists, NAT (the S4 cost lesson) | ★★ | T ✓ S12 |
 | Terraform provider | ★★ | T ✓ S12 |
-| Disaster recovery: deep-clone replication, multi-region | ★★ | T S16 |
+| Disaster recovery: deep-clone replication, multi-region | ★★ | T ✓ S16 |
 | Customer-managed keys | ★ | T ✓ S12 |
 | Lakeflow Connect managed connectors | ★ | T ✓ S11 |
 
@@ -175,8 +175,8 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S12b** ✓ (kept, done 2026-10-06) | **ML point-in-time features, MLflow, model in UC** — all three verified on Free Edition and built; leakage measured | — |
 | — | **Gate: every Databricks-only row above done before the Snowflake trial starts** | — |
 | **S13** ✓ (2026-10-11) | Snowflake day one: Enterprise trial, cost guards (auto-suspend, resource monitor), **roles**; bridge (CDF export incl. `delete` rows → Parquet → stage → `COPY INTO`); **load-history test, Snowpipe beside `COPY`, `VARIANT` first, PK demo** | SSO / SCIM / network policies; Snowpipe Streaming; PrivateLink |
-| **S14–S16** | dbt snapshot (**exp_05**, `hard_deletes` decided), incremental, **tests / unit tests / contracts / freshness**, MERGE + anti-join, zero-copy clone CI + **slim CI + Delta clone**, Airflow DAG with backfill | disaster recovery |
-| **S17** | **exp_06** late arrival + lookback, **dbt microbatch** | — |
+| **S14–S16** ✓ (Airflow → S17) | dbt snapshot (**exp_05**, `hard_deletes` decided), incremental, **tests / unit tests / contracts / freshness**, MERGE + anti-join, zero-copy clone CI + **slim CI + Delta clone**, Airflow DAG with backfill | disaster recovery |
+| **S17** | **Airflow run + backfill (from S16)**; **exp_06** late arrival + lookback, **dbt microbatch** | — |
 | **S18** | GDPR, Snowflake half: masking + **row access + tag-based masking**, Time Travel / `UNDROP`, erasure | replication / failover; Fail-safe |
 | **S19** | Streams & Tasks, Dynamic Tables **vs materialized views**, **Snowpark (small)**; all Tasks suspended | hybrid tables; Cortex AI |
 | S20 (optional) | **Sharing on both platforms, Lakehouse Federation, Iceberg / UniForm** (all B?) | — |
