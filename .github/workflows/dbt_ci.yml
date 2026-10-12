@@ -55,7 +55,9 @@ jobs:
     env:
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_CI_USER: LEDGERLINE_CI_SVC
-      SNOWFLAKE_CI_PRIVATE_KEY_PATH: ${{ runner.temp }}/ci_svc.p8
+      # A fixed path: the `runner` context does not exist at job level (it broke the first run — GitHub
+      # rejected the whole file). The runner is a fresh machine, discarded after the run.
+      SNOWFLAKE_CI_PRIVATE_KEY_PATH: /tmp/ledgerline_ci_svc.p8
       # The production target is only PARSED (base branch's manifest); these are never used to sign in.
       SNOWFLAKE_USER: parse-only
       SNOWFLAKE_PRIVATE_KEY_PATH: /dev/null

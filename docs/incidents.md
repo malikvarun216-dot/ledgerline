@@ -2592,3 +2592,29 @@ and how it can publish a tested build, as the transformer and as the new CI user
 of GOLD would need a role owning both schemas, and the swapped-in schema would need
 its managed access and future grants re-applied. Recorded as the reason
 production does not swap GOLD (decisions.md, Session 16, publish entry).
+
+## [2026-10-12] — The slim CI workflow never ran: one expression GitHub does not allow at job level made it reject the whole file, and the pull request still showed green (Session 16)
+
+**In plain words:** the first test pull request for slim CI showed "All checks have
+passed", but only the old `ci` workflow had run. The new `dbt-ci` workflow (dbt
+parse, then slim CI) had no checks at all. GitHub had refused the file: it set the
+key path at job level with `${{ runner.temp }}`, and the `runner` context exists only
+inside steps. A workflow file GitHub cannot accept runs **no** job. Its run appears
+in the Actions tab as an instant failure, named by its path
+(`.github/workflows/dbt_ci.yml`) instead of `dbt-ci`, and nothing appears on the pull
+request.
+
+**Why it was invisible:** a missing check looks like no check. "All checks have
+passed" counts only the checks that started. It was caught only because the PR was
+opened to *watch* slim CI and its checks were expected by name. YAML syntax was
+valid (`yaml.safe_load` passed locally); the error is in GitHub's expression rules,
+which only GitHub, or a linter that knows them, checks.
+
+**Fix:** a fixed path (`/tmp/ledgerline_ci_svc.p8`; the runner is discarded after
+the run).
+
+**Prevention:**
+1. `actionlint` runs in `ci` on every push and PR. On the broken file it reports
+   `context "runner" is not allowed here`. On the fixed one, nothing.
+2. A new workflow is verified by its checks appearing **by name** on a test PR,
+   never by the PR being green.
