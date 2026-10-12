@@ -48,6 +48,7 @@ SHALLOW = f"{S}.clone_shallow"
 PAST = f"{S}.clone_v0"
 SRC_F = f"{S}.clone_src_f"
 SHALLOW_F = f"{S}.clone_shallow_f"
+CONTROL_F = f"{S}.clone_control_f"  # F's twin with NO clone: does VACUUM delete there?
 
 
 def first_line(error):
@@ -104,7 +105,7 @@ def props(table):
     return {r.key: r.value for r in spark.sql(f"SHOW TBLPROPERTIES {table}").collect()}
 
 
-for t in (SHALLOW, SHALLOW_F, DEEP, PAST, SRC, SRC_F):
+for t in (SHALLOW, SHALLOW_F, DEEP, PAST, SRC, SRC_F, CONTROL_F):
     spark.sql(f"DROP TABLE IF EXISTS {t}")
 
 # COMMAND ----------
@@ -255,24 +256,47 @@ assert len(history(DEEP)) == 2, "CREATE OR REPLACE keeps the clone's own history
 # MAGIC    in its log.
 # MAGIC 4. `VACUUM src_f`: the removed files are deleted from storage — if Delta lets it.
 # MAGIC 5. Read `shallow_f`.
+# MAGIC
+# MAGIC **Control** (added after the first run, where VACUUM deleted 0 files): the same steps on a twin with
+# MAGIC NO clone. Twin deletes files, cloned source deletes none -> Unity Catalog protects files a
+# MAGIC shallow clone uses. Both delete none -> VACUUM simply did not delete yet, and F proves nothing
+# MAGIC about clones.
 
 # COMMAND ----------
 
-spark.sql(
-    f"""CREATE TABLE {SRC_F}
-        TBLPROPERTIES ('delta.deletedFileRetentionDuration' = 'interval 0 hours',
-                       'delta.logRetentionDuration' = 'interval 1 days')
-        AS SELECT sku_key, stock_qty, seq FROM {SILVER_INV}"""
-)
-spark.sql(f"CREATE TABLE {SHALLOW_F} SHALLOW CLONE {SRC_F}")
-spark.sql(f"INSERT OVERWRITE {SRC_F} SELECT sku_key, stock_qty, seq FROM {SILVER_INV}")
-vac = spark.sql(f"VACUUM {SRC_F}").collect()
-vac_hist = [h for h in history(SRC_F) if h.operation.startswith("VACUUM")]
-for h in vac_hist:
-    print(f"F: src v{h.version} {h.operation} {dict(h.operationMetrics or {})}")
+def rewrite_and_vacuum(table, clone=None):
+    """Write `table`, optionally shallow-clone it, overwrite it, VACUUM it. Returns files VACUUM deleted."""
+    spark.sql(
+        f"""CREATE TABLE {table}
+            TBLPROPERTIES ('delta.deletedFileRetentionDuration' = 'interval 0 hours',
+                           'delta.logRetentionDuration' = 'interval 1 days')
+            AS SELECT sku_key, stock_qty, seq FROM {SILVER_INV}"""
+    )
+    if clone:
+        spark.sql(f"CREATE TABLE {clone} SHALLOW CLONE {table}")
+    spark.sql(f"INSERT OVERWRITE {table} SELECT sku_key, stock_qty, seq FROM {SILVER_INV}")
+    spark.sql(f"VACUUM {table}").collect()
+    deleted = 0
+    for h in history(table):
+        if h.operation.startswith("VACUUM"):
+            print(f"F: {table} v{h.version} {h.operation} {dict(h.operationMetrics or {})}")
+            if h.operation == "VACUUM END":
+                deleted += int((h.operationMetrics or {}).get("numDeletedFiles", 0))
+    return deleted
+
+
+control_deleted = rewrite_and_vacuum(CONTROL_F)
+cloned_deleted = rewrite_and_vacuum(SRC_F, clone=SHALLOW_F)
+print(f"F: VACUUM deleted {control_deleted} file(s) with no clone, {cloned_deleted} under a shallow clone")
 try:
     f_rows = spark.table(SHALLOW_F).count()
-    f_seen = f"READ OK: {f_rows:,} rows — the source's VACUUM kept the files a shallow clone uses"
+    if cloned_deleted == 0 and control_deleted > 0:
+        why = "VACUUM kept the files a shallow clone uses (the twin with no clone lost its files)"
+    elif cloned_deleted == 0:
+        why = "but VACUUM deleted nothing in EITHER table — this proves nothing about clones"
+    else:
+        why = "though VACUUM deleted files: re-read on fresh compute first (Session 12's cache)"
+    f_seen = f"READ OK: {f_rows:,} rows — {why}"
 except Exception as e:
     f_seen = f"BROKE: {first_line(e)}"
 print(f"F: read of the shallow clone after the source's VACUUM -> {f_seen}")
