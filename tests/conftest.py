@@ -86,6 +86,9 @@ def block_live_services(monkeypatch, tmp_path):
     from generators import _common
 
     monkeypatch.setattr(_common, "_env_loaded", True)
+    # The flag above lives on ONE module object; a re-imported copy has its own (2026-10-18).
+    # An environment variable is seen by every copy.
+    monkeypatch.setenv("LEDGERLINE_NO_DOTENV", "1")
     for name in _LIVE_CREDENTIALS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing-not-a-real-key")

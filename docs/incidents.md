@@ -2618,3 +2618,109 @@ the run).
    `context "runner" is not allowed here`. On the fixed one, nothing.
 2. A new workflow is verified by its checks appearing **by name** on a test PR,
    never by the PR being green.
+
+## [2026-10-18] — Both scheduled Databricks jobs stopped running after 2026-10-15, with their schedules still "UNPAUSED", and nothing said so (Session 17)
+
+**In plain words:** `ledgerline-silver` (daily 06:00 IST) and `ledgerline-pii`
+(daily 06:30 IST) each ran green every morning from 2026-10-12 to 2026-10-15,
+then simply stopped: no run on 10-16, 10-17 or 10-18 (checked 2026-10-18 09:41
+UTC). Not a failed run, no run at all. The Jobs API, as `ledgerline-ci`, still
+reports both schedules `UNPAUSED`.
+
+**Damage, as far as known:** probably none to data. No night has been landed
+since Session 15, so each daily run would have found nothing new to merge.
+Snowflake's `RAW.SILVER_CHANGES` still holds 656,962 rows, last loaded
+2026-10-11 19:40 UTC, as expected with no export since then.
+
+**Why it was invisible:** every alarm built so far fires on a run that **fails**
+(job-failure emails, S9 / Drill 2) or on data that is wrong (SQL Alerts). A run
+that never starts sends no email and writes no row, so there is nothing for an
+alarm to read. It was found only because Session 17 started by listing runs
+since the last session, which was done because six days had passed.
+
+**Cause:** not yet identified. To be read in the workspace (Jobs → run history,
+any banner) and appended below.
+
+**Prevention (provisional, finalised once the cause is known):** absence needs its
+own check. At every session start, list each job's runs since the previous
+session and compare with its schedule. A missing day counts as a finding, the
+same as a failed one.
+
+**Update, same day: the gaps are workspace-wide, and there is a fourth one.** The
+Runs page for `ledgerline-silver` and the API for `ledgerline-pii` show the **same**
+missing days for both jobs: **2026-10-11** (missed by everyone until now; both jobs
+had run every day from 10-02, the PII job from 10-07) and **2026-10-16, 17, 18**.
+There are no "Skipped" or failed entries, and no rows at all on those days. The schedule
+shows as active. Two jobs with different schedules missing the same days points
+at the workspace, not a job setting. Leading hypothesis, from the Free Edition
+docs (not yet confirmed here): exceeding the fair-use quota shuts the workspace's
+compute down for the rest of the day, "in extreme cases, the rest of the month".
+Also noted: a no-new-data Silver run has grown from 5 m 45 s (10-03) to 7 m 47 s
+(10-15).
+
+**Test, same day:** a manual **Run now** of `ledgerline-silver` at 2026-10-18 15:42
+IST succeeded in 7 m 36 s, all six tasks green (`autoload_dims` 6 m 21 s is most of
+it). So compute works today, hours after the 06:00 IST run that never started. A
+quota shutdown that lasted the whole day would have blocked this run too, so the
+quota hypothesis is weaker. Not ruled out: a quota may reset during the day. Seen in
+the workspace header: a **"Verify identity"** prompt, not yet read.
+
+**"Verify identity" ruled out, same day.** The prompt ("Verify you're a real person",
+via LinkedIn) offers "more capabilities like serverless GPU access". It says nothing
+about schedules or jobs, and manual runs work without verifying. There is no
+Databricks email and no notice in the workspace. **The cause cannot be identified
+from our side.** The platform did not start scheduled runs on 4 of the 17 days from
+10-02 to 10-18, and said nothing. Free Edition is documented as having no
+reliability guarantee or SLA. Nothing was lost: every run is idempotent, so the
+next run that happens catches up.
+
+**Closed, same day: prevention built.** The cause stays unknown and is outside our
+control, so the fix is detection from outside. `scripts/watch_jobs.py` asks the Jobs
+API, as `ledgerline-ci` (read-only), when each job with an active schedule last
+succeeded, and fails if that was more than 26 h ago (exit 1), or if it cannot ask at
+all (exit 2: a watcher that cannot look must not pass). `.github/workflows/job_watch.yml`
+runs it daily at 03:30 UTC (09:00 IST). A failed scheduled workflow is emailed by
+GitHub, which does not depend on Databricks being up. First live run, 10:25 UTC:
+`ledgerline-pii` **STALE** (last success 81.4 h earlier, 10-15), `ledgerline-silver` ok
+(the manual run). Its first scheduled run waits for the commit to reach GitHub's
+default branch.
+
+**Prevention:** every scheduled job has an absence check that runs **outside** the
+system that runs the job. An alarm that lives inside the platform goes silent
+exactly when the platform does.
+
+## [2026-10-18] — A new test signed in to the live Databricks workspace: an older test left two copies of the module that holds the `.env` guard (Session 17)
+
+**In plain words:** while building the job watcher, its test "with no credentials the
+watcher must fail" passed alone. In the full suite it signed in to the real
+workspace and listed real job runs. It only read; nothing was written or started.
+The cause was a hole in the Session 6 guard that keeps tests away from live
+services. That guard turns off `.env` reading by setting a flag on the module
+`generators._common`. An older test (`test_common.py`, the "imports stay lazy"
+check) removes that module, imports a fresh copy, and then puts the old one back
+in `sys.modules` but not on the package. After it runs there are two copies: the
+guard sets the flag on the fresh copy, and code imported earlier (here
+`watch_jobs`) uses the old one, whose flag is still off. So it read the real
+`.env` in the middle of a test.
+
+**Why it was invisible:** every test that calls a CLI `main()` after that test happens
+to import through the package, so it got the guarded copy. The Kafka produce tests
+were safe by luck. The hole needed a module imported **before** `test_common`
+ran, and that calls `load_local_env` **after** it ran. `watch_jobs` was the first.
+The guard's own canary test passed, because it checks the copy the guard
+touches.
+
+**Damage:** none written. One read of job metadata, as the `ledgerline-ci` service
+principal. No Kafka or S3 path went through the hole (checked: the only tests that
+call `main()` are `inventory_cdc`'s, which import the guarded copy).
+
+**Fix:** (1) `test_common` restores the package attribute as well as `sys.modules`;
+(2) `load_local_env` also stops if the environment variable `LEDGERLINE_NO_DOTENV`
+is set, and `conftest.py` sets it for every test. An environment variable is seen
+by every copy of a module; a module flag is not. After the fix the same test, in the
+full suite, stops at `KeyError: 'DATABRICKS_HOST'` (exit 2). 171 passed.
+
+**Prevention:** a "never in tests" switch lives in the process environment, not on
+a module object. Any test that swaps entries in `sys.modules` must restore both the
+entry and the package attribute. A new script that reads `.env` gets a test that
+expects it to **fail** without credentials: that test is what found this.

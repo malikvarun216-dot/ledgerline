@@ -3575,3 +3575,61 @@ been replaced. An analyst can read it until someone fixes it.
 - **Carried to Drill 3, by name:** a night whose data fails a Gold test. Measure
   what an analyst reads between the failure and the fix. If that exposure is real,
   build WAP by table clone then.
+
+## The verified-constraints table moves out of `CLAUDE.md` into `docs/constraints.md`, grouped by platform; `CLAUDE.md` keeps an index and the six rules that bite every session (Session 17)
+
+**In plain words:** the project's instruction file is sent with every single turn of
+every session. Half of it (30.5 KB of 63.4 KB) was one table of 120 platform facts,
+mostly about a platform the day's work was not touching. The table now lives in its
+own file, split into 13 sections (Delta, Streaming, Snowflake, dbt, …), and a session
+reads only the section for the platform it works on. The instruction file dropped to
+34.4 KB. That is about 7,000 fewer tokens per turn, roughly 420,000 over a 60-turn
+session.
+
+- Chosen: `docs/constraints.md`, rows moved **word for word** (checked by script:
+  each of the 120 rows appears exactly once), ordered by discovery within each
+  section. `CLAUDE.md` keeps a pointer, the section list and six cross-platform
+  rules. A newly verified fact goes into its section the day it is found, as
+  before. Tracked in git like the other docs: it holds no secrets and names no
+  private file (checked).
+- Rejected: **keep the table, prune old rows.** Every row is there because something
+  was re-discovered at a cost (CLAUDE.md: "do not re-discover these"). Deleting rows
+  saves tokens by bringing that risk back.
+- Rejected: **one long unsorted file.** Smaller per turn, but a session would still
+  have to read all 120 rows to find the 20 about Snowflake.
+- Rejected: **local-only (`.git/info/exclude`)**, like the private narrative docs.
+  These are project facts with evidence, the kind of thing the repository exists
+  to show, and nothing in them is personal.
+- Risk accepted: a fact is now read only when its platform is in play. A rule that
+  bites everywhere has to be in `CLAUDE.md`'s short list, or it can be missed.
+  The six chosen are the ones that recurred across sessions (print in
+  `foreachBatch`, commits not ours, MERGE dedup, live-service tests, Snowflake
+  naming / pipes / roles, dbt entry points).
+
+## Scheduled Databricks jobs are watched from outside Databricks: a daily GitHub Actions check of the Jobs API (Session 17)
+
+**In plain words:** Free Edition skipped scheduled runs on 4 days and nobody was told
+(incidents.md 2026-10-18). Every alarm we had runs inside Databricks, so when the
+workspace does not run, those alarms do not run either. A small script now asks
+Databricks every morning "when did each scheduled job last succeed?", from GitHub's
+servers. If the answer is more than 26 hours ago, or there is no answer, the check
+fails and GitHub emails the owner.
+
+- Chosen: `scripts/watch_jobs.py` + `.github/workflows/job_watch.yml` (03:30 UTC,
+  plus a manual button). As `ledgerline-ci` with the secrets the deploy workflow
+  already holds, read-only. It watches every job whose schedule is UNPAUSED, so a
+  new scheduled job is covered without editing the watcher. 26 h: a day's missed
+  run leaves the newest success at least 26.5 h old at check time; a normal day
+  about 3 h.
+- Rejected: **a SQL Alert in Databricks** ("no merge-log row in 26 h"). It is
+  scheduled by the same workspace that skipped the jobs, so it fails in the same
+  way at the same time.
+- Rejected: **Airflow** (a sensor or SLA on the DAG). It runs on the laptop only
+  while a session is open, so it would see nothing for the days in between, which
+  is exactly when the jobs went missing.
+- Rejected: **only a manual check at session start.** It catches the gap days later
+  (this one: 3 days for 10-16, 7 for 10-11), and depends on remembering.
+- Known limits: GitHub runs `schedule` only from the default branch, may start it
+  late, and pauses it after 60 days without repository activity. It watches
+  success, not correctness: a run that succeeds while doing nothing passes. That is
+  the merge-log alarms' job.

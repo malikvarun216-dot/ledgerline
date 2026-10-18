@@ -18,7 +18,7 @@ entry.
    in `### Next` with the reason. A silent skip is what happened to `exp_02`
    (incidents.md 2026-09-30) — this file exists so it cannot happen again.
 2. **B?** rows: verify on the platform first. If it works, build it. If the
-   platform refuses, record the finding in CLAUDE.md's verified-constraints table
+   platform refuses, record the finding in `docs/constraints.md` (S17; before, CLAUDE.md's table)
    and turn the row into **T** at the same session — never drop it.
 3. **Session end, before the check:** each **T** row of the session gets a short
    theory note and one interview question in `learning.md` Part C, section

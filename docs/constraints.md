@@ -1,0 +1,197 @@
+# Verified platform constraints — do not re-discover these
+
+Facts proven on this project's real accounts (not taken from docs), each with what it
+forces us to do. Moved out of `CLAUDE.md` in Session 17 so it is not re-sent on every
+turn; `CLAUDE.md` keeps a short index and the rules that bite most often.
+
+**How it is used.** Before working on a platform, read its section (`grep -n '^## '
+docs/constraints.md` for the line numbers). A newly verified fact gets a row in the right
+section the day it is found, with the session that proved it. Rows are in the order
+they were found within each section.
+
+## Databricks — Delta tables (MERGE, constraints, VACUUM, clones, schema evolution)
+
+| Fact | Consequence |
+|---|---|
+| Delta supports `WHEN NOT MATCHED BY SOURCE` (DBR 12.2 LTS+) | MERGE-gap experiment lives on Delta |
+| **Predictive Optimization is ENABLED for every managed table** (inherited from metastore `metastore_aws_us_east_2`) | Databricks runs OPTIMIZE (and VACUUM, ANALYZE) on its own, as a service principal — `bronze.orders` v9, 80 min after the load: 24 files → 1 (~42 MB). VACUUM uses `delta.deletedFileRetentionDuration` (default 7 days), so time travel past that silently stops working unless a table sets its own retention. Seen S7 |
+| `replaceWhere` on an **unpartitioned** table rewrites every file that holds a replaced row | A 3,095-row night replaced as a 6,190-row write (the other night's rows copied, values unchanged). `numOutputRows` counts copied rows |
+| **A MERGE that changes nothing still commits a version** (exp_03: `0/0/0`, v2 → v3) | "Already applied" is decided *before* the MERGE (`silver.dims_merge_log`), or every no-op run adds an empty version |
+| **Delta adds its own `OPTIMIZE` (`auto: true`) seconds after some writes** — `silver.seller` v5, 2 s after a MERGE | Version numbers are not ours alone. Find your commit by operation after version N (`merge_night`), never "the latest version" |
+| `WHEN NOT MATCHED BY SOURCE DELETE`, `table_changes` (CDF), `min_by`, and setting `spark.sql.session.timeZone` all work on Free Edition serverless | Verified S8 by running, not by the docs |
+| **`df.write.mode("overwrite").saveAsTable(t)` on an existing table is a table replace** — history shows `CREATE OR REPLACE TABLE AS SELECT` (`isV1SaveAsTableOverwrite`), every row of every night gone | exp_02 B: one night deleted the other 3,095 rows. Re-writable units are written only with `replaceWhere` |
+| `replaceWhere` checks every written row: a row outside the predicate fails the write with `DELTA_REPLACE_WHERE_MISMATCH`, nothing written | Seen exp_02 E. It does **not** catch a predicate built from wrong rows — that is `write_batch`'s folder check (exp_02 D) |
+| **Delta keeps a CHECK constraint's text exactly as written** (`delta.constraints.<name>`) and checks every existing row before adding one | `ensure_constraints` compares the stored text |
+| **A MERGE inserts two source rows for one *new* key twice, silently** — `DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE` fires only when they match an *existing* row | exp_04 A1/A2. In-batch dedup is the only guard for new keys; a missing one is invisible until a later batch matches two rows |
+| **`RESTORE` writes `delete` rows into the Change Data Feed** — one per row it removed (53 in exp_04 D) | A repair reaches Gold as deletes; the S13 export must carry `delete` rows |
+| **Delta treats a CHECK that evaluates to NULL as a violation** — unlike standard SQL. Adding `CHECK (shipped_at >= approved_at)` reported **3,156** violating rows = 1,359 real + 1,797 with a NULL side | Write `col IS NULL OR …` wherever NULL is legitimate. Our three production constraints are on never-NULL columns |
+| **Row-level concurrency works on Free Edition with deletion vectors on**: two MERGEs on different rows of one file, both reading v0, both committed. Same rows → `[DELTA_CONCURRENT_APPEND.ROW_LEVEL_CHANGES]`. Deletion vectors off → different rows still conflict: `[DELTA_CONCURRENT_APPEND.WITHOUT_HINT]` | Isolation shown in history: `WriteSerializable`. The loser retries; safe because every Silver MERGE is idempotent by its own condition |
+| **Predictive Optimization also runs `OPTIMIZE` with `auto: false`** (`silver.inventory` v5, 24 min after an `ADD CONSTRAINT`) | `auto: true` is Delta's post-write compaction; `auto: false` that nobody here ran is probably Predictive Optimization's service principal (`userName` not yet read). Neither is ours; find commits by operation |
+| **An append with `mergeSchema` adds new columns but keeps existing types**: a `long` arriving for an `int` column is written as `int` with no error; a value that does not fit → `CAST_OVERFLOW_IN_TABLE_INSERT` (ANSI), nothing written. `delta.enableTypeWidening` works on Free Edition and then widens the column | S11 E2. Kafka Bronze appends with `mergeSchema` (decisions.md S11); a widened field fails at its first big value — fix: enable type widening on that table, re-run the batch |
+| **`MERGE … INSERT *` / `UPDATE SET *` silently drop source columns the target lacks**; `MERGE WITH SCHEMA EVOLUTION INTO` adds them | S11 E3. Silver lists its columns by name anyway |
+| **Column mapping (`delta.columnMapping.mode = 'name'`) makes `RENAME COLUMN` / `DROP COLUMN` metadata-only** (2 files, same bytes before and after); without it, `DELTA_UNSUPPORTED_RENAME_COLUMN` | S11 E4 |
+| **The change feed cannot be read across a rename or drop**: `DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_SCHEMA_CHANGE`; reading from after the change works | S11 E5. Never rename a Silver column in place; the S13 export treats such a version as a new baseline |
+| **A Delta `DELETE` with deletion vectors rewrites no file** (`numRemovedFiles=0`): the row stays in a file the current table uses, readable by time travel. `REORG TABLE … APPLY (PURGE)` rewrites it; only `VACUUM` after the retention window removes the bytes | S12 `gdpr_erasure` A. Erasure = DELETE → PURGE → VACUUM; the change feed also keeps a `delete` row with the deleted values (B) |
+| **Serverless refuses `retentionDurationCheck.enabled=false` (`CONFIG_NOT_AVAILABLE`) and `VACUUM … RETAIN 0 HOURS`**; the only way to vacuum sooner is the table property `deletedFileRetentionDuration` | S12. After a 0-hour property, time travel fails on a **policy** error whether or not files were removed — not proof of deletion |
+| **A notebook that has read a file keeps answering from its cache after VACUUM deletes it**; a SQL warehouse (fresh compute) gets `FAILED_READ_FILE.DBR_FILE_NOT_EXIST` | S12. Verify an erasure on fresh compute, never in the session that read the data |
+| **A MERGE conflicts with a concurrent DELETE on a row it only *matched*** (unchanged by any clause) — `ROW_LEVEL_CHANGES`; with the row absent from its source, both commit | S12 `gdpr_erasure` D2/D3. And a MERGE whose source predates an erasure re-inserts the person, no error (D1) — read the forget list inside the MERGE |
+| **On Unity Catalog managed tables, VACUUM does not delete files a shallow clone still references**: twin without a clone deleted 1 file (1,039,828 B), the cloned source 0 (`numFilesToDelete 0`) | A shallow clone survives its source's VACUUM here — unlike path-based Delta. Deep clone: own files, own history, constraints + CDF carried; re-run copies only new files (8 of 10). S16 `delta_clone` |
+| **`DESCRIBE DETAIL` returns an empty `location` for managed tables on Free Edition** | Read storage folders from `_metadata.file_path` (S16) |
+
+## Databricks — Structured Streaming and Auto Loader
+
+| Fact | Consequence |
+|---|---|
+| Serverless `foreachBatch` runs in a **cloned session** | `spark.catalog.tableExists()` inside it answered False for an existing table. Create tables before the stream starts; keep the batch function one write path |
+| **`print` inside `foreachBatch` never reaches the notebook** on serverless | Evidence is table history and data, never print lines. Seen Drill 1: a replaceWhere commit happened with no line printed |
+| On a Volume, `dbutils.fs.ls` of a missing path raises **`INTERNAL: No such file or directory`** | Not "not found". Missing-path checks must match all three: `not found`, `filenotfound`, `no such file` (`_missing_path`) |
+| **Auto Loader tracks files by path.** Default `allowOverwrites=false` skips a file rewritten in place, **changed content included** | A corrected re-delivery was silently ignored (Drill 1). Production dims run with `allowOverwrites=True`, safe only because every write is `replaceWhere` |
+| **`cloud_files_state('<checkpoint>')` works on Free Edition** | Auto Loader's own list of ingested files, one query. Verified Drill 1 |
+| Auto Loader CSV defaults split **line breaks inside quoted fields** into extra rows; `_rescued_data` catches **none** | Reviews: 104,162 rows for 99,224 records, no error. Needs `multiLine=true` **and** `escape='"'` (RFC 4180 doubles quotes; Spark's default escape is `\`) |
+| A Delta table as a stream source, `foreachBatch` MERGE through temp views on `batch_df.sparkSession`, and `DESCRIBE HISTORY` inside the batch all work on Free Edition | Verified S9 (Silver CDC). Helpers inside the batch take their session from the DataFrame, never the notebook's `spark` |
+| **A stream that dies inside a notebook command fails the command, even when the code catches the error** ("Some streams terminated before this command could finish!"); "Run all" stops there | Never fail a stream on purpose in a notebook. Recreate the state a failure leaves, or call the batch function directly on the batch's rows (exp_01; exp_04 `apply_directly`). Found 2026-09-27, repeated S10 because it was only in `incidents.md` |
+| **A Delta stream can run an empty micro-batch** (0 rows) — `silver.inventory_cdc_log` batch 2, committed 2026-10-01 19:37 UTC (probably the S9 Job run) | Every batch function must be safe on 0 rows (ours are). Cause not yet read from Bronze's history |
+| **`startingVersion = 0` + `maxFilesPerTrigger`** replays a Delta table commit by commit, even after OPTIMIZE replaced those files — while VACUUM has not removed them | Silver orders' first build: 9 batches = Bronze's 9 data commits. Bronze's 30-day file retention makes this possible until ~2026-10-27 |
+| **A deleted Silver checkpoint loses no data — it breaks the log the lag alarm counts** (Drill 2: same app id → 100 rows applied, log line skipped, alarm 1; new app id → 317,350 logged for 158,725, alarm 0 with rows waiting) | `refuse_unsafe_reset` on both Silver streams (log must be empty) and `refuse_lost_log` on dims. A rebuild = new GENERATION **and** an empty log. Never weaken either |
+| **A batch function raising inside `foreachBatch`** surfaces as `[STREAM_FAILED] … [PYTHON_EXCEPTION] … Found error inside foreachBatch Python process` (with a `[cloned session …]`). Raised before the first write: `offsets/N` exists, `commits/N` does not, nothing written | The next run retries exactly that batch. Seen Drill 2 (orders refusal in a real stream; denylist + same checkpoint applied it) |
+| **A DataFrame fed to a batch function by hand is re-run at every action** — one defined over a table the batch writes changes after the batch's first write | Materialise hand-made inputs first (`createDataFrame(df.collect(), df.schema)` or a fixed table version). Drill 2 C counted 0 breaks until it did |
+| **A streaming row is judged late against the previous micro-batch's watermark**: the progress report for batch k shows *newest event time through batch k−2 − delay* (S11: batch 2 ran under batch 0's newest − 1 h) | Predict lateness against that, not the newest data. On a replay with months-wide batches nothing is late whatever the delay — size watermarks from live disorder, never from a replay |
+| **Chained stateful operators work on serverless `AvailableNow`**: `dropDuplicatesWithinWatermark` feeding a stream-stream left outer join with watermarks on both sides | Verified S11 (`windowed_streaming` part B), no error, = the batch answer |
+
+## Databricks — Free Edition, serverless, jobs, alerts
+
+| Fact | Consequence |
+|---|---|
+| **Databricks is Free Edition**, serverless only, workspace in **us-east-2** | No NAT gateway, no trial clock, $0. No classic clusters, no account console. Only `AvailableNow`/`Once` triggers |
+| A full batch read of `orders` from Free Edition takes **~3 min 43 s** | Slow, not broken — "0 rows read" mid-run is normal; the counter moves only when tasks finish |
+| **Free Edition sends job-failure emails and SQL Alert emails** | Verified S9 by firing each (`alarm_test` task; alerts set to `>= 0`). Job `ledgerline-silver` daily 06:00 IST; alert queries in `databricks/alerts/` |
+| **A failed serverless job task ran twice** ("2 attempts", no retry configured) | Every task must be safe to repeat — and is. A refused night fails twice before its email |
+| The new SQL Alert editor runs the **saved** alert, not unsaved edits; its column list is empty until the query has run there | Save, then Run alert. Test an alert by `>= 0`, then set it back |
+| **A failed serverless task emails once per run**, after its automatic retry ("Retry: 1st · Launched: By retry scheduler") | Test an alarm by the email, not by counting attempts. Verified Drill 2 |
+| **Unity Catalog lineage on Free Edition follows `foreachBatch` → temp view → `MERGE`** (`bronze.orders` upstream of `silver.orders`); "last activity" = the last query that *read data*, not the last job run | A daily run that finds nothing new leaves no lineage event. Verified Drill 2 (Catalog Explorer → Lineage) |
+| **`.cache()` / `persist()` are refused on serverless** (`NOT_SUPPORTED_WITH_SERVERLESS`: PERSIST TABLE) | Materialise small results with `createDataFrame(df.collect(), df.schema)` |
+| **Free Edition can silently not start a scheduled job**: both jobs had no run at all on 10-11, 10-16, 10-17, 10-18 (no failure, no "Skipped", schedule UNPAUSED, no email); a manual run the same day worked. Cause not visible to us; "Verify identity" is unrelated (GPU access) | Alarms inside Databricks cannot see it. `scripts/watch_jobs.py` checks last success from GitHub Actions daily (S17) |
+
+## Databricks — Unity Catalog, grants, secrets, bundles
+
+| Fact | Consequence |
+|---|---|
+| Free Edition **can** read S3 via a UC storage credential + external location, and Kafka via UC secrets | Proven by reading data (8,395 customer rows; 394,090 `orders` records), not by the docs, which are silent on both |
+| **A UC `PRIMARY KEY` is accepted and not enforced**, and adding it makes **no Delta commit** (it lives in Unity Catalog, shown under `# Constraints` in `DESCRIBE TABLE EXTENDED`, not in `delta.constraints.*`) | A duplicate key inserted fine. Neither Databricks nor Snowflake enforces a PK; Delta enforces only CHECK and NOT NULL |
+| **Unity Catalog allows 100 tables per schema**; Databricks emails at 80% ("approaching a Unity Catalog resource quota") | S11: experiment scratch filled 84 of `workspace.silver`'s. Experiments get their own schema; the dashboard shows tables per schema |
+| **Free Edition: groups made in workspace settings are account groups** (Source = Account) and take UC grants; service principals have **scoped, expiring OAuth secrets** (1–730 days) | S12. `is_account_group_member` and `is_member` both see them |
+| **Grants, column masks, row filters and tags make no Delta commit** — they live in Unity Catalog | S12. History of the vault unchanged by all four |
+| **Masks and row filters apply to the table owner** (grants do not); **a row filter's subquery runs with the function owner's rights** | S12: a reader with no grant on `silver.customer` got 17,166 SP rows through a filter that looks it up. PII writers must be in `pii_readers` |
+| **A bundle's run-as identity cannot read the notebooks the deployer uploaded** unless listed in the bundle's `permissions` (`CAN_VIEW`); `run_as` grants nothing, and UC grants do not cover workspace files | S12: first run failed in 0 s. A deploy is done only when one run as the run-as identity is green |
+| **`CREATE … IF NOT EXISTS` on an existing object needs no `CREATE` privilege** | S12: `ledgerline-jobs` ran `contact_vault` with only USE / SELECT / MODIFY / volume / READ FILES |
+| **Free Edition UC secrets: SQL cannot touch them** — `SHOW GRANTS ON SECRET` / `GRANT READ SECRET ON SECRET` → `[UC_SECRETS_NOT_ENABLED]` on the SQL warehouse **and** in a notebook; `dbutils.secrets.get(catalog=…, schema=…, key=…)` works. A job reading one needs `USE SCHEMA` on the secrets schema **and** `READ SECRET` on the secret | S15 incident: grant `READ SECRET` in Catalog Explorer → schema → Overview → **Secrets** tab → secret → Permissions (the left tree shows a secrets-only schema as "No data"; the schema grant dialog lists no secret privilege) |
+
+## Databricks — Lakeflow Declarative Pipelines (DLT)
+
+| Fact | Consequence |
+|---|---|
+| **Lakeflow pipelines run on Free Edition** with the new API: `from pyspark import pipelines as dp`, `dp.table`, `dp.expect*`, `dp.create_streaming_table`, `dp.create_auto_cdc_flow` (SCD1 and SCD2); serverless, Triggered; plain `.py` source files from a Git-folder path outside the pipeline's root folder; settings read with `spark.conf.get` | Verified S11 (`ledgerline-dlt`, schema `workspace.silver_dlt`). Free Edition: one active pipeline per type |
+| **AUTO CDC absorbs exact duplicate `(key, sequence)` rows, and silently accepts two *different* rows at one `(key, sequence)`** — no error, no warning, one kept (53 of 53 the first-arrived / higher-stock one) | Exact re-sends are safe to leave to it; a sequence tie must be refused **before** AUTO CDC (S11 `dlt_auto_cdc_ties`) |
+| **A full refresh commits its reset (`DLT REFRESH`) before reprocessing** — a full refresh that fails leaves the table **empty** | S11: `expect_or_fail` on 777 real rows → `orders_checked` 394,164 → 0. `expect_or_fail` only for rules the source cannot break |
+| DLT turns on `delta.enableRowTracking` on its tables (a `SET TBLPROPERTIES` commit in every update that sets the table up) | Seen S11 in `DESCRIBE HISTORY` of `orders_checked` |
+
+## Databricks — ML (Feature Engineering, MLflow)
+
+| Fact | Consequence |
+|---|---|
+| **Feature Engineering runs on Free Edition** (`%pip install databricks-feature-engineering` + restart; it upgrades `databricks-sdk` 0.122 → 0.147 in that session); MLflow is **3.12.0** | S12b. `fe.log_model` registers an MLflow-3 logged model; the raw model is at `data/feature_store/raw_model` |
+| **`score_batch` feeds the model through a Spark UDF: a NULL BIGINT arrives as pandas nullable `Int64` + `pd.NA`**, not float NaN as with `toPandas()` | S12b: scikit-learn refused it. Normalise input types inside the model |
+| **Score a registered model in a session of its own** — the training session's `score_batch` kept answering like an older version | S12b: fresh session = training on 52,777 of 52,777 (cause inferred: workers' cached model) |
+
+## Kafka and Confluent (incl. Spark reading Kafka)
+
+| Fact | Consequence |
+|---|---|
+| Databricks runs in AWS, can't reach laptop Kafka behind NAT | Kafka is cloud-hosted (Confluent) |
+| **Confluent has no cluster downgrade** — Basic→Standard only | Tier is a creation-time commitment; fixing it means delete + rebuild |
+| **Confluent Basic excludes topic-level RBAC** (Standard+ only) | Topic authorization drops to **ACLs**, a different console surface |
+| **A Schema Registry API key authenticates but authorizes nothing** | Subject access is a separate `DeveloperWrite` role binding. Without it the first produce fails `403 / SR 40301`, not at connect time |
+| **A consumer using `assign()` still needs a consumer-group READ ACL** | Skipping `subscribe()` skips the rebalance protocol, not the coordinator lookup — and that lookup is authorized. Prefixed ACL on the group name |
+| **A new Confluent environment auto-creates a Flink compute pool** | Billable, `Running`, created as a side effect. No cost guard here watches it because nothing here started it. Delete it |
+| Confluent Basic: 1st eCKU free, data in/out **$0.06/GB**, storage **$0.09/GB-month** | A full produce + readback is ~$0.02. "$0 at rest" is really ~$0.01/mo at this volume |
+| Free Edition decodes Kafka Avro with **`from_avro` + Schema Registry**; Spark's Kafka reader needs **no consumer-group ACL** | Proven S7 by a probe read (15 `orders` records, group prefix with no ACL). Unlike librdkafka (S5), which does need one |
+| `from_avro` in **PERMISSIVE** mode returns a record with **all fields NULL** on a failed decode — not NULL. It looks up the **schema id in each message**; an unknown id fails the decode | Detect a failed decode by a required field (`event_id IS NULL`), never `record IS NULL`. Proven S7 by the quarantine self-test |
+| The registry key (`DeveloperWrite`) can **register** schemas but gets **403 `WriteCompatibility`** when changing a subject's compatibility mode | Set modes in the Confluent console. Chosen S7: `BACKWARD_TRANSITIVE` on both subjects (Bronze always reads with the newest schema, and rebuilds re-read every version) |
+| **Confluent topics default to `retention.ms` = 1 week**; the project's Kafka key cannot read topic settings (`TOPIC_AUTHORIZATION_FAILED` on `describe_configs`) | Read retention in the console. Set to **3 months** in S7 → both topics empty themselves around **2026-12-25**; after that Bronze's raw bytes are the only copy |
+| **Delta decides a `txnVersion` skip from its log, before the batch reads Kafka** | 8 skipped batches took 17 s vs 531 s to load them. Checkpoint deleted + app id kept = every batch ≤ the remembered version skipped, **new messages included**, no error (Drill 1: 74 lost). `refuse_unsafe_reset` guards it — never weaken it |
+| Spark sizes each Kafka micro-batch **in proportion to what each partition holds** | "Batch 7" covered 44,099 messages in one life and 44,177 in another. A batch number is not a stable set of messages |
+
+## AWS and Databricks billing
+
+| Fact | Consequence |
+|---|---|
+| **A Databricks workspace provisions a NAT gateway** (~$33–41/mo, 24/7) | **No auto-terminate covers it.** Idle cost ≈ 1.5–2× the whole budget |
+| **Databricks Standard tier is discontinued on AWS** (auto-upgraded 2025-10-01) | Premium is the floor, not a choice; Enterprise is the only tier above |
+| Databricks accepts **AWS Marketplace** as a payment method | Routes DBUs through the AWS bill — **but not on this account** (AISPL, row below). Moot while on Free Edition |
+| **The AWS account is AISPL** (Service provider: *Amazon Web Services India Private Limited*) | AWS Marketplace rejects Indian cards, so Databricks cannot be billed through AWS. Upgraded from the Free plan (would have closed 2026-10-17) on 2026-09-26 |
+| An S3 `ListBucket` scoped by `s3:prefix` must list `p`, `p/` **and** `p/*` | UC's validation lists without the trailing slash; `["p/", "p/*"]` alone fails "Read" with an unhelpful Permission Denied |
+
+## Bridge — Databricks writes Parquet for Snowflake
+
+| Fact | Consequence |
+|---|---|
+| **Serverless refuses `spark.sql.parquet.outputTimestampType`** (`CONFIG_NOT_AVAILABLE`); its default Parquet timestamps reach Snowflake as `TIMESTAMP_NTZ`, exact to the second (answer key matched) | Leave the default |
+| **Spark Connect refuses `.write.mode("errorifexists")`**; the same mode is spelled `"error"` | Bridge export uses `"error"` |
+| A new UC external location defaults to **file events on**; without `s3:GetBucketNotification` the test fails two lines, and **Force create** keeps the flag "Enabled" | Harmless: the role cannot write notifications, so the bucket's events stay Snowpipe's |
+| Databricks Parquet folders hold `_started_*`, `_committed_*`, `_SUCCESS` beside `part-*.parquet` | Every COPY / pipe uses `PATTERN = '.*[.]parquet'`; the S3 event uses suffix `.parquet` |
+
+## Snowflake
+
+| Fact | Consequence |
+|---|---|
+| **Snowflake does not** support that clause | Needs an anti-join workaround |
+| Snowflake trial is 30 days / $400 | The **calendar** binds, not the credits (~15 used) |
+| **Time travel on a pipeline streaming table is refused** (`VERSION AS OF` → "reconciliation query was not resolved for the StreamingTable or MaterializedView") | Repair a DLT table by re-running from its source, not `RESTORE`. Bronze being complete is the backup |
+| **`event_log(TABLE(t))` returns the whole pipeline's log**, not only `t`'s; each expectation is evaluated on every incoming row independently (`op_known` passes rows `not_denylisted` then drops); `expect_or_fail` logs `failed 1` and stops | Read the log once and group by `dataset`. Verified S11 |
+| **The Snowflake trial form (2026-10-11) offered no AWS Mumbai region** | Snowflake in us-east-2 beside Databricks; the bridge bucket is a new one in us-east-2, so S3 → Snowpipe notifications stay in-region |
+| **Snowsight's run key runs only the statement under the cursor**; the result pane shows only the last statement | The first cost-guard run executed 1 of 17 statements. Ctrl+A first, read Query History; SQL that matters runs through `scripts/sf.py` |
+| **A new Snowflake trial makes 3 warehouses (one multi-cluster, max 10), a learning role and DB, sets query acceleration ON, runs in America/Los_Angeles, and grants `PUBLIC` AI functions, Cortex and CPU/GPU compute pools** | All found S13, guarded or revoked in `01_cost_guards.sql`; account TIMEZONE = UTC |
+| `SHOW ORGANIZATION ACCOUNTS` as `ORGADMIN` returned **0 rows** on the trial | Edition proven by a masking policy (Enterprise-only) instead |
+| A resource monitor is visible only to ACCOUNTADMIN (others see `resource_monitor = null`, 0 monitors) | Read monitors as the human, not through `sf.py` |
+| **`METADATA$FILENAME` starts at the bucket (includes the stage's prefix); `COPY_HISTORY.FILE_NAME` is relative to the stage** | The first load tagged 504,039 rows `silver` (incidents.md 2026-10-11). Table name = folder before `v<from>-<to>` |
+| **An unqualified name inside a stage or pipe resolves in the caller's schema** | Fully qualify every name in stages, pipes, views |
+| **Re-creating a pipe drops its load history**; `REFRESH` queues files staged in the last 7 days | Never `CREATE OR REPLACE` a pipe that has loaded; never `REFRESH` a re-created one |
+| **`COPY` loads a re-`PUT` file again, even byte-identical**; pipe-then-COPY reloads, COPY-then-pipe did not (inferred) | The opposite of Auto Loader's skip. Downstream idempotent by `(table, key, _commit_version)`; RAW pipe-only |
+| Snowflake PK not enforced; MERGE refuses 2 source rows (even identical) for an existing key (`100090`), inserts 2 for a new key | Same as Delta: dedup every MERGE source |
+| **A Snowflake user created since 2024 has `DEFAULT_SECONDARY_ROLES = ('ALL')`**: every role it holds is active in every session, whatever role it signed in with | S14: dbt "as TRANSFORMER" was authorised to INSERT into RAW (as LOADER); the analyst read RAW. `LEDGERLINE_SVC` now `= ()`. Test a grant in a session holding only that role (`CURRENT_SECONDARY_ROLES()` printed) and show one refusal |
+| **A NULL value is absent from a `VARIANT` object** (Parquet nulls are not written as keys) | A field missing in some rows is normal; the drift check (`raw_fields_declared`) looks only for undeclared fields/types |
+| `HASH(* EXCLUDE (…))` is refused at compile (`002079`) | Staging carries `change_hash = hash(record)` |
+| **Snowpipe auto-ingest verified**: a bridge file loaded 25 s after it was written, no `REFRESH` | S15: 4 files, 152,923 rows. After every export: `12_check_raw.sql` — its table list must name every Silver table (it flagged `customer_order_link` until added) |
+| **A Snowflake schema clone keeps each table's original owner and drops `MANAGED ACCESS`** (and future grants); a **table** clone is owned by the cloner | CI clones tables (`dbt clone`), never schemas; a swap-based publish would need governance re-applied. `s16_clone` B1–B3 |
+| **A Snowflake clone survives its source's DROP** (shared micro-partitions kept while any table uses them); clone of 99,441 rows ≈ 2 s | Unlike a Delta shallow clone. `s16_clone` A4 |
+| `INFORMATION_SCHEMA.TABLE_STORAGE_METRICS` has **no row for a minutes-old table** (background); its column is `TABLE_DROPPED`, not `DELETED` | Byte-level clone checks need hours, not seconds (S16) |
+
+## dbt
+
+| Fact | Consequence |
+|---|---|
+| **A dbt snapshot dates a hard delete with `current_timestamp()`** — its `deletes` step is an anti-join (snapshot LEFT JOIN source WHERE source key IS NULL); `ignore` / `invalidate` / `new_record` all use run time | exp_05: the 19 deleted customers still in the 2017-12-28 picture. A snapshot is fed one night per run (`scripts/snapshot_nights.py`) |
+| dbt does not read `.env`; a dbt default selector built from `fqn: "*"` **does not reach sources** (`source freshness` silently had nothing to do) | Run dbt via `python scripts/run_dbt.py …` (profile in `dbt_project/`); `selectors.yml` also selects `source: "*"` |
+| **dbt custom incremental strategies work on dbt-snowflake 1.12**: a macro `get_incremental_<name>_sql(arg_dict)` → `incremental_strategy='<name>'`; `arg_dict` has `target_relation`, `temp_relation`, `unique_key`, `dest_columns`, `incremental_predicates` | S15 `merge_changes` (in-band deletes). dbt's own `merge` writes only UPDATE/INSERT: a delete row becomes data (`s15_merge` B) |
+| **A dbt unit test that mocks `this` needs the model to exist** — `dbt build` runs unit tests *before* the model, so on the first build it errors "relation doesn't exist" | Build the model once (`--exclude test_type:unit`), then the unit test runs every build after |
+| **A high-water mark read from the target never re-reads a row whose change has not moved** — an order loaded before its dimension link stays unlinked forever | `fct_orders` re-selects unlinked orders *whose link now exists* (re-selecting every unlinked order rewrote all 99,441 each run) |
+| **dbt-snowflake builds TRANSIENT tables by default** (no Fail-safe, Time Travel ≤ 1 day); a transient table **cannot be cloned into a permanent one** (`002120`) | Gold + snapshots were transient S14–S16 unnoticed. `+transient: false`; history converted by CTAS copy + `HASH_AGG` check + `SWAP`, never replay (re-dates deletes). S16 |
+
+## Our own data and sources
+
+| Fact | Consequence |
+|---|---|
+| **The dims dumps' zips have no leading zero** — the Olist contract reads them as `Int64` (`09790` → `9790`) | Silver pads to five digits, verified lossless. Never "fix" the generator mid-stream: every such row would look changed (decisions.md S8) |
+| **Dims landing is write-once** (S8) | A run that would change a landed night writes nothing and names it. Corrections only via `--redeliver DATE`. Night 5 command in `progress.md` S8 |
+| **The CDC feed's before/after images break their own `seq` order on 237 SKUs** (1,423 links; 26 SKUs end 27 units off their deltas) | A source defect, pinned by a test, counted by Silver (`chain_breaks`), never "fixed" in the generator. Totals and deltas cannot see it; only a chain check can (incidents.md 2026-10-01) |
+
+## Repo, tests, git, GitHub CI
+
+| Fact | Consequence |
+|---|---|
+| **Tests that call a CLI `main()` inherit `.env` and installed clients** | Session 6: the suite published to live `inventory.cdc` from the laptop. `tests/conftest.py::no_live_services` (autouse) now blocks every live credential. Never weaken it; after touching it, re-count the live topic |
+| **Databricks re-saves a notebook on open/run**: adds a `[tool.databricks.environment]` header, drops the final newline | Uncommitted "M" files → a Pull conflicts. Notebooks are committed in that exact form with `environment_version = "6"`; `tests/test_notebooks.py` enforces it |
+| Git-folder conflict → **never merge**: Abort, read one diff, Discard changes, Pull | The workspace is a consumer of git; its side is never kept |
+| **Working-tree files can be CRLF while git holds LF** (an editor re-saves after checkout; `.gitattributes` acts only when git writes) — dbt checksums the disk | Local slim CI saw 18 phantom changes. `tests/test_line_endings.py` fails on any `w/crlf` (S16) |
+| **GitHub rejects a workflow using `${{ runner.* }}` at job level** — no job runs, the PR stays green, Actions names the run by its path | `actionlint` runs in `ci` (it flags exactly this). Verify a new check by its name on a PR (S16) |
+| **A test that pops a module from `sys.modules`, re-imports it and restores only `sys.modules` leaves two copies**: the package attribute points at the new one | conftest's module flag guarded one copy; a script imported earlier read the real `.env` in a test (S17). The guard is now also an environment variable, `LEDGERLINE_NO_DOTENV` |

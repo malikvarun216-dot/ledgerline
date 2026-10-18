@@ -1,0 +1,41 @@
+name: job-watch
+
+# Did every scheduled Databricks job succeed in the last 26 hours? (incidents.md 2026-10-18)
+#
+# Free Edition did not start either scheduled job on 4 of 17 days and said nothing. Every alarm
+# built so far lives inside Databricks, and a run that never starts fails nothing, so no alarm
+# fires. This check runs outside it, on GitHub's clock. When it fails, GitHub emails the person who
+# last changed this schedule. Read-only: as the `ledgerline-ci` service principal (the deploy
+# secrets), it lists jobs and runs and starts nothing.
+#
+# GitHub runs `schedule` only from the repository's default branch, and pauses it after 60 days
+# with no repository activity.
+on:
+  schedule:
+    - cron: "30 3 * * *"  # 03:30 UTC = 09:00 IST, after the 06:00 / 06:30 IST jobs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04  # pinned, as in ci.yml
+    timeout-minutes: 5
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: python -m pip install "databricks-sdk==0.117.0"
+
+      # Exit 1 = a job is stale, 2 = could not check. Both fail the run, and so both send an email.
+      - name: Every scheduled job succeeded within 26 h
+        run: python scripts/watch_jobs.py --max-age-hours 26

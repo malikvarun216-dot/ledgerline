@@ -211,9 +211,16 @@ def test_generators_import_without_any_cloud_sdk_installed():
             importlib.import_module(name)
     finally:
         sys.meta_path.remove(blocker)
+        # Put back sys.modules AND the package attribute. Restoring only sys.modules left
+        # `generators._common` (the attribute) pointing at the fresh copy: conftest then guarded
+        # that copy while code imported earlier used the old one, and read .env
+        # (incidents.md 2026-10-18, the watcher test that reached Databricks).
+        import generators
+
         for name, module in saved.items():
             if module is not None:
                 sys.modules[name] = module
+                setattr(generators, name.rsplit(".", 1)[1], module)
 
 
 def test_cloud_sinks_fail_at_construction_not_at_import():
@@ -305,6 +312,7 @@ def test_load_local_env_does_not_override_an_already_set_variable(tmp_path, monk
 
     monkeypatch.setenv("LEDGERLINE_PROBE", "from_environment")
     monkeypatch.setattr(common, "_env_loaded", False)
+    monkeypatch.delenv("LEDGERLINE_NO_DOTENV")  # this test reads a .env on purpose: its own
     common.load_local_env(env_file)
 
     assert os.environ["LEDGERLINE_PROBE"] == "from_environment"
@@ -509,6 +517,7 @@ def test_no_test_can_see_a_live_credential(monkeypatch, tmp_path):
 
     assert [n for n in _LIVE_CREDENTIALS if n in os.environ] == []
     assert _common._env_loaded is True, ".env must look already loaded, so it is never read"
+    assert os.environ.get("LEDGERLINE_NO_DOTENV") == "1", "every module copy must see the switch"
     assert os.environ["AWS_ACCESS_KEY_ID"] == "testing-not-a-real-key"
     with pytest.raises(RuntimeError, match="KAFKA_BOOTSTRAP_SERVERS"):
         _common._kafka_config_from_env()

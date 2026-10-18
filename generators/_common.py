@@ -69,7 +69,10 @@ def load_local_env(path: str | Path = ".env") -> bool:
     in the shell, or set by a test, must beat the file on disk.
     """
     global _env_loaded
-    if _env_loaded:
+    # LEDGERLINE_NO_DOTENV is set by tests/conftest.py for every test. Unlike the module flag it
+    # holds for every copy of this module (incidents.md 2026-10-18: a re-imported copy kept
+    # its flag False and read the real .env inside a test).
+    if _env_loaded or os.environ.get("LEDGERLINE_NO_DOTENV"):
         return True
     try:
         from dotenv import load_dotenv
