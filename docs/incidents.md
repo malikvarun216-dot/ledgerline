@@ -2724,3 +2724,83 @@ full suite, stops at `KeyError: 'DATABRICKS_HOST'` (exit 2). 171 passed.
 a module object. Any test that swaps entries in `sys.modules` must restore both the
 entry and the package attribute. A new script that reads `.env` gets a test that
 expects it to **fail** without credentials: that test is what found this.
+
+**Verified on GitHub, same day:** after push `292b346`, `ci` #82 ran green (1 m 5 s:
+lint, actionlint incl. `job_watch.yml`, 171 tests). `job-watch` #1 (manual, `dev`)
+ran 16 s and **failed with exit code 1**, meaning "a job is stale", not 2 ("could not
+check"). So it signed in from GitHub with the deploy secrets, read the runs, and
+judged `ledgerline-pii` stale, as the laptop run did. The workflow is listed with
+"Run workflow" on the `dev` run, so its daily schedule is live. The next scheduled
+check is 2026-10-19 03:30 UTC. If the 10-19 06:30 IST PII run happens, it goes green.
+
+## [2026-10-18] — Airflow's RAW check failed a clean RAW on its first run, and the same check would have failed every night from 2026-10-25 (Session 17)
+
+**In plain words:** the first time Airflow ran the "is RAW correct?" step, it reported 8
+problems and stopped. RAW was fine. The step counted the rows of a summary table, which
+always has one row per Silver table, as if they were errors. While fixing that, a second
+fault showed up in the same file. One of its checks compares RAW with Snowflake's load
+history, which keeps only 14 days. All 11 files were loaded on 10-11, so from 2026-10-25
+that check would have flagged every file, every night, on a correct RAW.
+
+**What happened.** `airflow tasks test ledgerline_nightly check_raw` →
+`12_check_raw: 8 problem row(s)`, exit 1. The 8 rows were `('customer', 96358, …)` …
+`('order_items', 112650, …)`: the file's last query (per-table rows and change types).
+Checks A–E returned nothing. `pipeline_step.check_raw` (written S16) counted the rows of
+**every** `SELECT` as problems.
+
+**Why nothing caught it.** The file had only ever been run by a person through `sf.py`,
+and a person knows that the last table is a summary. `check_raw` had no test, and it had
+never run until today: S16 built the DAG and stopped before running it. The 14-day limit
+was invisible because every file was younger than 14 days on every run so far. A check
+whose input expires passes on every day it has been tried, up to the day it fails.
+
+**Fix.** `pipeline_step.is_check`: only a query whose first column is `problem` counts.
+The summary prints as information. 4 tests, including one that every `SELECT` in the file
+is either a check or the summary (175 passed). Check D now only looks at files whose
+`LOADED_AT` is within 13 days. Older files stay covered by `raw-has`, which compares rows
+per folder with the bridge's `export_log`, and that log does not expire. Simulated with a
+6-day history window (files are 7 days old): old D flagged **11 of 11** files, new D **0**.
+Re-run as an Airflow task: `0 problem row(s)`, exit 0.
+
+**Prevention.** A check whose job is to fail gets one test that it passes on correct data
+and one that a real problem fails it. A summary in a check file is told apart by its
+columns, never by its position. Any check that reads a history with a retention limit
+(Snowflake `COPY_HISTORY` 14 days, Delta 7-day file retention, GitHub run logs) states
+what covers the rows that have aged out. Without that, it either goes silent or fails
+falsely on the day of the limit.
+
+## [2026-10-18] — The arrival-mark change half-applied in production: one fact was rebuilt, the other skipped, because a unit test ran before the table had the new column (Session 17)
+
+**In plain words:** the change gave both Gold facts a new column. The rebuild of
+`fct_order_items` succeeded. `fct_orders` was never rebuilt: dbt runs a model's unit test
+first, and that test describes the current table with the new column, which the live table did
+not have yet. For about 1.5 minutes production held one fact on the new design and one on the
+old. Both held correct data, so nothing an analyst read was wrong.
+
+**What happened.** `run_dbt.py build --select fct_orders fct_order_items --full-refresh` →
+`fct_order_items` SUCCESS 112,650; unit test `fct_orders_incremental_…` ERROR: *"Invalid column
+name: 'raw_loaded_at' in unit test fixture for 'fct_orders'. Accepted columns … are"* the 15
+existing ones; `fct_orders` SKIPPED. dbt takes a `this` fixture's allowed columns from the table
+as it exists in the warehouse.
+
+**Why nothing caught it.** `constraints.md` already had half of it from S15 ("a unit test that
+mocks `this` needs the model to exist"), but the dbt section was not re-read before the change,
+against CLAUDE.md's rule to read a platform's section before working on it. The drafts were
+reviewed as text in the scratchpad, and text review cannot see an ordering rule inside dbt.
+
+**Fix.** `build --select fct_orders --full-refresh --exclude test_type:unit` (99,441, 7 tests
+pass), then the unit test alone (pass). Both facts compared with zero-copy backups taken before
+the change (`S17.FCT_*_BEFORE_ARRIVAL`): **0 rows differ** on every old column, both ways.
+
+**Found on the way, fixed the same hour:** the first normal nightly build on the arrival mark
+rewrote **all 99,441 orders and 112,650 items** (the whole log arrived within one hour, inside
+the overlap). Changes the table already holds are now dropped before the MERGE: **0 rows** on the
+next build, 71/71 tests pass.
+
+**Prevention.** A change that adds a column to a model with a `this` unit test runs in two steps:
+build with `--exclude test_type:unit`, then the unit test. The S15 constraint row now says so.
+Before a planned change to production: back up the tables it rewrites (a zero-copy clone costs
+nothing), and re-read the platform's `constraints.md` section. Every time this session skipped
+that, the platform taught the same fact a second time. Open: slim CI clones the old table, so a
+PR adding a column to an incremental model fails CI the same way. It is to be handled when the
+next such PR is opened, and is recorded in the constraint row.

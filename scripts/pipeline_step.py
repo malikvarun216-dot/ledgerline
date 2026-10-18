@@ -129,8 +129,15 @@ def raw_has(summary: str) -> int:
     return 0 if not short else 1
 
 
+def is_check(description) -> bool:
+    """A check query names its first column `problem` and returns rows only when something is wrong.
+    12_check_raw.sql also ends with a summary that always returns rows: S17's first Airflow run
+    counted its 8 rows (one per table) as 8 problems on a clean RAW."""
+    return bool(description) and description[0][0].upper() == "PROBLEM"
+
+
 def check_raw() -> int:
-    """Run snowflake/12_check_raw.sql; every query in it returns rows only when something is wrong."""
+    """Run snowflake/12_check_raw.sql: a pass when every check query (first column `problem`) is empty."""
     import io
 
     from sf import connect
@@ -143,11 +150,16 @@ def check_raw() -> int:
         cur = conn.cursor()
         for statement, _ in split_statements(io.StringIO(sql), remove_comments=True):
             cur.execute(statement)
-            if cur.description and statement.lstrip().upper().startswith("SELECT"):
-                rows = cur.fetchall()
+            if not cur.description:
+                continue
+            rows = cur.fetchall()
+            if is_check(cur.description):
                 problems += len(rows)
                 for row in rows[:5]:
                     print(f"  PROBLEM {row}")
+            else:
+                for row in rows:
+                    print(f"  {row}")
     finally:
         conn.close()
     print(f"12_check_raw: {problems} problem row(s)")

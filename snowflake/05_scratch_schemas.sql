@@ -57,3 +57,19 @@ GRANT USAGE ON SCHEMA LEDGERLINE.S16 TO ROLE LEDGERLINE_TRANSFORMER;
 GRANT CREATE TABLE, CREATE VIEW ON SCHEMA LEDGERLINE.S16 TO ROLE LEDGERLINE_TRANSFORMER;
 
 SHOW GRANTS ON SCHEMA LEDGERLINE.S16;
+
+
+-- Session 17: exp_06 (a change file loaded late, below the facts' high-water mark; a version
+-- lookback; an arrival-time mark; dbt microbatch with lookback) builds here, as the transformer.
+-- S16 is dropped: it holds only ORDERS_CLONE / ORDERS_BEFORE (99,441 rows each, 2026-10-12), the
+-- clone experiment's tables; its findings are in progress.md / incidents.md (S16), nothing reads it.
+USE ROLE SYSADMIN;
+CREATE SCHEMA IF NOT EXISTS LEDGERLINE.S17
+  COMMENT = 'Session 17 experiments: late change file vs high-water mark, lookback, arrival mark, microbatch. Scratch.';
+DROP SCHEMA IF EXISTS LEDGERLINE.S16;
+
+USE ROLE SECURITYADMIN;
+GRANT USAGE ON SCHEMA LEDGERLINE.S17 TO ROLE LEDGERLINE_TRANSFORMER;
+GRANT CREATE TABLE, CREATE VIEW ON SCHEMA LEDGERLINE.S17 TO ROLE LEDGERLINE_TRANSFORMER;
+
+SHOW GRANTS ON SCHEMA LEDGERLINE.S17;

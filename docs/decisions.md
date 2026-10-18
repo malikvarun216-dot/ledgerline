@@ -3633,3 +3633,81 @@ fails and GitHub emails the owner.
   late, and pauses it after 60 days without repository activity. It watches
   success, not correctness: a run that succeeds while doing nothing passes. That is
   the merge-log alarms' job.
+
+## The Gold facts read new changes by when they ARRIVED in RAW, with a one-hour overlap, not by their Silver version (Session 17)
+
+**In plain words:** `fct_orders` and `fct_order_items` used to read only changes with a Silver
+version higher than the newest one they already held. If a file reaches Snowflake late, for
+example because Snowpipe skipped it and it was reloaded later, its versions are already below
+that mark, and the facts never read them. exp_06 measured it on the real order log: **13,431
+of 99,441 orders** ended up wrong (9,365 missing, 4,066 with an old status), silently. From now
+on the facts read changes by **arrival time** (RAW's `LOADED_AT`). A late file arrives after the
+mark whatever versions it holds. Each run re-reads the last hour of arrivals, because Snowpipe
+can commit two files slightly out of order.
+
+**Chosen:** mark = `max(raw_loaded_at)` held by the fact, minus 1 hour. Rows that arrived after
+that are read, each key's newest change is kept, and `merge_changes` applies it. Its `>=` version
+guard decides the winner, so a late OLDER change never overwrites a newer one. exp_06 C kept
+all **2,868** orders that held a newer change. Re-reading the overlap is harmless for the same
+reason. One-time cost: a new column on two permanent Gold tables, so one `--full-refresh` of
+each (a planned rebuild from RAW, which holds the whole log).
+
+**Rejected:**
+- **A lookback of k versions** (`> mark - k`). It catches a late file only if k is at least as
+  large as the lateness, which nobody knows in advance: k=3 missed version 9, k=4 caught it. It
+  also re-reads k versions on every run whether anything was late or not (k=4: 43,029 rows read
+  on a night when 16,299 were late).
+- **dbt microbatch with `lookback`.** Its lateness is counted in event time (days of
+  `created_at`), but our lateness is in arrival time. It replaces whole days (delete + insert),
+  so it cannot apply an in-band delete. Kept as a measured comparison (exp_06 D: 1 day late
+  caught, 4 days late missed until the day was re-run by hand).
+- **Keep the version mark and rely on `fct_equals_rebuild`.** The test does fail the build when
+  a late file is skipped, but that is detection, not prevention: the fix is a person noticing and
+  running a full refresh.
+
+**Known limits, kept:** the mark is read from the fact, so if the newest arrival was all deletes
+(rows that leave the fact), the mark lags and those rows are read again next run, changing
+nothing (the same limit S15 measured on the version mark). The overlap covers out-of-order
+commits only up to an hour. On the schedule, Airflow's `wait_for_raw` (every exported folder
+fully in RAW) runs before `dbt_build` anyway.
+
+## Genie and Cortex Analyst are built, side by side, on the same ten questions with an answer key, before the Snowflake trial ends (Session 17)
+
+**In plain words:** both platforms now sell a way to ask data questions in plain English and
+get SQL back. On Databricks it is Genie; on Snowflake it is Cortex Analyst. The plan had Genie
+"after the trial" and Cortex as theory only. At the human's request ("in demand"), both are
+now built in one session, S19b. The build is not a demo of the chat box. It is a measurement:
+the same 10 business questions go to both, and each answer is graded against SQL this project
+already trusts.
+
+**Why this shape:** the data-engineering part of these tools is what makes their answers right:
+a semantic layer that knows the grain (a customer is `customer_unique_id`, not the per-order
+`customer_id`; units are items, not orders), governed access, and a measured error rate. An
+answer key is how this project checks everything else (exp_05's 35 predictions, the
+point-in-time view at 97.4%). Both rows are **B?**: Cortex Analyst on a trial in AWS Ohio and
+Genie on Free Edition are verified before anything is built. A refusal becomes a recorded
+finding (T), not a silent skip.
+
+**Cost guard:** Cortex is billed per token as serverless spend, which resource monitors do not
+see (the Snowpipe lesson, S13). `PUBLIC` keeps its revoked Cortex grants. The use is granted to
+TRANSFORMER only, and credits are read from `METERING_DAILY_HISTORY` before and after.
+
+**Rejected:**
+- **Genie after the trial, Cortex in words only (the old plan).** Cortex then never runs at all,
+  because the trial ends ~2026-11-10. The two tools also cannot be compared on the same Gold.
+- **Cortex AI functions (`AI_CLASSIFY` / `AI_COMPLETE`) as the build.** Our sources have no free
+  text to classify (Olist reviews are not one of the three sources). Forcing text in would break
+  the project's rule that each pattern sits where it is the honest choice. They are taught in words.
+- **One tool only.** The comparison (same questions, two semantic layers, two error rates) is
+  the part an interview can probe.
+
+### Addendum (2026-10-18, same session): re-read changes the fact already holds are dropped before the MERGE
+
+The first nightly build on the arrival mark rewrote every row of both facts (99,441 + 112,650).
+The whole log had arrived in one load at 14:06, inside the hour of overlap, and `merge_changes`'
+`>=` updates a re-read row even when nothing changed. Each fact now joins `{{ this }}` and keeps a
+change only if it would do something: a key the fact lacks, a newer version, or (orders) a person
+link that now exists. Next build: **0 rows**, 71/71 pass. **Rejected:** a shorter overlap (it still
+rewrites whatever arrived in the window, and gives less cover for out-of-order commits); changing
+`>=` to `>` in `merge_changes` (it would break the re-link retry, which re-applies the same version
+on purpose).

@@ -168,7 +168,7 @@ models:
   - name: fct_orders
     description: >
       One row per order as Silver holds it now. Incremental (merge_changes: in-band deletes, a
-      high-water mark on silver_version); an order whose person is not linked yet is re-tried on
+      high-water mark on raw_loaded_at minus one hour, since S17); an order whose person is not linked yet is re-tried on
       every run until the customer_order_link night that holds it has landed. Permanent table
       (not dbt's transient default) since Session 16.
     config:
@@ -199,8 +199,9 @@ models:
       - {name: unavailable_at, data_type: timestamp_ntz}
       - {name: estimated_delivery_at, data_type: timestamp_ntz}
       - {name: units, data_type: number}
-      - {name: silver_version, data_type: number, description: "Change-feed version of Silver orders this row comes from; the high-water mark."}
+      - {name: silver_version, data_type: number, description: "Change-feed version of Silver orders this row comes from; decides which change wins (merge_changes >=)."}
       - {name: silver_change_type, data_type: varchar, description: "insert or update_postimage (a delete removes the row)."}
+      - {name: raw_loaded_at, data_type: timestamp_ltz, description: "When this row's change arrived in RAW; the high-water mark (minus one hour), S17."}
 
   - name: fct_order_items
     description: One row per order item = one unit sold, as Silver holds it now. Incremental, merge_changes.
@@ -226,6 +227,7 @@ models:
       - {name: freight_value, data_type: "number(12,2)"}
       - {name: silver_version, data_type: number}
       - {name: silver_change_type, data_type: varchar}
+      - {name: raw_loaded_at, data_type: timestamp_ltz, description: "When the change arrived in RAW; the high-water mark (minus one hour), S17."}
 
   - name: order_items_at_sale
     description: >
@@ -272,11 +274,14 @@ unit_tests:
         - {customer_unique_id: C1, customer_city: sao paulo,      silver_version: 4, silver_night: 4}
         - {customer_unique_id: C3, customer_city: rio de janeiro, silver_version: 3, silver_night: 3}
 
-  # The incremental SELECT (is_incremental forced on): reads only changes above the high-water mark
-  # (O2 at v5 is not read again), RE-TRIES an order whose person was missing once its link exists
-  # (O1, its change unmoved) but not while it is still missing (O5), and passes a delete through to
-  # the MERGE (O4) instead of dropping it.
-  - name: fct_orders_incremental_retries_unlinked_and_reads_only_new_changes
+  # The incremental SELECT (is_incremental forced on). Mark = newest raw_loaded_at held (12:00) minus
+  # one hour = 11:00. Reads what arrived after 11:00: new changes (O3, the delete O4), a change inside
+  # the hour of overlap (O7, 11:30), and a LATE file whose version is below every version held (O6,
+  # v1, arrived 12:30): the S17 fix, a version mark would skip it. Not read: O2's v5 (10:30). Read but
+  # DROPPED: O5's v4 re-read inside the overlap (11:45), already held, nothing to re-link. RE-TRIES
+  # an order whose person was missing once its link exists (O1, arrived 09:00) but not while it is
+  # still missing (O5), and passes a delete through to the MERGE (O4) instead of dropping it.
+  - name: fct_orders_incremental_retries_unlinked_and_reads_only_new_arrivals
     model: fct_orders
     overrides:
       macros:
@@ -284,17 +289,19 @@ unit_tests:
     given:
       - input: this
         rows:
-          - {order_id: O1, customer_id: c1, customer_unique_id: null, status: created,   silver_version: 3, silver_change_type: insert}
-          - {order_id: O2, customer_id: c2, customer_unique_id: P2,   status: delivered, silver_version: 5, silver_change_type: update_postimage}
-          - {order_id: O5, customer_id: c5, customer_unique_id: null, status: created,   silver_version: 4, silver_change_type: insert}
+          - {order_id: O1, customer_id: c1, customer_unique_id: null, status: created,   silver_version: 3, silver_change_type: insert,           raw_loaded_at: "2026-10-11 09:00:00 +0000"}
+          - {order_id: O2, customer_id: c2, customer_unique_id: P2,   status: delivered, silver_version: 5, silver_change_type: update_postimage, raw_loaded_at: "2026-10-11 10:30:00 +0000"}
+          - {order_id: O5, customer_id: c5, customer_unique_id: null, status: created,   silver_version: 4, silver_change_type: insert,           raw_loaded_at: "2026-10-11 12:00:00 +0000"}
       - input: ref('stg_orders')
         rows:
-          - {order_id: O1, customer_id: c1, status: created,   commit_version: 3, change_type: insert}
-          - {order_id: O2, customer_id: c2, status: created,   commit_version: 2, change_type: insert}
-          - {order_id: O2, customer_id: c2, status: delivered, commit_version: 5, change_type: update_postimage}
-          - {order_id: O3, customer_id: c3, status: created,   commit_version: 6, change_type: insert}
-          - {order_id: O4, customer_id: c4, status: created,   commit_version: 7, change_type: delete}
-          - {order_id: O5, customer_id: c5, status: created,   commit_version: 4, change_type: insert}
+          - {order_id: O1, customer_id: c1, status: created,   commit_version: 3, change_type: insert,           loaded_at: "2026-10-11 09:00:00 +0000"}
+          - {order_id: O2, customer_id: c2, status: created,   commit_version: 2, change_type: insert,           loaded_at: "2026-10-11 09:00:00 +0000"}
+          - {order_id: O2, customer_id: c2, status: delivered, commit_version: 5, change_type: update_postimage, loaded_at: "2026-10-11 10:30:00 +0000"}
+          - {order_id: O3, customer_id: c3, status: created,   commit_version: 6, change_type: insert,           loaded_at: "2026-10-11 13:00:00 +0000"}
+          - {order_id: O4, customer_id: c4, status: created,   commit_version: 7, change_type: delete,           loaded_at: "2026-10-11 13:00:00 +0000"}
+          - {order_id: O5, customer_id: c5, status: created,   commit_version: 4, change_type: insert,           loaded_at: "2026-10-11 11:45:00 +0000"}
+          - {order_id: O6, customer_id: c6, status: created,   commit_version: 1, change_type: insert,           loaded_at: "2026-10-11 12:30:00 +0000"}
+          - {order_id: O7, customer_id: c7, status: created,   commit_version: 5, change_type: insert,           loaded_at: "2026-10-11 11:30:00 +0000"}
       - input: ref('int_customer_order_link')
         rows:
           - {customer_id: c1, customer_unique_id: P1}
@@ -304,3 +311,5 @@ unit_tests:
         - {order_id: O1, customer_unique_id: P1,   silver_version: 3, silver_change_type: insert}
         - {order_id: O3, customer_unique_id: null, silver_version: 6, silver_change_type: insert}
         - {order_id: O4, customer_unique_id: null, silver_version: 7, silver_change_type: delete}
+        - {order_id: O6, customer_unique_id: null, silver_version: 1, silver_change_type: insert}
+        - {order_id: O7, customer_unique_id: null, silver_version: 5, silver_change_type: insert}

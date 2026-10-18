@@ -29,6 +29,10 @@ HAVING COUNT(*) > 1
 LIMIT 10;
 
 -- D. Per file: rows in RAW vs rows Snowflake says it loaded (COPY_HISTORY keeps 14 days here).
+--    Only files loaded in the last 13 days: an older file has no history left, and comparing it to
+--    nothing would fail every night from day 14 on a clean RAW (S17: all 11 files loaded 10-11, the
+--    check would have failed from 2026-10-25). Older files stay covered: `pipeline_step.py raw-has`
+--    compares rows per folder with the bridge's export_log in Databricks, which does not expire.
 WITH loaded AS (
   SELECT FILE_NAME, SUM(ROW_COUNT) AS loaded_rows
   FROM TABLE(LEDGERLINE.INFORMATION_SCHEMA.COPY_HISTORY(
@@ -37,6 +41,7 @@ WITH loaded AS (
   GROUP BY 1
 ), held AS (
   SELECT SOURCE_FILE, COUNT(*) AS held_rows FROM LEDGERLINE.RAW.SILVER_CHANGES GROUP BY 1
+  HAVING MAX(LOADED_AT) >= DATEADD(day, -13, CURRENT_TIMESTAMP())
 )
 SELECT 'file rows differ' AS problem, h.SOURCE_FILE, h.held_rows, l.loaded_rows
 FROM held h LEFT JOIN loaded l ON h.SOURCE_FILE = 'silver/' || l.FILE_NAME

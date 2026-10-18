@@ -18,7 +18,7 @@ changes it.
 | exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8; G rewritten + H added S9 (hold the bad row); re-run Drill 2 |
 | exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | **done** S10 (on time); its part C changed production (`newest_from="log"`); re-run Drill 2 |
 | exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | **done** S14 (on time; 35/35 predictions; chose `timestamp` + `invalidate`, one night per run) |
-| exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | not started |
+| exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | **done** S17 (on time; 17/17: bug present on a version mark, version lookback k=3 misses / k=4 catches, arrival mark catches + `>=` guard holds 2,868, microbatch lookback 1 day) |
 
 **The rest of the plan is bound the same way** — since Session 9, every
 Databricks / Snowflake / dbt topic has a row, a weight and a session in
@@ -3775,3 +3775,142 @@ landing this session.
   **~2026-11-05** drop `workspace.s12`; **~2026-10-27** Bronze replaced-files
   deadline; **~2027-01-04** `ledgerline-ci` secret; topics empty / Git token
   ~2026-12-25; **Snowflake trial ends ~2026-11-10**.
+
+---
+
+## Session 17 — in progress (handoff between chat sessions, 2026-10-18)
+
+The session was split into several chats to save tokens (decisions.md S17,
+constraints). The full entry is written at the end. **Done so far, verified:**
+- Six days since S16. Snowflake reachable, RAW 656,962 rows (unchanged since 10-11).
+- **Incident:** both scheduled Databricks jobs had no run on 10-11, 10-16, 10-17,
+  10-18. Cause not identifiable; a manual Silver run 10-18 succeeded in 7 m 36 s.
+  Prevention built and verified: `scripts/watch_jobs.py` + `.github/workflows/job_watch.yml`
+  (daily 03:30 UTC; `job-watch` #1 failed with exit 1 = pii stale, as expected).
+  First scheduled check 2026-10-19 03:30 UTC.
+- **Incident:** the watcher's test reached live Databricks through two copies of
+  `generators._common`; fixed (`LEDGERLINE_NO_DOTENV` + package restore), 171 passed.
+- Constraints table moved out of CLAUDE.md to `docs/constraints.md`.
+- Committed `292b346` on `dev`; `ci` #82 green.
+
+- **PII VACUUM, closed (part 2):** the scheduled 10-13 run came 8.5 h before the 7-day
+  window opened (purge 10-06 09:43) and waited; the **10-14 01:02** run logged `vacuumed`
+  for both PII tables. Vault history: `VACUUM END` v6, 2 files, 3,035,534 B = the
+  3,035,491 B file REORG rewrote at v3 + a 43 B deletion vector. The planned time-travel
+  proof is **unreachable on this platform**: the vault refuses time travel (row filter /
+  masks), and the raw table refuses any point older than the 168 h retention. Both are new
+  rows in `constraints.md`; erasure is proven by VACUUM's own metrics.
+
+- **Snowflake spend, S13 to 10-18 (`METERING_DAILY_HISTORY`, ACCOUNTADMIN):** 1.895 credits
+  billed: warehouse 1.894, Snowsight AI 0.001, `PIPE` 0.000 (rounded), telemetry 0.000. Today
+  0.228 at 12:1x UTC (the view lags ~3 h). About $5.70 of the $400 trial at ~$3/credit.
+
+**Remaining for S17, in order** (S16's `### Next` still holds the detail):
+1. Overdue: the 10-13 `ledgerline-pii` VACUUM: check `erase` output; time travel to
+   vault v1 on the SQL warehouse must fail on a missing file.
+2. Airflow: start Docker Desktop, `up -d`, `airflow tasks test` each of the 7 tasks,
+   then backfill nights 1–8 (nothing changes), `down`.
+3. exp_06 (late bridge file below the high-water mark; lookback / microbatch); ask D3.
+4. Carried: `07_spend.sql`, Snowsight look, drop `S16` scratch. Before touching
+   conftest again, or once Kafka is next used: re-count `inventory.cdc` (CLAUDE.md rule,
+   conftest touched today; no Kafka path was exposed).
+5. End: progress / decisions / learning / coverage / journey entry, learning check.
+
+## Session 17 — The orchestrator runs, a late file is lost and then caught, and Gold reads by arrival
+Date: 2026-10-18 (one day, two chats; the handoff notes above are part 1)
+
+**In plain words:** Airflow ran the whole nightly pipeline for the first time: each step
+by hand, then eight past nights replayed in 58 minutes, and nothing changed. exp_06 proved
+that a file arriving late was being lost for good by the Gold facts, so the facts now read
+by **when data arrived**, not by its version. The PII erasure from S12 is proven gone, by
+VACUUM's own numbers, because Databricks refuses the time-travel proof we had planned.
+
+### Scope, as it actually ran
+Part 1 (handoff above): the job watcher. Part 2: the overdue VACUUM check → Docker repaired
+→ Airflow, 7 tasks one by one → two RAW-check bugs fixed → backfill nights 1–8 → exp_06 →
+decision: arrival mark → change applied (half-applied once, fixed) → spend + Snowsight look
+→ S19b added (Cortex Analyst vs Genie). Check skipped by choice.
+
+### Built
+- `scripts/pipeline_step.py::is_check` + `tests/test_pipeline_step.py` (4 tests): only a
+  query whose first column is `problem` counts. `snowflake/12_check_raw.sql` check D only
+  looks at files loaded in the last 13 days.
+- `snowflake/experiments/s17_late.py` + `dbt_project/models/experiments/exp17_*` (5 models,
+  `var('exp17')`, schema S17): exp_06 parts A–D.
+- `fct_orders` / `fct_order_items`: arrival mark (`raw_loaded_at`, minus 1 hour) + the
+  "already held" filter; contracts and the unit test updated (O6 late file, O7 overlap, O5
+  re-read dropped). `_gold.yml`.
+- `airflow/dags/ledgerline_nightly.py` docstring: the real backfill command and three findings.
+- `snowflake/05_scratch_schemas.sql`: S17 created, S16 dropped (run by the human).
+- Docs: `constraints.md` 122 → 130 rows (new section: Airflow); decisions ×3 (+1 addendum);
+  incidents ×2; coverage (Airflow ✓, microbatch ✓, S17 ✓, S19b added).
+
+### Verified
+- **PII VACUUM:** the 10-13 run came 8.5 h early and waited (window opened 10-13 09:43);
+  10-14 01:02 logged `vacuumed` for both PII tables; vault `VACUUM END` v6: 2 files, 3,035,534 B
+  = REORG's 3,035,491 B file + a 43 B deletion vector. Time travel refused on the vault (row
+  filter / masks) and on the raw table 12 days back (168 h retention check).
+- **Airflow, task by task** (`tasks test`, night 1): `land_night` 4 files `identical`, 0
+  written; `silver` SUCCESS 6 m 58 s as `ledgerline-ci`; `bridge_export` SUCCESS, **first run
+  under `ledgerline-jobs`**, 11 folders summing to 656,962 = RAW; `raw-has` 11/11; `check_raw`
+  0 problems (after the fix); `snapshots` nothing to run; `dbt_build` 71/71, facts merged 0.
+- **Backfill nights 1–8:** 8/8 runs success, 56/56 task runs, 0 retries, 11:41–12:40 UTC.
+  After: RAW 656,962, `fct_orders` 99,441, `fct_order_items` 112,650, snapshots nothing to run.
+  The real XCom path (`bridge_export` → `wait_for_raw`) worked. Runs overlapped (see constraints).
+- **RAW check fixes:** before, 8 "problems" on a clean RAW (the summary). Check D simulated on
+  a 6-day history: old flags 11/11 files, new 0. The real check passes.
+- **exp_06: 17/17 predictions.** A: version mark skips the late file: 90,076 rows, 13,431
+  orders differ from a rebuild. B: k=3 misses, k=4 catches (re-reads 43,029 rows). C: arrival
+  mark catches, 2,868 orders keep their newer change. D: microbatch lookback 1 day catches 1
+  day late, not 4, until `--event-time-start` re-runs the day.
+- **Arrival mark in production:** zero-copy backups first; full refresh; **0 rows differ** on
+  every old column of both facts, 0 null marks. Normal build: 99,441 + 112,650 rewritten →
+  with the filter **0 + 0**, 71/71 pass, unit test passes (late O6 read).
+- **Snowsight:** CI's 78 queries on 10-12 all by `LEDGERLINE_CI_SVC` into
+  `LEDGERLINE_CI.PR_1_1`; `FCT_ORDERS` permanent, retention 1 day, 99,441 rows.
+- `ruff` clean; **175 passed**.
+
+### Built but NOT verified
+- A late file in the **live** pipeline: proven by exp_06 (same data, experiment models) and
+  the unit test (production SQL, fixture rows), not by a real late Snowpipe load.
+- Slim CI for a PR that adds a column to an incremental model: expected to fail (constraint
+  row); not tried.
+- The job watcher's first scheduled run (2026-10-19 03:30 UTC) and whether the PII schedule resumes.
+
+### Incidents (2 new in part 2)
+- The RAW check failed a clean RAW and would have failed every night from 2026-10-25.
+- The arrival-mark change half-applied (a `this` unit test before the new column).
+
+### Decisions (2 new + 1 addendum in part 2)
+- Gold facts read by arrival time with a one-hour overlap (rejected: version lookback,
+  microbatch, keep + detect); addendum: drop re-reads the fact already holds.
+- Genie and Cortex Analyst built side by side in S19b, graded on 10 questions.
+
+### Cost
+Snowflake 1.895 credits since 10-11 (~$5.70 of $400; Snowsight shows $395 left, trial ends
+in 23 days). Databricks $0. Today's backfill + builds: a few tenths of a credit.
+
+### Learning check
+Skipped by choice; B89–B93 parked, D3 parked as B94 (`learning.md`).
+
+### Next
+**Session 18 — GDPR, Snowflake half** (coverage): masking policy + **row access policy +
+tag-based masking** on GOLD, Time Travel / `UNDROP`, the erasure on Snowflake (RAW keeps the
+change log: what does forgetting mean there?); Fail-safe in words.
+
+**Carried, by name:**
+- **2026-10-19:** read `job-watch`'s first scheduled run (03:30 UTC) and the 10-19 runs of
+  both Databricks jobs; the PII job had no success since 10-15 (incident 2026-10-18 open).
+- **Verify S19b's two B? rows early** (Cortex Analyst on the trial in AWS Ohio; Genie on Free
+  Edition), so a refusal is known before S19b.
+- Drop scratch: `LEDGERLINE.S17` (exp tables, the two `*_BEFORE_ARRIVAL` backups) once S18
+  starts; `workspace.s16` (Databricks, carried since S16).
+- Before touching conftest again, or when Kafka is next used: re-count `inventory.cdc`.
+- Slim CI vs a column added to an incremental model: handle when such a PR opens.
+- **Drill 3** adds: a real late Snowpipe file through the live facts; the anti-join fed a
+  change batch; dbt `merge` swapped in for `merge_changes`; a contact night with the salt
+  grant revoked; a workflow broken on purpose (actionlint must fail); a night failing a Gold
+  test (WAP by clone or not).
+- From S13 / S12, unchanged: a rebuild after **~2026-10-30** needs a baseline; **~2026-11-05**
+  drop `workspace.s12`; **~2026-10-27** Bronze replaced-files deadline; **~2027-01-04**
+  `ledgerline-ci` secret; Git token ~2026-12-25; **Snowflake trial ends ~2026-11-10**.

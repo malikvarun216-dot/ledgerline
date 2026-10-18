@@ -3,7 +3,8 @@
 decisions.md, Session 16 "Airflow runs one DAG per dims night". A DAG run IS a night: its logical
 date ({{ ds }}) is the night's dump date, and the schedule lists the landed nights' dates (every
 120 days from 2016-09-04, business time) instead of the calendar. One run at a time, oldest first,
-each task waiting for its own previous run (depends_on_past): night n never runs before n-1 is done.
+each task waiting for its own previous run (depends_on_past): night n never runs before n-1 is done
+(scheduled runs; a backfill needs --max-active-runs 1 for that, see below).
 
     land_night  ->  silver  ->  bridge_export  ->  wait_for_raw  ->  check_raw  ->  snapshots  ->  dbt_build
     (S3, AWS)      (Databricks)  (Databricks)      (Snowflake: Snowpipe loads on its own time)   (Snowflake)
@@ -12,7 +13,15 @@ Every task runs a script from the read-only repository with the pipeline's own P
 (/opt/pipeline), exactly the command a person runs by hand — see scripts/pipeline_step.py. Every
 task is safe to repeat, which is what makes retries and backfills safe:
 
-    airflow backfill create --dag-id ledgerline_nightly --from-date 2017-05-02 --to-date 2017-05-02
+    airflow dags unpause ledgerline_nightly
+    airflow backfill create --dag-id ledgerline_nightly --from-date 2016-09-04 --to-date 2018-12-23
+        --reprocess-behavior completed --max-active-runs 1    (one command, one line)
+
+Three things Airflow 3 does with a backfill, found on the first one (S17, 8 nights in 58 min):
+* the DAG's max_active_runs does NOT bind it; without --max-active-runs 1 every night starts at once
+  and depends_on_past alone pipelines them (night 2's silver beside night 1's bridge_export);
+* with depends_on_past, --reprocess-behavior (none / completed / failed) is required;
+* a paused DAG's backfill runs stay queued: unpause first, pause again after.
 """
 
 from __future__ import annotations

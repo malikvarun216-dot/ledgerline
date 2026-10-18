@@ -64,7 +64,7 @@ session · **X** skip (no honest use here).
 | System tables (billing, audit) | ★★ | B? S21 |
 | Delta Sharing; Lakehouse Federation | ★★ | B? S20 — optional session |
 | UniForm / Iceberg read by Snowflake | ★★ | B? S20 — optional; the most doubtful on Free Edition (tables live in Databricks-managed storage) |
-| Genie | ★ | B after the trial |
+| Genie (AI/BI Genie space: questions in plain words → SQL) | ★★ | **B? S19b** (S17, at the human's request): verify on Free Edition first; same 10 questions as Cortex Analyst, graded against an answer key. If refused: T with the finding |
 | Model serving, vector search, Databricks Apps | ★ | X — no honest use |
 
 ## 2. Snowflake (trial: Enterprise edition)
@@ -98,10 +98,10 @@ session · **X** skip (no honest use here).
 | Topic | Weight | Status |
 |---|---|---|
 | Snapshots: timestamp vs check strategy, hard deletes, business time vs run time | ★★★ | ✓ S14 (exp_05: `check` = run time knows nobody in 2017; `timestamp` replayed = the dumps exactly on nights 1–4; every `hard_deletes` closes a delete at run time; a late start loses history; production `timestamp` + `invalidate`, one night per run) |
-| Incremental: merge, delete+insert, append, microbatch; lookback windows | ★★★ | ✓ S15 merge — a custom strategy `merge_changes` (in-band deletes, version guard), high-water mark, late-arriving dimension re-tried, incremental = full rebuild test; dbt's `merge` shown keeping deletes as rows (`s15_merge` B); delete+insert in words; **microbatch + lookback: B S17 (exp_06)** |
+| Incremental: merge, delete+insert, append, microbatch; lookback windows | ★★★ | ✓ S15 merge — a custom strategy `merge_changes` (in-band deletes, version guard), high-water mark, late-arriving dimension re-tried, incremental = full rebuild test; dbt's `merge` shown keeping deletes as rows (`s15_merge` B); delete+insert in words; **microbatch + lookback: ✓ S17 (exp_06, `s17_late.py`: microbatch 1-day lookback catches 1 day late, misses 4 until `--event-time-start` re-runs the day; version lookback vs arrival mark measured)** |
 | Tests, unit tests, model contracts, source freshness | ★★★ | ✓ S14 (generic + singular tests incl. `no_conflicting_changes`, `scd2_shape`; a unit test that fails on filter-deletes-first; enforced contracts on every GOLD model; source freshness on `LOADED_AT`); ✓ S15 (contracts on incremental facts; a unit test of an incremental model with `this` mocked; `fct_equals_rebuild`; the cross-source reconciliation as a singular test, 0 SKUs off) |
 | Slim CI (`state:modified`, defer) + clone | ★★ | ✓ S16 locally (`scripts/slim_ci.py` as `LEDGERLINE_CI_SVC`: base manifest parsed from `origin/dev`, 67 nodes selected, incrementals `dbt clone`d from production, PASS=67, schema dropped; 0 selected with no change — after the CRLF incident). ✓ S16 **on GitHub** (PR #1: `dbt-ci / parse` + `slim-ci` green; Snowflake query history as `LEDGERLINE_CI_SVC`: schema `PR_1_1` created, `fct_orders` cloned from production, incremental path + unit test, view rebuilt, schema dropped — 16 s) |
-| Airflow: DAG, backfill, idempotent tasks, sensors, retries | ★★★ | **B S17** — built S16 (Airflow 3 in Docker, DAG `ledgerline_nightly`: 7 tasks, `EventsTimetable` on the night dates, sensor in reschedule mode, `depends_on_past`; image built, DAG loads, UI up), **not run**: carried by name, S16 stopped by choice |
+| Airflow: DAG, backfill, idempotent tasks, sensors, retries | ★★★ | ✓ S17 — built S16; run S17: 7 tasks one by one (`tasks test`), then a backfill of nights 1–8: 56/56 task runs, 0 retries, 58 min, RAW / Gold / snapshots unchanged (656,962 / 99,441 / 112,650). Found: a backfill ignores the DAG's `max_active_runs`, needs `--reprocess-behavior`, waits while paused; the RAW check counted a summary as problems (fixed) |
 | One dbt project, two targets (Snowflake + Databricks) | ★★ | ✓ S14 Snowflake (key-pair service user, transformer role only); Databricks after the trial |
 | CI: lint + tests | ★★ | ✓ S3 |
 
@@ -131,7 +131,8 @@ session · **X** skip (no honest use here).
 | Snowpipe Streaming + Kafka connector (needs Kafka Connect; costs money on Confluent) | ★★ | T ✓ S13 |
 | Fail-safe recovery (only Snowflake support can do it) | ★ | T S18 |
 | PrivateLink, Tri-Secret Secure (Business Critical edition) | ★ | T ✓ S13 |
-| Hybrid tables, Cortex AI | ★ | T S19 |
+| Hybrid tables | ★ | T S19 |
+| **Cortex Analyst on a semantic view over GOLD** (questions in plain words → SQL); Cortex AI functions (`AI_COMPLETE`, `AI_CLASSIFY`) in words | ★★ | **B? S19b** (S17, at the human's request): verify on the trial in AWS Ohio first; graded on the same 10 questions as Genie. Cortex grants stay revoked from `PUBLIC` (S13); TRANSFORMER only, credits read before and after (serverless: monitors do not see it) |
 
 **No honest use in this project.**
 
@@ -176,13 +177,14 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | — | **Gate: every Databricks-only row above done before the Snowflake trial starts** | — |
 | **S13** ✓ (2026-10-11) | Snowflake day one: Enterprise trial, cost guards (auto-suspend, resource monitor), **roles**; bridge (CDF export incl. `delete` rows → Parquet → stage → `COPY INTO`); **load-history test, Snowpipe beside `COPY`, `VARIANT` first, PK demo** | SSO / SCIM / network policies; Snowpipe Streaming; PrivateLink |
 | **S14–S16** ✓ (Airflow → S17) | dbt snapshot (**exp_05**, `hard_deletes` decided), incremental, **tests / unit tests / contracts / freshness**, MERGE + anti-join, zero-copy clone CI + **slim CI + Delta clone**, Airflow DAG with backfill | disaster recovery |
-| **S17** | **Airflow run + backfill (from S16)**; **exp_06** late arrival + lookback, **dbt microbatch** | — |
+| **S17** ✓ (2026-10-18) | **Airflow run + backfill (from S16)**; **exp_06** late arrival + lookback, **dbt microbatch** — done: backfill 8/8, exp_06 17/17, Gold facts moved to an arrival mark | — |
 | **S18** | GDPR, Snowflake half: masking + **row access + tag-based masking**, Time Travel / `UNDROP`, erasure | replication / failover; Fail-safe |
-| **S19** | Streams & Tasks, Dynamic Tables **vs materialized views**, **Snowpark (small)**; all Tasks suspended | hybrid tables; Cortex AI |
+| **S19** | Streams & Tasks, Dynamic Tables **vs materialized views**, **Snowpark (small)**; all Tasks suspended | hybrid tables |
+| **S19b** (added S17) | **The same 10 business questions, two AIs, one answer key:** a semantic view on GOLD + **Cortex Analyst**; a **Genie space** on the same tables (Databricks); each answer graded against trusted SQL (grain traps: `customer_unique_id` vs `customer_id`, units vs orders); both B? — verified first. Before the trial ends | Cortex AI functions; Cortex Agents / Search |
 | S20 (optional) | **Sharing on both platforms, Lakehouse Federation, Iceberg / UniForm** (all B?) | — |
 | **S21** | performance and cost on both: pruning, clustering keys, Query Profile, **the three caches, spilling, multi-cluster, liquid clustering on a large sample, Spark plans, system tables, `ACCOUNT_USAGE`** | search optimization; Spark UI; Photon |
 | **Drill 3** | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) | — |
-| After the trial | Gold on Databricks via dbt's second target, **Genie** | — |
+| After the trial | Gold on Databricks via dbt's second target | — |
 
 **Cost of the additions:** about 10–12 hours spread over existing sessions, two
 optional sessions (S12b, S20 — S12b kept on 2026-10-06, so now one), and roughly 10 minutes per theory hook.
