@@ -3914,3 +3914,118 @@ change log: what does forgetting mean there?); Fail-safe in words.
 - From S13 / S12, unchanged: a rebuild after **~2026-10-30** needs a baseline; **~2026-11-05**
   drop `workspace.s12`; **~2026-10-27** Bronze replaced-files deadline; **~2027-01-04**
   `ledgerline-ci` secret; Git token ~2026-12-25; **Snowflake trial ends ~2026-11-10**.
+
+---
+
+## Session 18 — Who may see what on Snowflake Gold, and what "deleted" means there
+Date: 2026-10-18 → 10-19
+
+**In plain words:** Gold now hides every text column from readers unless dbt has marked it
+safe. Analysts see a customer's state, never their city or zip. A regional analyst sees only
+their state's customers. All of it survives dbt's nightly rebuilds, and a test fails the build
+if it doesn't. Erasure on Snowflake was checked rather than built: Snowflake holds no contact
+data at all, and a new test keeps it that way. The two AI assistants planned for S19b were
+probed early: Cortex Analyst and Genie both answer, and the trial refuses Cortex's other AI
+functions.
+
+### Scope, as it actually ran
+Scratch S17 → S18 → experiment `s18_governance` → design (decided on the evidence) → governor SQL
+→ dbt hook + guard test → first governed build failed (incident) → exempt mask → verified as three
+readers → erasure design (option A) + contact-data guard → S19b probes (Cortex, Genie, with a
+cross-check of Genie's total) → job watcher seen not to run (incident, open) → theory notes →
+docs. A dbt tutorial was written at the human's request. Check skipped by choice.
+
+### Built
+- `snowflake/05_scratch_schemas.sql`: S18 block (S17 dropped, 7 tables as listed in S17's Next).
+- `snowflake/experiments/s18_governance.py`: parts A (direct mask, rebuild), C (tag propagation),
+  D (row access by mapping table), E (Time Travel, `UNDROP`, retention 0), B (tag binding rights).
+- `snowflake/09_governance.sql` (human, ACCOUNTADMIN): roles `LEDGERLINE_GOVERNOR` (under
+  SECURITYADMIN) and `LEDGERLINE_ANALYST_SP`; schema `GOVERNANCE` owned by the governor; tag
+  `PII_CLASS`; mask `MASK_TEXT_EXEMPT` bound to the tag; `STATE_ACCESS` (4 rows) + row policy
+  `STATE_ROWS`; GOLD schema tagged `restricted`; `APPLY` on the one tag and one policy for
+  TRANSFORMER and CI_RUNNER. `snowflake/repairs/2026-10-18_exempt_mask.sql` (human).
+- dbt: `_gold.yml` gives every one of the 44 text columns a `pii_class` (39 public, 5 restricted)
+  and `row_policy: customer_state` on 3 objects; `macros/apply_governance.sql` (post-hook on all
+  Gold); `tests/gold_governed.sql`; `tests/no_contact_data_in_snowflake.sql`; var `governance_schema`.
+- Docs: constraints +14 rows (Snowflake, Free Edition); decisions ×2 (+1 addendum); incidents ×2
+  (+1 update to 2026-10-18); coverage (4 S18 rows done, S19b rows B? → B); learning C14.0 (dbt
+  from zero), C11 ×2, C18.
+
+### Verified
+- **`s18_governance`: 25 of 26 as predicted.** A: the analyst saw `***` on 95,696 rows; the
+  analyst's `WHERE city = 'sao paulo'` returned 0 rows (the owner's: 14,917); `CREATE OR REPLACE`,
+  with or without `COPY GRANTS`, left 0 policies. D: the SP analyst saw 40,143; the unmapped owner
+  saw 40,143 too (inherited ANALYST); after mapping `'*'`, 95,696; through a view still 40,143; after
+  a rebuild, 95,696. E: `BEFORE(STATEMENT)` = 95,696 after deleting 40,143; the analyst's past read
+  was masked; `UNDROP` refused while the name was taken, then 55,553 rows came back with their
+  policy; retention 0 refused both. B: binding a policy to a tag refused. **Wrong:** C, a
+  propagating tag refused: it needs `APPLY TAG ON ACCOUNT`.
+- **Governance in production**, read as each role on `customer_current` / `dim_customer` /
+  `order_items_at_sale`:
+  - before dbt: the analyst saw 4 of 4 text columns masked (fail-closed default)
+  - after: the analyst saw 95,696 / 96,108 / 112,650 rows, city masked on every row, state and id
+    clear, product category and seller city clear
+  - the SP analyst saw **40,143 / 40,297 / 47,390** rows, 1 state
+  - the transformer saw everything clear
+  - `run_dbt.py build` **72/72** (incl. `gold_governed`: 44 column tags, 3 row policies, schema
+    tag); the build re-created those objects and the hook restored everything
+- **The exempt mask**, probed in S18 first: a plain mask plus the row policy on one column →
+  `391819`; exempt → attached, 40,143.
+- **No contact data on Snowflake:** RAW 656,962 rows, 8 tables; customer fields = id, order id,
+  city, state, zip, `dim_updated_at`. The guard's pattern checked on 12 names (12/12). A planted
+  `contact_email` column → FAIL 1; dropped → PASS.
+- **S19b probes:**
+  - `CORTEX.COMPLETE` refused ("not available for trial accounts")
+  - Cortex Analyst on `S18.PROBE_SV` answered per state, RJ 12,323 = Gold
+  - a Genie Agent on `silver.customer` answered per state, matching Gold. Its prose said 96,696
+    total; the human's SQL on Silver showed 95,696 rows = 95,696 people, SP 40,143, RJ 12,323. The
+    model's own sum was off by 1,000.
+- **Databricks jobs:** `watch_jobs.py` locally 2026-10-19 05:02 UTC: pii 4.0 h, silver 4.4 h ago
+  (the PII job's first success since 10-15).
+- `ruff` clean; pytest all pass (after the line-ending fix).
+
+### Built but NOT verified
+- Slim CI on a pull request with the governance hook (runs as `LEDGERLINE_CI_RUNNER`, which holds
+  the `APPLY` grants; `gold_governed`'s schema check is production-only).
+- The `databricks` dbt target with the new hook and tests (both skip off Snowflake; not run).
+- The job watcher's scheduled run on GitHub: **missing** on 10-19 (open incident).
+- Fail-safe (theory: only Snowflake support can read it).
+
+### Incidents (2 new + 1 update)
+- The first governed build failed on 2 objects: a masked column cannot feed a row policy unless the
+  mask is exempt. Nothing leaked; fixed with a one-statement mask swap.
+- The job watcher did not run on its first scheduled morning (**open**).
+- Update to 2026-10-18 (jobs stopped): both jobs ran overnight; cause still unknown.
+
+### Decisions (2 new + 1 addendum)
+- Gold governance: a governor role; a fail-closed schema tag; dbt re-applies column tags and the
+  row policy; a guard test. Addendum: the mask is exempt.
+- Erasure on Snowflake keeps S12's meaning (contact data only), guarded; city and zip masked, not
+  erased (option B rejected, with its cost).
+
+### Cost
+Not read with `07_spend.sql` this session; Snowsight showed **$395 of $400 left**, trial ends in
+23 days. Today: a few dbt builds, the experiment, one Cortex Analyst question (~138 tokens,
+serverless, invisible to monitors); one refused `COMPLETE`. Databricks $0.
+
+### Learning check
+Skipped by choice (*"skip test"*). B97–B101 parked; theory questions B95–B96 written, not asked.
+
+### Next
+**Session 19 — Snowflake: Streams & Tasks, Dynamic Tables vs materialized views, Snowpark /
+UDFs (small), Hybrid tables in words** (coverage). Every Task suspended at the end.
+
+**Carried, by name:**
+- **2026-10-20 after 03:30 UTC:** read `job-watch` in the Actions tab. If the scheduled run is
+  missing again, decide a dead man's switch (incident 2026-10-19, open).
+- **Governance under CI:** the next PR's slim CI runs `apply_governance` as CI_RUNNER: read it.
+- **Drop scratch:** `LEDGERLINE.S18` (experiment tables, `PROBE_SV`) once S19 starts;
+  `workspace.s16` (Databricks, since S16). The S18 Genie Agent ("How many customers are in each
+  state?") is kept for S19b or deleted then.
+- **S19b** is now B on both platforms. Grade every number, prose included, against the answer key.
+- Unchanged from S17: Drill 3's list (+ now: drop `apply_governance`'s row-policy step and watch
+  `gold_governed` fail; a reader query on a masked column; an unclassified new text column shows
+  `***`); slim CI vs a column added to an incremental model; re-count `inventory.cdc` before
+  conftest or Kafka work; a rebuild after **~2026-10-30** needs a baseline; **~2026-11-05** drop
+  `workspace.s12`; **~2026-10-27** Bronze replaced-files deadline; **~2027-01-04** `ledgerline-ci`
+  secret; Git token ~2026-12-25; **Snowflake trial ends ~2026-11-10**.

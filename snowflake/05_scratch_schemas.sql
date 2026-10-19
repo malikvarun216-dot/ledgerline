@@ -73,3 +73,26 @@ GRANT USAGE ON SCHEMA LEDGERLINE.S17 TO ROLE LEDGERLINE_TRANSFORMER;
 GRANT CREATE TABLE, CREATE VIEW ON SCHEMA LEDGERLINE.S17 TO ROLE LEDGERLINE_TRANSFORMER;
 
 SHOW GRANTS ON SCHEMA LEDGERLINE.S17;
+
+
+-- Session 18: governance before production — masking policies (direct and by tag), a row access
+-- policy, tag propagation, what a dbt rebuild does to all of them; Time Travel and UNDROP. Built
+-- here as the transformer, which may create tags and policies in S18 only (production policies
+-- belong to a governance role, decided in S18). The analyst may read S18, to be tested as itself.
+-- S17 is dropped: it holds exp_06's 5 tables and the two *_BEFORE_ARRIVAL backups (99,441 and
+-- 112,650 rows, 2026-10-18); the arrival-mark change was verified at 0 rows different, findings are
+-- in progress.md / incidents.md (S17), nothing reads it.
+USE ROLE SYSADMIN;
+CREATE SCHEMA IF NOT EXISTS LEDGERLINE.S18
+  COMMENT = 'Session 18 experiments: masking (direct, by tag), row access, tag propagation, Time Travel, UNDROP. Scratch.';
+DROP SCHEMA IF EXISTS LEDGERLINE.S17;
+
+USE ROLE SECURITYADMIN;
+GRANT USAGE ON SCHEMA LEDGERLINE.S18 TO ROLE LEDGERLINE_TRANSFORMER;
+GRANT CREATE TABLE, CREATE VIEW, CREATE TAG, CREATE MASKING POLICY, CREATE ROW ACCESS POLICY
+  ON SCHEMA LEDGERLINE.S18 TO ROLE LEDGERLINE_TRANSFORMER;
+GRANT USAGE ON SCHEMA LEDGERLINE.S18 TO ROLE LEDGERLINE_ANALYST;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA LEDGERLINE.S18 TO ROLE LEDGERLINE_ANALYST;
+GRANT SELECT ON FUTURE VIEWS  IN SCHEMA LEDGERLINE.S18 TO ROLE LEDGERLINE_ANALYST;
+
+SHOW GRANTS ON SCHEMA LEDGERLINE.S18;

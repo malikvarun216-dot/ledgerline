@@ -64,7 +64,7 @@ session · **X** skip (no honest use here).
 | System tables (billing, audit) | ★★ | B? S21 |
 | Delta Sharing; Lakehouse Federation | ★★ | B? S20 — optional session |
 | UniForm / Iceberg read by Snowflake | ★★ | B? S20 — optional; the most doubtful on Free Edition (tables live in Databricks-managed storage) |
-| Genie (AI/BI Genie space: questions in plain words → SQL) | ★★ | **B? S19b** (S17, at the human's request): verify on Free Edition first; same 10 questions as Cortex Analyst, graded against an answer key. If refused: T with the finding |
+| Genie (AI/BI Genie space: questions in plain words → SQL) | ★★ | **B S19b** — verified S18: a Genie Agent on `workspace.silver.customer` answered "customers per state" on Free Edition; table = Snowflake (SP 40,143, RJ 12,323), but its prose said 96,696 total (truth 95,696, cross-checked in Silver: the model summed the groups itself; its SQL had no total). (S17, at the human's request): verify on Free Edition first; same 10 questions as Cortex Analyst, graded against an answer key. If refused: T with the finding |
 | Model serving, vector search, Databricks Apps | ★ | X — no honest use |
 
 ## 2. Snowflake (trial: Enterprise edition)
@@ -80,8 +80,8 @@ session · **X** skip (no honest use here).
 | Primary keys are not enforced; MERGE with duplicate source rows (vs Delta, which refuses only duplicates matching an *existing* row — exp_04 A1/A2) | ★★★ | ✓ S13 (`s13_loading` E: duplicate PK accepted; two source rows — even identical — for an existing key refused `100090`; for a new key inserted twice, silently — same as Delta) |
 | MERGE + anti-join delete (no `NOT MATCHED BY SOURCE` in Snowflake) | ★★★ | ✓ S15 (`s15_merge` A: MERGE + `DELETE … NOT EXISTS` and a single MERGE over a full outer join both = Delta's `NOT MATCHED BY SOURCE` on seller nights 1–8, 0/0; the same anti-join on a change batch deleted 2,945 and kept the 100 deletes; production facts: in-band deletes by a custom MERGE strategy) |
 | Zero-copy clone, CI gating (write-audit-publish) | ★★★ | ✓ S16 (`s16_clone`: table clone 2 s, survives its source's DROP, clone of a past point; schema clone keeps owners and **loses managed access**; table clone owned by the cloner; write-audit-publish by `SWAP` — bad run never published, rollback = swap again). Gating = slim CI below |
-| Time Travel, `UNDROP` | ★★★ | B S18 |
-| Masking policies, row access policies, tag-based masking | ★★ | B S18 (Enterprise) |
+| Time Travel, `UNDROP` | ★★★ | ✓ S18 (`s18_governance` E: `BEFORE(STATEMENT)` returned 95,696 rows after deleting 40,143; masking still applies to the past; `UNDROP` refused while the name is taken, then back with its policy; retention 0 refuses both) |
+| Masking policies, row access policies, tag-based masking | ★★ | ✓ S18 (`09_governance.sql`: a governor role; tag `PII_CLASS` on the GOLD schema masks every text column by default, dbt tags 39 columns public; row policy by mapping table: SP analyst 40,143 of 95,696; survives dbt rebuilds, guard test `gold_governed`; one build incident: an exempt mask is needed under a row policy) |
 | Streams (standard vs append-only), Tasks (DAGs, serverless), Dynamic Tables vs materialized views | ★★★ | B S19 — every Task suspended at the end (cost guard) |
 | Snowpark, UDFs, stored procedures | ★★ | B S19 (small) |
 | Micro-partitions, pruning, clustering keys | ★★★ | B S21 (TPC-DS sample) |
@@ -126,13 +126,13 @@ session · **X** skip (no honest use here).
 
 | Topic | Weight | Status |
 |---|---|---|
-| Replication / failover (needs a second account) | ★★ | T S18 |
+| Replication / failover (needs a second account) | ★★ | T ✓ S18 |
 | SSO, SCIM, network policies (a wrong policy locks you out) | ★★ | T ✓ S13 |
 | Snowpipe Streaming + Kafka connector (needs Kafka Connect; costs money on Confluent) | ★★ | T ✓ S13 |
-| Fail-safe recovery (only Snowflake support can do it) | ★ | T S18 |
+| Fail-safe recovery (only Snowflake support can do it) | ★ | T ✓ S18 |
 | PrivateLink, Tri-Secret Secure (Business Critical edition) | ★ | T ✓ S13 |
 | Hybrid tables | ★ | T S19 |
-| **Cortex Analyst on a semantic view over GOLD** (questions in plain words → SQL); Cortex AI functions (`AI_COMPLETE`, `AI_CLASSIFY`) in words | ★★ | **B? S19b** (S17, at the human's request): verify on the trial in AWS Ohio first; graded on the same 10 questions as Genie. Cortex grants stay revoked from `PUBLIC` (S13); TRANSFORMER only, credits read before and after (serverless: monitors do not see it) |
+| **Cortex Analyst on a semantic view over GOLD** (questions in plain words → SQL); Cortex AI functions (`AI_COMPLETE`, `AI_CLASSIFY`) in words | ★★ | **B S19b** — verified S18: Cortex Analyst answers on the trial in AWS Ohio (semantic view `S18.PROBE_SV`, "customers per state", RJ 12,323 = GOLD); **AI functions refused on the trial** ("COMPLETE is not available for trial accounts") — they stay in words. (S17, at the human's request): verify on the trial in AWS Ohio first; graded on the same 10 questions as Genie. Cortex grants stay revoked from `PUBLIC` (S13); TRANSFORMER only, credits read before and after (serverless: monitors do not see it) |
 
 **No honest use in this project.**
 

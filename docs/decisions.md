@@ -3711,3 +3711,115 @@ link that now exists. Next build: **0 rows**, 71/71 pass. **Rejected:** a shorte
 rewrites whatever arrived in the window, and gives less cover for out-of-order commits); changing
 `>=` to `>` in `merge_changes` (it would break the re-link retry, which re-applies the same version
 on purpose).
+
+## Who may see what on Snowflake Gold: a governor role owns every tag and policy; a tag on the GOLD schema masks every text column by default; dbt marks the safe columns `public` and re-attaches the row policy after each build, and a test fails the build if either is missing (Session 18)
+
+**In plain words:** Gold holds each customer's zip prefix, city and state. Not a name, but with
+an order date it can point at one person. Analysts should see the state, not the city or zip; a
+regional analyst should see only their region's customers. Snowflake does this with a **masking
+policy** (hides a column's values) and a **row access policy** (hides whole rows). The hard part is
+not writing the policies: it is keeping them on tables that dbt throws away and re-creates every
+night.
+
+**What forced the shape** (`snowflake/experiments/s18_governance.py`, 25 of 26 predictions; rows
+in `constraints.md`, Snowflake):
+- dbt's `CREATE OR REPLACE` (a `table` or `view` model, every build) **silently removes** every
+  policy on the object, `COPY GRANTS` included: the analyst's next read was 95,696 rows in clear
+  text, no error. A policy attached to a Gold table lasts one night.
+- Binding a policy to a **tag** (so it covers every column with that label) and tag
+  **propagation** both need account-level privileges (`APPLY MASKING POLICY` / `APPLY TAG` on the
+  account). Owning the tag and the policy is not enough: Snowflake treats "what is hidden
+  everywhere" as an admin decision.
+- A row policy applies to the table's **owner** too, and counts **inherited** roles: the transformer
+  (which holds ANALYST below it) was filtered to SP's 40,143 rows. dbt's incremental facts read
+  their own table (`{{ this }}`), so a pipeline role left unmapped would make dbt misjudge what it
+  already holds.
+
+**The design:**
+1. **`LEDGERLINE_GOVERNOR`** (new role, held by the human only) owns schema
+   `LEDGERLINE.GOVERNANCE`: the tag `PII_CLASS`, the masking policy, the row policy and its mapping
+   table. It holds the three account-level `APPLY` privileges. It reads no data.
+2. **Masking fails closed.** `PII_CLASS = 'restricted'` is set on the **GOLD schema**; every text
+   column in GOLD inherits it and is masked (`***`) for anyone but the pipeline roles. dbt never
+   re-creates a schema, so this survives every build. Columns safe for analysts are tagged
+   `public` at column level by a dbt post-hook (the column tag wins over the schema's). Each of
+   Gold's 44 text columns declares its class in `_gold.yml`: 39 `public`, 5 `restricted`
+   (`customer_zip_code_prefix`, `customer_city`, wherever they appear: three objects). Restricted
+   is set at column level too, so a column that turns restricted loses an old `public` tag. If the post-hook fails or a column is missed, the
+   column shows `***`: too much hidden, visible at once, never a leak.
+3. **Row access:** policy `STATE_ROWS` on `customer_state`, driven by a mapping table
+   (role → state, `'*'` = all). A row policy cannot be bound to a tag, so dbt re-attaches it after
+   each build to every Gold object that declares it; the transformer gets `APPLY` on that one policy
+   and on the one tag, nothing account-wide. A dbt test fails the build if a declared object lacks
+   the policy or the GOLD schema lacks the tag.
+4. Pipeline roles (TRANSFORMER, CI_RUNNER) are mapped `'*'` and see clear text. A new role
+   **`LEDGERLINE_ANALYST_SP`** (SP only) exists to test the row policy from inside; it is granted to
+   the human and to `LEDGERLINE_SVC` (secondary roles off, so a session holds only the role it
+   names). That is a deliberate exception to "SVC: LOADER + TRANSFORMER only": a reader role, for
+   testing, granting no write.
+
+**Rejected:**
+- **Policies attached to each column by a dbt post-hook (no tag).** Fails open: a new model or a
+  failed hook leaves clear text, and nothing notices; the experiment's A4 is that failure.
+- **Tag propagation from staging columns.** Staging views are re-created every build too, the
+  feature is newer, and what reaches a Gold column through a join is harder to reason about than a
+  schema tag.
+- **The transformer owning the policies.** The role that writes the data would decide who reads
+  it; and it lacks the account privileges anyway (B1, C1).
+- **Masking `customer_unique_id`** (e.g. a hash for analysts). It is the key every Gold join uses;
+  it is a pseudonym, not contact data, and erasure removes it. Masking it would break analysis for
+  no privacy gained once city and zip are hidden.
+
+**Known cost, kept:** a filter on a masked column returns **0 rows, not an error** (A3: the
+analyst's `city = 'sao paulo'` found 0 of 14,917). Written into the column descriptions.
+
+### Addendum (2026-10-18, same session): the GOLD mask is created `EXEMPT_OTHER_POLICIES = TRUE`
+
+The first governed build failed: a column covered by a masking policy cannot be a row policy
+argument (`391819`), and the schema tag covers `customer_state` (incidents.md 2026-10-18). The mask
+is now `MASK_TEXT_EXEMPT`, swapped onto the tag in one statement. **Rejected:** keep `customer_state`
+out of the mask by moving the tag from the schema to each restricted column (that is the fail-open
+design rejected above); a row policy keyed on another column (Gold has no other column naming the
+region).
+
+## Erasure on Snowflake keeps S12's meaning: contact data is what a person's erasure deletes, and Snowflake is proven never to hold any; city and zip are masked, not erased (Session 18)
+
+**In plain words:** when a customer asks to be forgotten, Session 12 decided what that deletes:
+their contact data (name, email, phone, email hash), held only on Databricks in `workspace.pii`.
+Their pseudonymous id, city, state and orders stay, for accounting; without the contact vault they
+no longer lead to a person. Snowflake was checked against that rule: it holds **6 customer fields**
+(`customer_unique_id`, `customer_id`, city, state, zip prefix, `dim_updated_at`) across 656,962 RAW
+rows from 8 Silver tables, and **no contact data at all**. So a Snowflake erasure has nothing to
+delete, as long as contact data never crosses the bridge. A test now keeps that true.
+
+**The guard** (`dbt_project/tests/no_contact_data_in_snowflake.sql`, every build): any field
+declared for the bridge, or any column anywhere in `LEDGERLINE`, whose name looks like contact data
+(email, phone, address, `*_name` of a person, CPF …) fails the build. RAW cannot hold an undeclared
+field (`raw_fields_declared`), so the declared list covers RAW. The pattern was checked on 12 names
+(flags `email_hash`, `phone`, `customer_name`, `street_address`; passes the real fields and
+`product_category_name`). The test was made to fail on purpose: a scratch column `contact_email` →
+FAIL 1; dropped → PASS.
+
+**What "deleted" means on Snowflake, if the scope ever widens** (measured S18 where marked):
+a `DELETE` hides the row at once, but the old version stays readable by Time Travel for the table's
+retention: **1 day** here (account default; `BEFORE(STATEMENT => …)` returned all 95,696 rows after
+a delete of 40,143, `s18_governance` E1). After that, a **permanent** table keeps it **7 more days in
+Fail-safe**, which no query can read and only Snowflake support can recover (theory: cannot be
+tested). A **transient** table has no Fail-safe; retention 0 skips Time Travel (E5: both refused).
+So an erasure on a permanent Gold table is complete about **8 days** after the `DELETE`, the same
+shape as Databricks' 7-day VACUUM window (S12). Clones share storage: a clone made before the
+delete still holds the row until the clone is dropped (S16).
+
+**Rejected:**
+- **B: widen erasure to city and zip, on both platforms.** The stricter GDPR reading: a pseudonym
+  plus zip, city and order dates can single someone out. It cannot be done on Snowflake alone:
+  Silver keeps the city, so a rebuild would bring it back. On Snowflake it means rewriting the
+  person's rows inside RAW's change log (a second writer of RAW, against "the pipe is RAW's only
+  loader"), deleting their SCD2 history rows (a source delete only closes them), and 8 days of
+  Time Travel and Fail-safe. It re-opens S12's decision and needs its own session on both
+  platforms. City and zip are **masked** for every reader instead (decision above), which limits
+  who sees them but erases nothing; that difference is stated, not blurred.
+- **Hide a forgotten person with a masking rule** (a forget list read by the policy). Their data
+  would still sit in RAW and in the history: that is access control called erasure.
+- **No guard, rely on `raw_fields_declared`.** It fails on an undeclared field, but a person adding
+  `email` to `silver_tables()` would declare it and pass: the list is where contact data would enter.

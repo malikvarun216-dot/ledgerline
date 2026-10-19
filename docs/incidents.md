@@ -2689,6 +2689,13 @@ default branch.
 system that runs the job. An alarm that lives inside the platform goes silent
 exactly when the platform does.
 
+
+**Update (2026-10-19, Session 18).** `scripts/watch_jobs.py --max-age-hours 26`, run locally at
+05:02 UTC: `ledgerline-pii` last success **4.0 h ago**, `ledgerline-silver` 4.4 h ago — both
+schedules ran overnight, the PII job for the first time since 10-15. Nothing was changed to make
+that happen, so the cause of the four-day gap stays unknown; the watcher is what would show a
+repeat. The GitHub Actions run of the watcher (scheduled 03:30 UTC) was not seen from here (no
+`gh` on this machine): checked in the Actions tab or carried.
 ## [2026-10-18] — A new test signed in to the live Databricks workspace: an older test left two copies of the module that holds the `.env` guard (Session 17)
 
 **In plain words:** while building the job watcher, its test "with no credentials the
@@ -2804,3 +2811,68 @@ nothing), and re-read the platform's `constraints.md` section. Every time this s
 that, the platform taught the same fact a second time. Open: slim CI clones the old table, so a
 PR adding a column to an incremental model fails CI the same way. It is to be handled when the
 next such PR is opened, and is recorded in the constraint row.
+
+## [2026-10-18] — The first governed Gold build failed on two objects: Snowflake will not let a row policy read a column that a masking policy covers, and the GOLD-wide tag covers every text column (Session 18)
+
+**In plain words:** the new design hides every text column in GOLD by default (a tag on the
+schema) and opens the safe ones. The row policy that limits a regional analyst to their state
+reads `customer_state`. Snowflake refused to attach it: `customer_state` is a text column, so the
+GOLD-wide masking policy covers it, even though for state that policy returns the value unchanged.
+Two Gold objects failed to build and seven downstream were skipped. Nothing leaked: the failure
+left more hidden, not less.
+
+**What happened.** `run_dbt.py build` right after `09_governance.sql`: PASS=63 ERROR=2 SKIP=7.
+`customer_current` and `dim_customer`: *"391819: Column 'CUSTOMER_STATE' cannot be used as policy
+argument because it is masked by another policy."* Both were re-created and their column tags set
+(the hook tags columns before attaching the row policy), so city and zip were masked and state was
+clear; no row policy, so `LEDGERLINE_ANALYST_SP` still saw all 95,696 customers. The skipped
+objects (`order_items_at_sale` and the tests) kept their old versions: an old view with no column
+tags, so the schema tag masked **all** its text columns for readers. Before the build, all three
+readers were measured as predicted (analyst: 4 of 4 text columns masked on 95,696 rows; SP analyst
+the same, no row policy yet; transformer 0 masked).
+
+**Why nothing caught it.** `s18_governance` tested masking (part A) and row access (part D) on
+**different tables**, never both on one column, so the combination the design depends on was never
+run. The decision was made on 25 of 26 predictions that were each true and did not cover the one
+interaction that mattered.
+
+**Fix.** Probed in S18 first: an ordinary masking policy on `customer_state` + the row policy →
+`391819`; the same with **`EXEMPT_OTHER_POLICIES = TRUE`** on the masking policy → attached, the
+analyst saw 40,143 (SP). Production: the governor creates the masking policy again with that
+option and swaps it onto the tag in one statement (`ALTER TAG … SET MASKING POLICY … FORCE`), so
+GOLD is never unmasked in between (`snowflake/repairs/2026-10-18_exempt_mask.sql`; the policy is now `MASK_TEXT_EXEMPT`); `09_governance.sql`
+creates the exempt policy from the start.
+
+**Prevention.** An experiment that justifies combining two mechanisms runs them **on the same
+object**, and the decision names that check. A constraint row records the rule: a column under a
+masking policy can be a row-policy argument only if that masking policy is
+`EXEMPT_OTHER_POLICIES = TRUE`. The guard test `gold_governed` already fails a build that leaves a
+declared object without its row policy; it was skipped this time only because its parents failed,
+and a failed parent stops the build anyway.
+
+## [2026-10-19] — The job watcher did not run on its first scheduled morning, and nothing said so (Session 18) — OPEN
+
+**In plain words:** `job-watch` is the GitHub Actions check built yesterday because Free Edition
+skipped scheduled Databricks jobs silently. Its first scheduled run (03:30 UTC, 2026-10-19) did
+not happen. At 05:03 UTC the repository's Actions tab showed `job-watch` with **one run only**:
+#1, the manual run of 2026-10-18 (which failed, as expected then). The watcher meant to catch
+silent non-runs had a silent non-run of its own.
+
+**What is known.** The schedule is right (`cron: "30 3 * * *"`), on `dev`, which is the repository's
+default branch (`git ls-remote --symref origin HEAD` → `refs/heads/dev`), since commit `292b346`
+(2026-10-18 ~10:38 UTC), 17 hours before the first slot. GitHub documents that scheduled runs can
+be **delayed at busy times or dropped**; 1.5 hours late is outside the usual delay. The Databricks
+jobs themselves ran (`watch_jobs.py` locally at 05:02 UTC: pii 4.0 h, silver 4.4 h ago, both ok).
+
+**Why nothing caught it.** A missing run of the watcher fails nothing, so GitHub sends no email:
+the same blind spot as the Databricks schedules, one level up. It was seen only because the human
+opened the Actions tab, prompted by this session's carried item.
+
+**Not yet decided — open.** Read the Actions tab again on 2026-10-20 after 03:30 UTC. If the
+scheduled run appears (late or not), record the delay. If it is missing again: GitHub's `schedule`
+is not reliable enough to be the only watcher, and the check needs a **dead man's switch** (an
+outside service that alarms when it is NOT pinged by a given time) or a second clock (Airflow,
+the laptop's Task Scheduler).
+
+**Prevention (now).** A watcher is itself scheduled work: its own last run is checked whenever its
+targets are. Carried by name in `progress.md` `### Next` until two scheduled runs are seen.

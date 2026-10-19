@@ -9,15 +9,17 @@ models:
   - name: customer_current
     description: One row per person (customer_unique_id) as Silver holds them now.
     config:
+      meta: {row_policy: customer_state}
       contract: {enforced: true}
     columns:
       - name: customer_unique_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: customer_zip_code_prefix, data_type: varchar}
-      - {name: customer_city, data_type: varchar}
-      - {name: customer_state, data_type: varchar}
+      - {name: customer_zip_code_prefix, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_city, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
       - name: dim_updated_at
         data_type: timestamp_ntz
         description: Business time — when this version became true in Olist.
@@ -39,9 +41,10 @@ models:
     columns:
       - name: product_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: product_category_name, data_type: varchar}
+      - {name: product_category_name, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: product_weight_g, data_type: number}
       - {name: product_length_cm, data_type: number}
       - {name: product_height_cm, data_type: number}
@@ -68,11 +71,12 @@ models:
     columns:
       - name: seller_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: seller_zip_code_prefix, data_type: varchar}
-      - {name: seller_city, data_type: varchar}
-      - {name: seller_state, data_type: varchar}
+      - {name: seller_zip_code_prefix, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_city, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_state, data_type: varchar, config: {meta: {pii_class: public}}}
       - name: dim_updated_at
         data_type: timestamp_ntz
         description: Business time — when this version became true in Olist.
@@ -94,10 +98,11 @@ models:
     columns:
       - name: sku_key
         data_type: varchar
+        config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: product_id, data_type: varchar}
-      - {name: seller_id, data_type: varchar}
+      - {name: product_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}}
       - name: stock_qty
         data_type: number
         data_tests:
@@ -110,16 +115,18 @@ models:
   - name: dim_customer
     description: SCD2 customer from the customer_history snapshot. Point in time = valid_from <= T < valid_to.
     config:
+      meta: {row_policy: customer_state}
       contract: {enforced: true}
     data_tests:
       - scd2_shape: {arguments: {key: customer_unique_id}}
     columns:
       - name: customer_unique_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         data_tests: [not_null]
-      - {name: customer_zip_code_prefix, data_type: varchar}
-      - {name: customer_city, data_type: varchar}
-      - {name: customer_state, data_type: varchar}
+      - {name: customer_zip_code_prefix, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_city, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: valid_from, data_type: timestamp_ntz}
       - {name: valid_to, data_type: timestamp_ntz}
       - {name: is_current, data_type: boolean}
@@ -134,8 +141,9 @@ models:
     columns:
       - name: product_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         data_tests: [not_null]
-      - {name: product_category_name, data_type: varchar}
+      - {name: product_category_name, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: product_weight_g, data_type: number}
       - {name: product_length_cm, data_type: number}
       - {name: product_height_cm, data_type: number}
@@ -155,10 +163,11 @@ models:
     columns:
       - name: seller_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         data_tests: [not_null]
-      - {name: seller_zip_code_prefix, data_type: varchar}
-      - {name: seller_city, data_type: varchar}
-      - {name: seller_state, data_type: varchar}
+      - {name: seller_zip_code_prefix, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_city, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_state, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: valid_from, data_type: timestamp_ntz}
       - {name: valid_to, data_type: timestamp_ntz}
       - {name: is_current, data_type: boolean}
@@ -179,18 +188,20 @@ models:
     columns:
       - name: order_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: customer_id, data_type: varchar, description: "Per-ORDER id (Olist issues one per order). Not the person."}
+      - {name: customer_id, data_type: varchar, description: "Per-ORDER id (Olist issues one per order). Not the person.", config: {meta: {pii_class: public}}}
       - name: customer_unique_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         description: The person, from customer_order_link. NULL until the link's night has landed.
         data_tests:
           - not_null:
               config:
                 severity: warn   # an order placed after the newest dims night waits for the next one
-      - {name: status, data_type: varchar}
-      - {name: source_status, data_type: varchar}
+      - {name: status, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: source_status, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: created_at, data_type: timestamp_ntz, description: "Business time the order was placed — the point-in-time join's T."}
       - {name: approved_at, data_type: timestamp_ntz}
       - {name: shipped_at, data_type: timestamp_ntz}
@@ -200,7 +211,7 @@ models:
       - {name: estimated_delivery_at, data_type: timestamp_ntz}
       - {name: units, data_type: number}
       - {name: silver_version, data_type: number, description: "Change-feed version of Silver orders this row comes from; decides which change wins (merge_changes >=)."}
-      - {name: silver_change_type, data_type: varchar, description: "insert or update_postimage (a delete removes the row)."}
+      - {name: silver_change_type, data_type: varchar, description: "insert or update_postimage (a delete removes the row).", config: {meta: {pii_class: public}}}
       - {name: raw_loaded_at, data_type: timestamp_ltz, description: "When this row's change arrived in RAW; the high-water mark (minus one hour), S17."}
 
   - name: fct_order_items
@@ -213,6 +224,7 @@ models:
     columns:
       - name: order_id
         data_type: varchar
+        config: {meta: {pii_class: public}}
         constraints: [{type: not_null}]
         data_tests:
           - not_null
@@ -220,13 +232,13 @@ models:
       - name: order_item_id
         data_type: number
         constraints: [{type: not_null}]
-      - {name: product_id, data_type: varchar}
-      - {name: seller_id, data_type: varchar}
-      - {name: sku_key, data_type: varchar}
+      - {name: product_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: sku_key, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: price, data_type: "number(12,2)"}
       - {name: freight_value, data_type: "number(12,2)"}
       - {name: silver_version, data_type: number}
-      - {name: silver_change_type, data_type: varchar}
+      - {name: silver_change_type, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: raw_loaded_at, data_type: timestamp_ltz, description: "When the change arrived in RAW; the high-water mark (minus one hour), S17."}
 
   - name: order_items_at_sale
@@ -234,20 +246,21 @@ models:
       Each order item with the customer, product and seller as they were when the order was placed
       (point-in-time join to the SCD2 dimensions, resolved at query time).
     config:
+      meta: {row_policy: customer_state}
       contract: {enforced: true}
     columns:
-      - {name: order_id, data_type: varchar}
+      - {name: order_id, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: order_item_id, data_type: number}
       - {name: ordered_at, data_type: timestamp_ntz}
-      - {name: order_status, data_type: varchar}
-      - {name: customer_unique_id, data_type: varchar}
-      - {name: customer_city, data_type: varchar}
-      - {name: customer_state, data_type: varchar}
-      - {name: product_id, data_type: varchar}
-      - {name: product_category_name, data_type: varchar}
-      - {name: seller_id, data_type: varchar}
-      - {name: seller_city, data_type: varchar}
-      - {name: seller_state, data_type: varchar}
+      - {name: order_status, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: customer_unique_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: customer_city, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: product_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: product_category_name, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_city, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_state, data_type: varchar, config: {meta: {pii_class: public}}}
       - {name: price, data_type: "number(12,2)"}
       - {name: freight_value, data_type: "number(12,2)"}
       - {name: customer_found, data_type: boolean, description: "A customer version covered the order time."}

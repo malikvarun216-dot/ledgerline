@@ -25,6 +25,8 @@ vars:
   # exp_05 / rebuilds: replay the dimension nights one at a time. Night n = the n-th change-feed
   # version of that Silver table (each dims night is one MERGE = one version). Unset = everything.
   as_of_night: null
+  # Where the governor keeps tags and policies (snowflake/09_governance.sql, Session 18).
+  governance_schema: LEDGERLINE.GOVERNANCE
 
 models:
   ledgerline:
@@ -37,6 +39,8 @@ models:
     gold:
       +schema: gold
       +materialized: table
+      # Column tags + row policy, re-applied after each build: CREATE OR REPLACE drops them (S18).
+      +post-hook: "{{ apply_governance() }}"
 
 snapshots:
   ledgerline:
