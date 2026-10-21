@@ -3856,3 +3856,121 @@ measured), repeatability (to measure), hidden serverless cost (measured), availa
   project's thesis (replay gives the same result).
 - **Bring `order_reviews` in as a fourth production source.** A full lane (generator, Bronze,
   Silver, bridge) for one experiment; the experiment needs a table, not a lane.
+
+## The mask covers the whole LEDGERLINE database, not only GOLD: a copy of governed data is masked wherever it lands in the database; GOVERNANCE and RAW are tagged `public` (Session 19, closing the prevention of incident 2026-10-19 "Masked Gold data escaped")
+
+**In plain words:** Gold hid customers' city from analysts, but a copy of Gold in a scratch schema
+showed it in clear text (95,696 cities), because the mask was attached to the GOLD schema only.
+Now the "hide every text column" tag sits on the whole database, so any table anywhere in
+`LEDGERLINE`, scratch included, starts hidden for readers. Two schemas are opened again on purpose:
+GOVERNANCE (the row policy reads its mapping table; masked, every reader would see 0 rows) and RAW
+(the loader's nightly checks read `TABLE_NAME` / `SOURCE_FILE`; masked, `check-raw` would flag
+every row and the Airflow DAG would fail every night).
+
+- Chosen: **A** — `PII_CLASS = 'restricted'` on database `LEDGERLINE` (`snowflake/13_database_tag.sql`,
+  run by the human as the governor). GOLD keeps its own `restricted` (same value; dbt's column
+  tags still open the public columns). `GOVERNANCE` and `RAW` = `public` at schema level: a schema
+  tag overrides the database's. Proof: `s18b_escape` re-run in `LEDGERLINE.S19` with `--db-tagged`,
+  predicting R1 (CTAS by the transformer) and R3 (CTAS from a clone) **masked** for the analyst.
+  Guard: `gold_governed` also fails when the database tag is not `restricted` (production only).
+- Why RAW may be `public`: its only STRING columns are load metadata (Silver table name, file
+  path). The data is the `RECORD` VARIANT column, which a STRING mask never covers whatever the tag,
+  and readers have no grant on RAW. `no_contact_data_in_snowflake` keeps contact fields out of it.
+- Cost, recorded: the human's own Snowsight reads (ACCOUNTADMIN / SYSADMIN) now see `***` in
+  STAGING, SNAPSHOTS and scratch too. Only the pipeline roles named in the mask see clear text.
+  That is the point: a role that is not a pipeline role reads like a reader.
+- Known gap, measured not assumed: the mask's signature is `STRING`. A copy that puts the city into a
+  `VARIANT` or casts it to another type is not covered. `s18b_escape` gets an R6 to measure it.
+- Rejected: **B, a rule only** (no reader grants on scratch schemas that hold copies). The leak
+  happened while an equivalent rule was being followed in spirit: the S18 grant was reviewed for
+  what it tested, not for what it exposed. A rule nobody checks fails the same way twice.
+- Rejected: **add `LEDGERLINE_LOADER` to the mask's clear-text roles** instead of tagging RAW
+  `public`. It changes the body of the production mask (`ALTER MASKING POLICY … SET BODY`, its
+  exempt flag set at creation untested under that path) to fix a problem that only RAW has.
+- Rejected: **tag every scratch schema `restricted` when it is made.** One more step per session
+  that can be forgotten; the database tag covers schemas that do not exist yet.
+
+## A self-healing triage agent becomes its own session, S19c, before Drill 3: it may re-run idempotent tasks on its own, it may only propose code changes as pull requests, and Drill 3 is its graded test set (2026-10-21, during Session 19)
+
+**In plain words:** when a nightly step fails, an agent gathers the evidence (which task, which run,
+the log, the code version, what changed in the data's shape), asks Claude what kind of failure it is,
+and then does one of three things: re-runs a step that is known to be safe to repeat, opens a pull
+request for a human to review, or hands the case to the human. It never changes data or code on its
+own. The human asked after reading a post on self-healing pipelines: the project already has most of
+the parts (an orchestrator, idempotent steps, CI on clones, data checks, 20+ incidents each ending in
+a prevention rule), and the agent is the missing piece.
+
+- Chosen: session **S19c**, after S19b and before Drill 3 (`coverage.md` row + session line).
+  - **Detect:** Airflow `on_failure_callback` on `ledgerline_nightly` → one evidence bundle per failed
+    task run (dag run id, task, log tail, git sha, RAW field diff), deduplicated by run id.
+  - **Triage:** Claude with **read-only** tools only (`sf.py` reads as a reader-scoped role, git log,
+    the bundle). Output: `runbook:<name>`, `code_change`, or `unknown`, with its evidence.
+  - **Act, by policy written here:** may do alone — re-run an idempotent task, at most 2 tries.
+    PR only, a human merges — any code change, through slim CI on clones. **Never** — anything that
+    deletes or regenerates data, touches governance or PII, or changes a MERGE (standing instruction:
+    treat live as production).
+  - **Action receipts:** a table keyed `(dag_run_id, task_id, action)`, written before the action
+    and closed after it; a restarted agent reads it first and never repeats a repair.
+  - **Verify:** the incident closes only after the existing checks pass (`12_check_raw.sql`, dbt
+    tests, the units-sold ↔ decrements reconciliation).
+  - **Measured:** Drill 3's deliberate breaks are replayed at the agent; each scored on class right,
+    action within policy, verification run. Model name and spend recorded with every call.
+- Cost, recorded: the Claude API is outside the ~$22 budget. Expected to be a few dollars at this
+  volume (small bundles, a handful of failures); capped with a spend limit and read after, not assumed.
+- Rejected: **let the agent fix code and deploy it.** Reverting code does not undo data already
+  written; a wrong MERGE fix replays wrong rows into every night it touches. Code goes through review.
+- Rejected: **fold it into S19b.** S19b already measures AI as a pipeline step and has been reshaped
+  twice; two measurements in one session would make both thin.
+- Rejected: **after Drill 3.** Drill 3 breaks the pipeline on purpose anyway: built before it, the
+  drill doubles as the agent's evaluation at no extra cost; built after, the breaks must be redone.
+- Rejected: **Databricks `ai_query` as the agent's model** ($0 on Free Edition). The agent runs in
+  Airflow on the laptop and needs tool calling against Snowflake, git and GitHub; routing it through
+  a Databricks SQL function adds a hop and gives no tool use.
+
+**Correction (2026-10-21, same day) — A as written failed in production and was reverted.** Tagging
+GOVERNANCE `public` still *attached* the tag's mask to `STATE_ACCESS`, the row policy's lookup table,
+and Snowflake refuses a policy body that reads a masked column: every read of the 3 row-policy Gold
+objects failed until the revert (incidents.md 2026-10-21). The reasoning above about GOVERNANCE was
+wrong; the choice of a database-wide default (over a rule) still stands, but needs a design that
+keeps the policy's lookup table out of the tag's reach entirely — e.g. `STATE_ACCESS` in its own
+untagged database — **proven in a scratch database before production**. Until then the prevention
+is B, the rule: no reader grant on any schema that may hold copies of Gold (S19's scratch has none).
+`13_database_tag.sql` is kept as the record of what was run, marked not to be re-run.
+
+## Streams & Tasks and a Dynamic Table rebuilt Gold's current stock to the row, and Gold still stays dbt's: they are the comparison, measured; inside them, an append-only stream, deletes as tombstones, and a Dynamic Table — not a materialized view — for "current state" (Session 19)
+
+**In plain words:** Snowflake can keep a table up to date by itself, two ways: a *stream* (a bookmark of
+what changed) read by a *task* (SQL on a timer), or a *Dynamic Table* (a query Snowflake re-runs
+within a lag you choose). Both rebuilt `GOLD.INVENTORY_CURRENT` from the 158,446 raw CDC events:
+34,348 live SKUs, 0 rows different from what dbt built. Gold still stays dbt's (decisions.md S0:
+one portable project, two targets); these are what a Snowflake-only team would run instead.
+
+- Chosen, inside the experiment, each with what it replaced:
+  - **Append-only stream on the landing table.** Rejected: a standard stream. The landing table is
+    only appended to (like RAW, loaded by Snowpipe); a standard stream would also hand the MERGE every
+    retention cleanup and correction of old landing rows (S19 C: 10 deletes + 5 updates → 20 rows
+    the task would have to filter out).
+  - **A delete is a tombstone** (`is_deleted`, `seq` kept). Rejected: `WHEN MATCHED AND op = 'D'
+    THEN DELETE`. Removed, the row takes its `seq` with it, and an older update delivered later
+    inserts the deleted SKU back — the exp_04 C bug Silver fixed by reading the whole log.
+  - **A Dynamic Table for "current state per key".** Rejected: a materialized view. It refused every
+    way to say "newest event per SKU": `QUALIFY`, a join, even `MAX_BY` (non-deterministic).
+  - **`EXECUTE TASK` to test, the schedule only to show it.** A resumed 1-minute task costs a
+    warehouse start per batch; the experiment resumed one for ~3 minutes, then suspended it.
+- What each costs, in words for the interview: a task + stream is code you own (dedup, guard,
+  tombstones written by hand) and runs only when there is data; a Dynamic Table is a query you
+  declare, Snowflake decides incremental vs full and keeps it within the lag, and refreshes on every
+  upstream change while it is resumed; a materialized view is always current but limited to one
+  table and simple, deterministic SQL, maintained serverless (invisible to resource monitors).
+- Rejected: **move Gold's `inventory_current` to a Dynamic Table.** It would leave dbt's tests,
+  contracts, governance hook and the Databricks target behind for one table, and lock Gold to
+  Snowflake weeks before the trial ends.
+- Rejected: **a stream on production `RAW.SILVER_CHANGES`.** The first stream on a table turns on
+  change tracking, an `ALTER` on a production table by its owner (the loader); and nothing arrives
+  in RAW during a session, so the stream would have shown nothing. The S19 landing table replays the
+  same events in the same order.
+- Snowpark, kept small: a **built-in beats a Python UDF** when one exists (`LPAD` = the UDF on all
+  96,358 rows, without a Python sandbox per call); a **Python procedure is the right shape for a
+  program** — `SUSPEND_ALL_TASKS(schema)` (roots first, then children), the cost guard every task
+  session ends with. Rejected: a Snowpark DataFrame job from the laptop — dbt already owns
+  transformations here; it would be a third way to write the same SQL.

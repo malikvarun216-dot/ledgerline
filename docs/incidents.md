@@ -2917,3 +2917,50 @@ transformer. As the analyst after: `S18.CUST_SRC` → "does not exist or not aut
 customer-named column left in S18 is `STATE_ACCESS.customer_state` (2 rows: role → state code, no
 person). Undroppable for 1 day (retention). The prevention is decided after experiment S18b-1
 (how masked data escapes), which recreates such copies on purpose and measures each route.
+
+## [2026-10-21] — Tagging the whole database broke every read of Gold's row-policy objects: the tag attached its mask to the row policy's own lookup table, even where the tag said `public` (Session 19) — OPEN
+
+**In plain words:** to close the leak of 2026-10-19 we put the "hide text" tag on the whole
+`LEDGERLINE` database and marked the GOVERNANCE schema `public`, expecting `public` to mean "no
+mask here". It does not. Wherever the tag reaches, its masking policy is *attached* to every text
+column; the value only decides what the mask returns. That put a mask on `STATE_ACCESS`, the small
+table the row policy looks up (role → state). Snowflake refuses a policy whose body reads a column
+under another policy, so the SP analyst's `SELECT COUNT(*) FROM GOLD.CUSTOMER_CURRENT` failed:
+*"Policy body contains a UDF or Select statement that refers to a column attached to another
+Policy."* Every role reading the 3 Gold objects with the row policy (`customer_current`,
+`dim_customer`, `order_items_at_sale`) fails the same way, the transformer included, so the next dbt
+build would fail too.
+
+**Why nothing caught it.** Two wrong assumptions, both untested before production:
+- *"`public` = not masked = not attached."* The decision entry reasoned about what readers would
+  *see* (role names in clear) and never asked whether the policy was *attached*. S18 found the
+  sibling fact — a mask on a row-policy argument needs `EXEMPT_OTHER_POLICIES` — but that covers the
+  policy's argument column, not a table read inside its body.
+- **No probe.** S18 changed production only after an experiment in scratch; this change went
+  straight to the account because it looked like "one more tag". The file's own last line (the SP
+  analyst count) was the first test, and it ran against production.
+
+Nothing leaked: the failure is closed (an error, not clear text). Damage: Gold reads with the row
+policy refused from the run (2026-10-21) until the revert. No DAG run, no dbt build in between.
+
+**Contain.** `snowflake/repairs/2026-10-21_revert_database_tag.sql` (human, ACCOUNTADMIN): unset the
+tag on the database, GOVERNANCE and RAW — back to S18's verified state (GOLD schema only). Expected:
+analyst 95,696, SP analyst 40,143. The leak's prevention is open again; the scratch schemas are
+covered by the rule only until a working design is proven.
+
+**Prevention.**
+1. **A tag attaches its mask wherever it reaches; its value only changes the output.** Before tagging
+   a container, list every policy body's lookup tables inside it — they must stay out of the tag's
+   reach entirely (a different database, or no inherited tag). Added to constraints.md.
+2. **No production governance change without a scratch probe first**, run as each reader role,
+   including a read *through* the row policy. The SQL file handed to the human ends with the check;
+   the check must have passed in scratch before the file is handed over.
+
+**Contained (2026-10-21, same hour).** Revert run by the human. Verified through `sf.py` (secondary
+roles off): analyst 95,696 rows / 95,696 cities masked; SP analyst 40,143 / 40,143; transformer
+95,696 / 0; tags: database NULL, GOLD `restricted`, RAW NULL — S18's state. The human's own Snowsight
+check showed **95,696** for the SP analyst: `ZUBA11` has secondary roles `ALL`, so ANALYST (`*`) was
+in the session too (constraints.md, S14). The SP check in the handed-over SQL could never have shown
+a row-policy failure of that kind — a third prevention point: **reader checks run through `sf.py`
+as the service user, never in a human's Snowsight session.** Meanwhile the leak's prevention is the
+rule only: the S19 scratch schema gets **no** reader grant; `gold_governed` back to its S18 checks.

@@ -96,3 +96,40 @@ GRANT SELECT ON FUTURE TABLES IN SCHEMA LEDGERLINE.S18 TO ROLE LEDGERLINE_ANALYS
 GRANT SELECT ON FUTURE VIEWS  IN SCHEMA LEDGERLINE.S18 TO ROLE LEDGERLINE_ANALYST;
 
 SHOW GRANTS ON SCHEMA LEDGERLINE.S18;
+
+
+-- Session 19: Streams & Tasks, a Dynamic Table vs a materialized view, Snowpark (a Python UDF and a
+-- stored procedure), and the re-run of s18b_escape under the database-wide mask. Built here as the
+-- transformer. NO reader grant on S19: the database-wide mask (13_database_tag.sql) broke the row
+-- policy and was reverted (incidents.md 2026-10-21), so until a design is proven the leak's
+-- prevention is the rule — a schema that may hold copies of Gold is never readable by a reader role.
+-- S18 is dropped: its 8 copies of Gold were dropped 2026-10-19 (incident "Masked Gold data
+-- escaped"); what is left is the experiment's tags / policies, STATE_ACCESS (2 rows) and the Cortex
+-- probe PROBE_SV. Findings are in progress.md / constraints.md (S18, S18b); S19b builds its own
+-- semantic view on GOLD. Nothing reads S18.
+USE ROLE SYSADMIN;
+CREATE SCHEMA IF NOT EXISTS LEDGERLINE.S19
+  COMMENT = 'Session 19 experiments: streams, tasks, dynamic table vs materialized view, Snowpark, mask escape re-run. Scratch.';
+DROP SCHEMA IF EXISTS LEDGERLINE.S18;
+
+USE ROLE SECURITYADMIN;
+GRANT USAGE ON SCHEMA LEDGERLINE.S19 TO ROLE LEDGERLINE_TRANSFORMER;
+GRANT CREATE TABLE, CREATE VIEW, CREATE STREAM, CREATE TASK, CREATE DYNAMIC TABLE,
+      CREATE MATERIALIZED VIEW, CREATE FUNCTION, CREATE PROCEDURE
+  ON SCHEMA LEDGERLINE.S19 TO ROLE LEDGERLINE_TRANSFORMER;
+
+-- A task runs only if its owner may run tasks: an account-level privilege, so ACCOUNTADMIN grants it.
+-- EXECUTE MANAGED TASK is for serverless tasks (no warehouse); granted so the experiment can show
+-- one, the way Snowpipe is serverless. Revoked at the end of S19 with every task suspended.
+USE ROLE ACCOUNTADMIN;
+GRANT EXECUTE TASK, EXECUTE MANAGED TASK ON ACCOUNT TO ROLE LEDGERLINE_TRANSFORMER;
+
+SHOW GRANTS ON SCHEMA LEDGERLINE.S19;
+SHOW GRANTS TO ROLE LEDGERLINE_TRANSFORMER;
+
+-- End of Session 19: every task in S19 suspended (verified by SHOW TASKS, and the dynamic table
+-- DT_CURRENT suspended); the account-level right to run tasks goes back. Re-granted by the next
+-- session that builds tasks, with this same pair at its end.
+USE ROLE ACCOUNTADMIN;
+REVOKE EXECUTE TASK, EXECUTE MANAGED TASK ON ACCOUNT FROM ROLE LEDGERLINE_TRANSFORMER;
+SHOW GRANTS TO ROLE LEDGERLINE_TRANSFORMER;   -- no row with privilege EXECUTE TASK

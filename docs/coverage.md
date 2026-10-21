@@ -82,8 +82,8 @@ session · **X** skip (no honest use here).
 | Zero-copy clone, CI gating (write-audit-publish) | ★★★ | ✓ S16 (`s16_clone`: table clone 2 s, survives its source's DROP, clone of a past point; schema clone keeps owners and **loses managed access**; table clone owned by the cloner; write-audit-publish by `SWAP` — bad run never published, rollback = swap again). Gating = slim CI below |
 | Time Travel, `UNDROP` | ★★★ | ✓ S18 (`s18_governance` E: `BEFORE(STATEMENT)` returned 95,696 rows after deleting 40,143; masking still applies to the past; `UNDROP` refused while the name is taken, then back with its policy; retention 0 refuses both) |
 | Masking policies, row access policies, tag-based masking | ★★ | ✓ S18 (`09_governance.sql`: a governor role; tag `PII_CLASS` on the GOLD schema masks every text column by default, dbt tags 39 columns public; row policy by mapping table: SP analyst 40,143 of 95,696; survives dbt rebuilds, guard test `gold_governed`; one build incident: an exempt mask is needed under a row policy) |
-| Streams (standard vs append-only), Tasks (DAGs, serverless), Dynamic Tables vs materialized views | ★★★ | B S19 — every Task suspended at the end (cost guard) |
-| Snowpark, UDFs, stored procedures | ★★ | B S19 (small) |
+| Streams (standard vs append-only), Tasks (DAGs, serverless), Dynamic Tables vs materialized views | ★★★ | ✓ S19 — `s19_streams_tasks` 29/29: append-only stream + task MERGE (dedup, `seq` guard, tombstones) rebuilt current stock from 158,446 events = GOLD (34,348, 0 different); a read / rollback does not consume; empty run SKIPPED; replay changed nothing; child task 4 runs; standard stream 20 rows vs append-only 0; a serverless task. `s19_dynamic_mv` 14/14: MV refuses `QUALIFY`, joins, `MAX_BY`; DT INCREMENTAL, stale until refresh (11 s / 52 s at 1-minute lag), = the task's result. Every task and the DT suspended |
+| Snowpark, UDFs, stored procedures | ★★ | ✓ S19 (small) — `s19_snowpark` 7/7: Python UDF = `LPAD` on 96,358 rows (built-in preferred); Snowpark Python procedure `SUSPEND_ALL_TASKS` suspended a started root + child in one CALL |
 | Micro-partitions, pruning, clustering keys | ★★★ | B S21 (TPC-DS sample) |
 | The three caches (result, warehouse, metadata) | ★★★ | B S21 |
 | Query Profile: spilling, exploding joins | ★★★ | B S21 |
@@ -104,6 +104,7 @@ session · **X** skip (no honest use here).
 | Airflow: DAG, backfill, idempotent tasks, sensors, retries | ★★★ | ✓ S17 — built S16; run S17: 7 tasks one by one (`tasks test`), then a backfill of nights 1–8: 56/56 task runs, 0 retries, 58 min, RAW / Gold / snapshots unchanged (656,962 / 99,441 / 112,650). Found: a backfill ignores the DAG's `max_active_runs`, needs `--reprocess-behavior`, waits while paused; the RAW check counted a summary as problems (fixed) |
 | One dbt project, two targets (Snowflake + Databricks) | ★★ | ✓ S14 Snowflake (key-pair service user, transformer role only); Databricks after the trial |
 | CI: lint + tests | ★★ | ✓ S3 |
+| **Self-healing triage agent** (Airflow failure → evidence bundle → LLM triage with read-only tools → approved runbook with bounded retries + action receipts, or a draft PR through slim CI; escalate the rest; verify the data before closing) | ★★ | **B S19c** (added 2026-10-21, decisions.md). Graded by Drill 3: every broken case scored on classification, bounded action, verification |
 
 ## 4. What will be missed — theory only
 
@@ -131,7 +132,7 @@ session · **X** skip (no honest use here).
 | Snowpipe Streaming + Kafka connector (needs Kafka Connect; costs money on Confluent) | ★★ | T ✓ S13 |
 | Fail-safe recovery (only Snowflake support can do it) | ★ | T ✓ S18 |
 | PrivateLink, Tri-Secret Secure (Business Critical edition) | ★ | T ✓ S13 |
-| Hybrid tables | ★ | T S19 |
+| Hybrid tables | ★ | T ✓ S19 (learning.md C11, B102) |
 | **Cortex Analyst on a semantic view over GOLD** (questions in plain words → SQL); Cortex AI functions (`AI_COMPLETE`, `AI_CLASSIFY`) in words | ★★ | **B S19b** — verified S18: Cortex Analyst answers on the trial in AWS Ohio (semantic view `S18.PROBE_SV`, "customers per state", RJ 12,323 = GOLD); **AI functions refused on the trial** ("COMPLETE is not available for trial accounts") — they stay in words. (S17, at the human's request): verify on the trial in AWS Ohio first; graded on the same 10 questions as Genie. Cortex grants stay revoked from `PUBLIC` (S13); TRANSFORMER only, credits read before and after (serverless: monitors do not see it) |
 
 **No honest use in this project.**
@@ -179,8 +180,9 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S14–S16** ✓ (Airflow → S17) | dbt snapshot (**exp_05**, `hard_deletes` decided), incremental, **tests / unit tests / contracts / freshness**, MERGE + anti-join, zero-copy clone CI + **slim CI + Delta clone**, Airflow DAG with backfill | disaster recovery |
 | **S17** ✓ (2026-10-18) | **Airflow run + backfill (from S16)**; **exp_06** late arrival + lookback, **dbt microbatch** — done: backfill 8/8, exp_06 17/17, Gold facts moved to an arrival mark | — |
 | **S18** | GDPR, Snowflake half: masking + **row access + tag-based masking**, Time Travel / `UNDROP`, erasure | replication / failover; Fail-safe |
-| **S19** | Streams & Tasks, Dynamic Tables **vs materialized views**, **Snowpark (small)**; all Tasks suspended | hybrid tables |
+| **S19** ✓ (2026-10-21) | Streams & Tasks, Dynamic Tables **vs materialized views**, **Snowpark (small)**; all Tasks suspended | hybrid tables |
 | **S19b** (added S17; reshaped 2026-10-21) | **AI in data engineering, measured** (decisions.md): an idempotent AI enrichment step on Olist review text (Databricks `ai_classify` / `ai_query` — **verified on Free Edition 2026-10-21**: both answered, Llama 3.3 70B at temperature 0) + a repeatability count + a "where AI falls short" table in our numbers; and, smaller, **the same business questions, two AIs, one answer key:** a semantic view on GOLD + **Cortex Analyst**; a **Genie space** on the same tables (Databricks); each answer graded against trusted SQL (grain traps: `customer_unique_id` vs `customer_id`, units vs orders); both B? — verified first. Before the trial ends | Cortex AI functions; Cortex Agents / Search |
+| **S19c** (added 2026-10-21) | **Self-healing triage agent, measured** (decisions.md): Airflow `on_failure_callback` → evidence bundle; Claude with read-only tools classifies runbook / code change / unknown; runbook = re-run an idempotent task, ≤ 2 tries, an action-receipts table so a restarted agent never repeats a repair; code change = a draft PR through slim CI, human merges; data verified by the existing checks before an incident closes. Spend capped and read. Before Drill 3, which is its test set | autonomous code fixes; agent memory across incidents |
 | S20 (optional) | **Sharing on both platforms, Lakehouse Federation, Iceberg / UniForm** (all B?) | — |
 | **S21** | performance and cost on both: pruning, clustering keys, Query Profile, **the three caches, spilling, multi-cluster, liquid clustering on a large sample, Spark plans, system tables, `ACCOUNT_USAGE`** | search optimization; Spark UI; Photon |
 | **Drill 3** | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) | — |

@@ -4078,3 +4078,97 @@ was reshaped around AI as a pipeline step.
 - **Read `job-watch` in the Actions tab now** (runs due 10-20 and 10-21 at 03:30 UTC).
 - **S19b** inputs: Olist `order_reviews` (an experiment table only); `ai_query` with a named model at
   temperature 0; record model name with every output; grade every number, prose included.
+
+---
+
+## Session 19 — Snowflake keeps a table current by itself: streams, tasks, a Dynamic Table; and a mask fix that broke Gold for an hour
+Date: 2026-10-21
+
+**In plain words:** Snowflake can keep a table up to date without dbt, two ways: a *stream* (a
+bookmark of new rows) applied by a *task* (SQL on a timer), or a *Dynamic Table* (a query Snowflake
+re-runs within a lag you set). Both rebuilt Gold's current stock from the 158,446 raw inventory
+events and matched it exactly. A materialized view could not express it at all. Before that, the fix
+chosen for the masked-data leak (tag the whole database) broke every read of Gold's row-policy
+tables; it was reverted the same hour and the leak is held by a rule until a design is proven.
+
+### Scope, as it actually ran
+Start-of-session reads → leak prevention chosen (A) → database tag run by the human → Gold reads
+refused (incident) → revert, verified → decision corrected → self-healing triage agent added as S19c
+(the human's request) → S19 scratch → streams & tasks → Dynamic Table vs MV → Snowpark → hybrid
+tables in words → task rights revoked → docs. Check skipped by choice.
+
+### Built
+- `snowflake/13_database_tag.sql` (run once, **marked do-not-run**), `snowflake/repairs/2026-10-21_revert_database_tag.sql`.
+- `snowflake/05_scratch_schemas.sql`: S19 block (S18 dropped; transformer CREATE STREAM / TASK /
+  DYNAMIC TABLE / MATERIALIZED VIEW / FUNCTION / PROCEDURE; `EXECUTE TASK` + `EXECUTE MANAGED TASK`
+  granted, then revoked in an end-of-session block). **No reader grant on S19.**
+- `snowflake/experiments/s19_streams_tasks.py`, `s19_dynamic_mv.py`, `s19_snowpark.py`;
+  `s18b_escape.py` gains `--schema` / `--db-tagged` and R6 (city in a VARIANT) — **not run** (no
+  reader may read S19 now).
+- Docs: decisions ×3 (+1 correction: database tag; S19c; streams/DT/Snowpark choices), incidents ×1,
+  constraints +7, coverage (2 rows ✓, hybrid T ✓, S19c row + session line), learning C11 (hybrid
+  tables, B102).
+
+### Verified
+- **Revert of the database tag**, through `sf.py` with secondary roles off: analyst 95,696 rows /
+  95,696 cities masked; SP analyst 40,143 / 40,143; transformer 95,696 / 0; tags database NULL,
+  GOLD `restricted`, RAW NULL (S18's state). Before it, the SP analyst's read of
+  `GOLD.CUSTOMER_CURRENT` was refused ("Policy body contains … a column attached to another Policy").
+- **`s19_streams_tasks`: 29/29.** 158,446 events (all distinct) in 3 batches (52,816 / 52,815 /
+  52,815). Stream 52,816 after a read and after a `ROLLBACK`, 0 after the task's MERGE. Live SKUs
+  per batch = the events' own answer key (13,530 → 23,632 → 34,348); 100 tombstones; **0 rows
+  different from `GOLD.INVENTORY_CURRENT`**; batch 2 by the 1-minute schedule; an empty run SKIPPED;
+  batch 2 redelivered → same hash; child task 4 runs. Standard stream 20 rows (5 updates as pairs,
+  ISUPDATE 10, 10 deletes) vs append-only 0. A serverless task SUCCEEDED. History: APPLY_INV 4
+  SUCCEEDED + 1 SKIPPED, child 4, serverless 1.
+- **`s19_dynamic_mv`: 14/14.** MV refused `QUALIFY`, a join, and (probe) `MAX_BY`; an aggregate MV
+  answered 52,816 at once. DT: `AUTO` → INCREMENTAL; stale right after a batch, current after 11 s
+  and 52 s; 34,348 live; 0 rows different from the task's table; redelivery → same hash; 4
+  INCREMENTAL refreshes, 0 FULL.
+- **`s19_snowpark`: 7/7.** Python UDF = `LPAD` on 96,358 staged customers; Python procedure (Snowpark
+  package, no terms step asked) suspended a started root + child: "suspended 2 of 5".
+- **Left clean:** every S19 task `suspended`, DT `SUSPENDED`, MV dropped; `EXECUTE TASK` revoked
+  (transformer's grants: 0 rows with EXECUTE, read via `sf.py`).
+- `ruff` clean on the experiments.
+
+### Built but NOT verified
+- The leak's structural prevention: open (rule only). `s18b_escape --db-tagged` not run.
+- pytest not run this session (no Python under `tests/` changed).
+
+### Incidents (1 new)
+- 2026-10-21: the database-wide tag attached the mask to the row policy's lookup table; every read
+  of the 3 row-policy Gold objects failed until the revert. Contained the same hour (**open** for
+  the prevention design).
+
+### Decisions (3 new + 1 correction)
+- The mask covers the whole database (A) — **corrected**: failed as written, reverted; B (the rule)
+  until a design keeping `STATE_ACCESS` out of the tag's reach is proven in scratch.
+- S19c: a self-healing triage agent, its own session before Drill 3, graded by Drill 3.
+- Streams & Tasks and a Dynamic Table as the measured comparison; append-only stream, tombstones,
+  DT over MV for current state, built-in over UDF, a procedure as the task cost guard.
+
+### Cost
+Snowsight: **$390 of $400 left**, trial ends in 20 days. Today: a few minutes of XSMALL for the task
+runs and DT refreshes; one serverless task run and the MV's upkeep (both invisible to monitors).
+`07_spend.sql` not run. Databricks $0.
+
+### Learning check
+Skipped by choice (*"skip test"*). No questions parked; B102 (hybrid tables) written, not asked.
+
+### Next
+**Session 19b — AI in data engineering, measured** (decisions.md 2026-10-21): an idempotent
+`ai_query` enrichment step on Olist review text (Databricks), a repeatability count, a "where AI
+falls short" table; smaller, Cortex Analyst vs Genie on one answer key. Before the trial ends.
+
+**Carried, by name:**
+- **Leak prevention, structural** (incident 2026-10-19 + 2026-10-21): probe in a scratch *database*
+  — `STATE_ACCESS` in its own untagged database, the row policy pointed at it, then a database tag —
+  as each reader through `sf.py`; only then production; then `s18b_escape --schema … --db-tagged`.
+- **S19c — self-healing triage agent** (coverage), before Drill 3.
+- **Drop scratch:** `LEDGERLINE.S19` once S19b starts (all suspended; holds the experiments'
+  tables, the UDF and procedure); `workspace.s16` (Databricks, since S16).
+- **Governance under CI:** the next PR's slim CI runs `apply_governance` as CI_RUNNER — read it.
+- Unchanged from S18: Drill 3's list; the S18 Genie Agent kept for S19b; a rebuild after
+  **~2026-10-30** needs a baseline; **~2026-11-05** drop `workspace.s12`; **~2026-10-27** Bronze
+  replaced-files deadline; Git token ~2026-12-25; `ledgerline-ci` secret ~2027-01-04;
+  **Snowflake trial ends ~2026-11-10**.
