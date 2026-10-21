@@ -3974,3 +3974,38 @@ one portable project, two targets); these are what a Snowflake-only team would r
   program** — `SUSPEND_ALL_TASKS(schema)` (roots first, then children), the cost guard every task
   session ends with. Rejected: a Snowpark DataFrame job from the laptop — dbt already owns
   transformations here; it would be a third way to write the same SQL.
+
+## An AI label is stored like an event, not recomputed like a formula: every call goes to an append-only log, and a label table keyed by text hash + model + prompt version is filled by an insert-only MERGE (Session 19b)
+
+**In plain words:** a model can answer the same question differently twice, and next year's model is
+a different function. So the AI step never recomputes a label. It asks the model once per distinct
+text, keeps the reply, and every later run reads the kept reply. Example: "Muito bom" appears on 230
+reviews; it is asked once, under the key `sha256("Muito bom") + llama-3.3-70b + v1`, and a re-run
+asks nothing.
+
+**The shape (`experiments/s19b_ai_enrichment.py`, scratch `workspace.s19b`):**
+- `ai_calls`: every call, append-only, written by ONE query per batch. A DataFrame holding `ai_query`
+  that Spark evaluates twice would call the model twice and could keep two different answers.
+- `review_labels`: one row per `(input_hash, model, prompt_version)`. The MERGE has only
+  `WHEN NOT MATCHED THEN INSERT`: an answer, once kept, is never overwritten.
+- **Transient failure** (an endpoint error, a rate limit; `failOnError => false` returns it as data)
+  is not labelled, so the next run asks again. **A bad answer** (not one of the allowed labels) is
+  labelled `label_ok = false` and kept, because at temperature 0 asking again mostly repeats it; the
+  fix is a new prompt version.
+- A new model or prompt is a **new key**: a deliberate backfill beside the old rows. Readers see one
+  pinned `(model, prompt_version)` through a view.
+- The key is a hash of the **trimmed text as sent**, not `review_id`: 40,950 reviews with text hold
+  35,616 distinct texts, so 5,334 calls (13.0%) are never made.
+
+**Rejected:**
+- **Recompute the label on every run (a view or a plain derived column).** A backfill or a model
+  upgrade would silently rewrite history; the project's thesis is that replay gives the same result.
+- **Key by `review_id`.** It asks the same text many times and pays for it; and `review_id` is not
+  even unique in Olist (98,410 ids for 99,224 records).
+- **`MERGE … WHEN MATCHED THEN UPDATE` (latest answer wins).** That is the recompute design again,
+  one row at a time.
+- **Ask for JSON with `responseFormat`.** Unverified on Free Edition and model-dependent; the label
+  set still has to be checked by us. A plain two-word answer checked by one regex works with any
+  model, and the check's count of bad answers is a number for the "falls short" table.
+- **`ai_classify` as the production call.** It does not say which model answered (constraints,
+  2026-10-21), so its output cannot be keyed by model version. It is measured beside `ai_query` (H).
