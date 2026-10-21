@@ -4172,3 +4172,93 @@ falls short" table; smaller, Cortex Analyst vs Genie on one answer key. Before t
   **~2026-10-30** needs a baseline; **~2026-11-05** drop `workspace.s12`; **~2026-10-27** Bronze
   replaced-files deadline; Git token ~2026-12-25; `ledgerline-ci` secret ~2027-01-04;
   **Snowflake trial ends ~2026-11-10**.
+
+---
+
+## Session 19b — An AI step that replays like every other layer, and two AIs graded against one answer key
+Date: 2026-10-21 → 10-22
+
+**In plain words:** a model labelled Olist review text (sentiment + topic) as one pipeline step, built
+so a re-run gives the same result: each answer is asked once, stored under its text's hash + model +
+prompt version, and never recomputed. Then Genie (Databricks) and Cortex Analyst (Snowflake) got the
+same seven business questions, each with a grain trap, graded against SQL proven on both platforms.
+Both scored 7 of 7 once the meaning of the data was written down. Genie with nothing written scored
+0 of 1. Two bugs in the enrichment's own text cleaning were found by its guards and fixed.
+
+### Scope, as it actually ran
+Start reads → enrichment notebook → CI red (final newline) → run 1 (fingerprint overflow) → run 2
+(blank text labelled: Spark `trim`) → run 3 stopped by the new count assert (`(?U)` = ungreedy) →
+per-review hash diff found it → run 4 green → answer key (Gold, Silver, semantic view) → Genie bare,
+Genie instructed, Cortex → findings. The human asked for a private CI/CD lesson; slotted after S19b.
+
+### Built
+- `experiments/s19b_ai_enrichment.py` (scratch `workspace.s19b`): `ai_calls` append-only log,
+  `review_labels` insert-only MERGE keyed `(input_hash, model, prompt_version)`, pinned view; cases A–H.
+- `snowflake/experiments/s19b_answer_key.sql` (Q1–Q7, every trap reading), `s19b_semantic_view.sql`
+  (`LEDGERLINE.S19B.ORDERS_SV`), `experiments/s19b_answer_key_silver.sql` (+ Genie's instructions text).
+- `05_scratch_schemas.sql`: S19B block (S19 dropped). `pyproject.toml`: notebook ignore.
+- Docs: decisions ×2, incidents ×1 (+2 updates, closed), constraints +13, coverage (Genie ✓, Cortex ✓,
+  S19b line).
+
+### Verified
+- **Enrichment, final run (2026-10-22): every case as predicted.** A: 99,224 records, 40,950 with text,
+  **35,616 distinct** (= pandas; 5,334 calls saved, 13.0%). B: 1,000 calls, 0 errors, 0 bad. C: **0
+  calls**, fingerprint unchanged (an empty MERGE still commits). D: **500 calls**, first 1,000 unchanged.
+  E: t=0 **0 of 200** changed in 5 asks (run 2 of the notebook: 2 of 200); t=1.0 17 of 200, one label
+  outside the list (`payment`, run 2). F: 8B **392 of 1,500 bad (26.1%)**; 77.2% same labels as 70B;
+  70B rows and the pinned view unchanged. G: 70B sentiment = stars on **83.6%** of 1,730 records.
+  H: `ai_classify` 160 of 200 same topic, 86 s. 5,200 calls, 0 errors (10,400 over two full runs).
+- **Answer key on three paths, equal:** GOLD SQL, Silver SQL (human, SQL Editor) and the semantic
+  view's own metrics: Q1 96,096 · Q2 50,864 · Q3 SP 40,143 · Q4 7,386,050.80 · Q5 1.1417 · Q6
+  cama_mesa_banho 10,955 · Q7 5.61% (166,099.72 / 2,962,194.47; 807 repeat people).
+- **Genie:** bare (5 tables, no instructions) Q1 = **99,441** "unique customers" ✗. With 3 sentences:
+  **7 of 7 ✓**, Q7 as a 4-table CTE; prose: "$" twice ✗, one unchecked claim.
+- **Cortex Analyst:** **7 of 7 ✓** (`claude-sonnet-4-6`, 3–8.5 s); Q7's first SQL failed
+  (`ORDERS.CUSTOMER_UNIQUE_ID` not a dimension), retried by itself, right.
+
+### Where AI falls short — in our numbers
+| Shortfall | Measured | What a pipeline does about it |
+|---|---|---|
+| Not repeatable | t=0: 2 of 200 changed in one run, 0 in the next; t=1.0: 8–8.5% | Store each answer once, keyed by input + model + prompt; never recompute |
+| A model change rewrites history | 70B → 8B: 22.8% of labels differ; 26% bad format | A new model is a new key: a deliberate, measured backfill |
+| Answers anything, even nothing | a `"\n"` review labelled "negative, product" (5★) | Guard the input before the call; the answer check cannot catch it |
+| Invents outside the allowed set | `payment` at t=1.0 | Validate every reply against the label set |
+| No answer key for the task | topic: only agreement (80% between two tools) | Measure agreement, say so; keep humans on a sample |
+| Misses meaning not written down | Genie bare: 99,441 vs 96,096 (+3.5%) | Grain in a semantic layer / instructions; grade bare vs instructed |
+| Prose adds unbacked facts | "$" for reais (2 of 7); S18: 96,696 vs 95,696 | Grade every number and unit in the text, not only the table |
+| Fails quietly, then fixes itself | Cortex Q7: first SQL failed, a collapsed warning | Read warnings; declare every grouping key as a dimension |
+| Availability by account | Cortex AI functions refused on the trial; Databricks Free Edition fine | Probe first (B?), keep the step portable |
+| Hidden spend | serverless AI and Cortex not seen by resource monitors | Read metering after; Databricks Free Edition $0 |
+
+### Built but NOT verified
+- Cortex Analyst's credit cost: not read (`07_spend.sql`, ACCOUNT_USAGE lags hours).
+- The open question from S18b: a card on the trial lifting the AI-function block — not tested.
+
+### Incidents (1, closed)
+- 2026-10-21: the AI step labelled a blank review (Spark `trim` keeps `\n`); update 1: the fix's
+  `(?U)` meant ungreedy; update 2: verified, closed.
+
+### Decisions (2)
+- An AI label is stored like an event (append-only log + insert-only MERGE on hash + model + prompt).
+- The Genie / Cortex comparison: 6 (+1) questions with grain traps, equal written knowledge, keys on
+  both platforms.
+
+### Cost
+Snowsight **$390 of $400 left** before the Cortex questions; trial ends in ~19 days. Databricks $0
+(10,400 AI calls). Cortex Analyst: 8 questions, cost not read yet.
+
+### Next
+**CI/CD lesson** (private, its own short slot, before S19c): the hands-on PR is also the carried
+"governance under CI" read.
+
+**Carried, by name:**
+- **Read Cortex Analyst's spend** (`07_spend.sql` as ACCOUNTADMIN) once ACCOUNT_USAGE has caught up.
+- **Drop scratch:** `workspace.s19b` (Databricks) and `LEDGERLINE.S19B` once this session's numbers
+  are no longer needed; `workspace.s16` (since S16).
+- **Leak prevention, structural** (incidents 2026-10-19 + 2026-10-21): probe in a scratch database.
+- **S19c — self-healing triage agent**, before Drill 3.
+- **Governance under CI:** the next PR's slim CI runs `apply_governance` as CI_RUNNER (the CI/CD
+  lesson's PR).
+- Unchanged: Drill 3's list; ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild
+  baseline; ~2026-11-05 drop `workspace.s12`; Git token ~2026-12-25; `ledgerline-ci` secret
+  ~2027-01-04; **Snowflake trial ends ~2026-11-10**.

@@ -2964,3 +2964,52 @@ in the session too (constraints.md, S14). The SP check in the handed-over SQL co
 a row-policy failure of that kind — a third prevention point: **reader checks run through `sf.py`
 as the service user, never in a human's Snowsight session.** Meanwhile the leak's prevention is the
 rule only: the S19 scratch schema gets **no** reader grant; `gold_governed` back to its S18 checks.
+
+## [2026-10-21] — The AI step labelled a review that was only a line break: Spark's `trim` left the `\n` in place, so "nothing" was sent to the model and came back as a 5-star review read as "negative, product" (Session 19b)
+
+**In plain words:** before sending a review to the model, the notebook removed the blank space around
+its text and skipped reviews that ended up empty. But Spark's `trim` removes only space characters,
+not line breaks. A review that was just a line break (`\n`) still counted as text, went to the model,
+and got an answer: `negative, product`, on a review whose customer gave 5 stars. In the run, 18
+records were whitespace-only like this, and 127 distinct texts differed only in a trailing line
+break. Each of those cost one extra model call and got a label of its own.
+
+**Why nothing caught it.** The prediction caught it, but only as numbers: pandas said 40,950 texts and
+35,616 distinct, Spark said 40,968 and 35,743, and the notebook printed both without asserting.
+The model never refuses: asked to label nothing, it labels nothing with full confidence. The regex
+check on the answer passed, because `negative,product` *is* a valid answer. The case came to light
+only while reading G's disagreement list, where `'\n'` appeared twice as "5 stars, negative".
+Found by reading the output, not by a guard.
+
+**Damage:** experiment table only (`workspace.s19b`); no production table reads it. A few extra
+calls ($0 on Free Edition) and a handful of meaningless labels inside G's 1,738 graded records.
+
+**Fix forward:** strip with `regexp_replace(text, '(?U)^\s+|\s+$', '')` (all whitespace, Unicode
+included), and case A now asserts that no text is blank. Proven locally that "strip only spaces"
+reproduces Spark's numbers exactly (40,968 / 35,743).
+
+**Prevention.**
+1. **Before any model call, assert the input is not blank** (after full-whitespace stripping). A model
+   answers anything, so the guard has to sit before the call, not on the answer.
+2. **When a prediction and a count disagree, the notebook stops (assert), it does not print both.**
+   The mismatch was on screen from the first cell.
+3. Constraints row added: Spark `trim` ≠ Python `strip`.
+
+### Update (2026-10-22, same session): the first fix had a bug of its own, caught by its new guard
+
+The fix forward used `regexp_replace(text, '(?U)^\s+|\s+$', '')`, meaning `(?U)` as Java's "Unicode
+whitespace". On Databricks it means **ungreedy** (RE2's meaning): each `\s+` removed as little as it
+could. For `"\r\n\r\nRecomendo. "` only one leading line break went, leaving `"\nRecomendo."`, a "new"
+text beside the 26 plain `"Recomendo."` reviews. The re-run stopped at prevention rule 2's new assert:
+40,950 texts (right) but 35,617 distinct (one too many), before any model call.
+
+**Found by comparison, not guesswork:** Spark's hash for each of the 40,950 reviews (downloaded from the
+SQL Editor) against pandas'. 2,709 texts differ only because Spark's `multiLine` reader turns `\r\n`
+into `\n` (harmless: same distinct count). 5 differ beyond that, all starting with two or more line
+breaks; the one that matters is `"\nRecomendo."`. A lazy regex replayed in Python gives exactly 35,617.
+
+**Fix:** plain `^\s+|\s+$` (gives 35,616 = Python's `strip` on this data). **Prevention:** rule 2 worked;
+no inline regex flags in Spark SQL without a check on real data (constraints row).
+
+**Verified (2026-10-22, third run):** A printed 40,950 texts / 35,616 distinct (= pandas); the blank-text
+and count asserts passed; B–H ran with 0 errors. The incident is closed.

@@ -133,3 +133,21 @@ SHOW GRANTS TO ROLE LEDGERLINE_TRANSFORMER;
 USE ROLE ACCOUNTADMIN;
 REVOKE EXECUTE TASK, EXECUTE MANAGED TASK ON ACCOUNT FROM ROLE LEDGERLINE_TRANSFORMER;
 SHOW GRANTS TO ROLE LEDGERLINE_TRANSFORMER;   -- no row with privilege EXECUTE TASK
+
+-- Session 19b: Cortex Analyst graded against an answer key. A semantic view over GOLD, built here as
+-- the transformer (s19b_semantic_view.sql); the human asks the questions in Snowsight's Cortex
+-- Analyst playground, as in the S18 probe. A semantic view holds no data (it is a definition read at
+-- question time, and GOLD's masks apply to whoever asks), so S19B holds no copy of Gold. Still no
+-- reader grant, by the rule. S19 is dropped, as carried from S19 (every task and the dynamic table
+-- were suspended; findings are in progress.md / constraints.md).
+USE ROLE SYSADMIN;
+CREATE SCHEMA IF NOT EXISTS LEDGERLINE.S19B
+  COMMENT = 'Session 19b: semantic view on GOLD for Cortex Analyst vs Genie. Scratch.';
+DROP SCHEMA IF EXISTS LEDGERLINE.S19;
+
+USE ROLE SECURITYADMIN;
+GRANT USAGE ON SCHEMA LEDGERLINE.S19B TO ROLE LEDGERLINE_TRANSFORMER;
+GRANT CREATE SEMANTIC VIEW ON SCHEMA LEDGERLINE.S19B TO ROLE LEDGERLINE_TRANSFORMER;
+
+SHOW GRANTS ON SCHEMA LEDGERLINE.S19B;   -- USAGE and CREATE SEMANTIC VIEW to LEDGERLINE_TRANSFORMER
+SHOW SCHEMAS LIKE 'S19%' IN DATABASE LEDGERLINE;   -- only S19B

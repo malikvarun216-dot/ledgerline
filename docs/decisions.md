@@ -4009,3 +4009,35 @@ asks nothing.
   model, and the check's count of bad answers is a number for the "falls short" table.
 - **`ai_classify` as the production call.** It does not say which model answered (constraints,
   2026-10-21), so its output cannot be keyed by model version. It is measured beside `ai_query` (H).
+
+## The Genie / Cortex Analyst comparison: six questions with grain traps, both tools given the same written facts, graded against keys computed on both platforms (Session 19b)
+
+**In plain words:** both tools turn a plain-English question into SQL. The test is not whether they
+answer but whether the answer is *right*, so every question hides a trap where the obvious SQL gives
+a plausible wrong number. Example: "How many customers have placed an order?" is **96,096** people;
+counting the per-order `customer_id` gives **99,441**, 3,345 too many.
+
+**The shape:**
+- **6 questions, not the 10 planned in S17** (the S19b reshape kept the Q&A "smaller"): customers vs
+  ids, units vs orders, people per state, revenue without freight, the items-per-order denominator,
+  units per category. Each is a different trap, and a 7th to 10th would mostly repeat one.
+- **Answer key on both platforms:** `snowflake/experiments/s19b_answer_key.sql` on GOLD and
+  `experiments/s19b_answer_key_silver.sql` on Silver, which is what Genie reads. The two must match
+  before any AI answer is graded. A question with two honest readings (all orders, or delivered only)
+  has both computed. An AI answer counts as right only if its SQL states its reading and the number
+  matches that reading.
+- **Equal knowledge:** Cortex Analyst requires a semantic view (`S19B.ORDERS_SV`). Genie gets the same
+  facts as its instructions text. Q1 goes to Genie once *before* the instructions are added, to measure
+  what the written facts are worth.
+- **Every number in the reply is graded, prose included** (S18's Genie summed 27 states to 96,696 in
+  prose, off by exactly 1,000).
+- **Who asks:** the human, in Snowsight's Cortex Analyst playground as ACCOUNTADMIN (as in the S18
+  probe), and in a Genie space. Cortex is not granted to TRANSFORMER: the playground is a UI, so a
+  service role holding Cortex would sit unused. Credits are read with `07_spend.sql` after.
+
+**Rejected:**
+- **Ten questions:** more time for the same six kinds of trap, with the trial calendar binding.
+- **Genie on bare tables only:** it would compare a documented layer with an undocumented one and
+  measure the documentation, not the tool. Measured once (Q1, before instructions) and kept separate.
+- **Gold copied into Databricks for Genie:** a new lane for one comparison. Silver is the same data
+  one join earlier, and the two keys prove it.
