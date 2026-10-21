@@ -2850,7 +2850,7 @@ masking policy can be a row-policy argument only if that masking policy is
 declared object without its row policy; it was skipped this time only because its parents failed,
 and a failed parent stops the build anyway.
 
-## [2026-10-19] — The job watcher did not run on its first scheduled morning, and nothing said so (Session 18) — OPEN
+## [2026-10-19] — The job watcher did not run on its first scheduled morning, and nothing said so (Session 18) — CLOSED 2026-10-21: it ran 5½ h late
 
 **In plain words:** `job-watch` is the GitHub Actions check built yesterday because Free Edition
 skipped scheduled Databricks jobs silently. Its first scheduled run (03:30 UTC, 2026-10-19) did
@@ -2877,6 +2877,16 @@ the laptop's Task Scheduler).
 **Prevention (now).** A watcher is itself scheduled work: its own last run is checked whenever its
 targets are. Carried by name in `progress.md` `### Next` until two scheduled runs are seen.
 
+
+**Correction and close (2026-10-21).** The run was **late, not missing**. The Actions tab on 10-21
+lists `job-watch` #2 "Scheduled" at 2026-10-19 **09:07 UTC** (14:37 IST; due 03:30 UTC: **5 h 37
+min late**) and #3 at 2026-10-20 **08:43 UTC** (14:13 IST; **5 h 13 min late**), both success
+(20 s, 21 s). The 10-19 look at 05:03 UTC came before the delayed run. Nothing was lost: the jobs
+run ~00:30–01:00 UTC and the watcher allows 26 h since a job's last success, so a check at ~09:00
+UTC still flags a missed night the same day. **Decision: no dead man's switch** (rejected for now:
+a second service to run and pay for, against a delay that is consistent and harmless). **Prevention
+kept, refined:** when reading a GitHub-scheduled workflow, expect it **up to ~6 hours late**; "not
+run yet" is only a finding after that. Closed.
 ## [2026-10-19] — Masked Gold data escaped the mask: the experiment's copy in scratch schema S18 is readable in clear text by the analyst (Session 18, found S18b) — OPEN
 
 **In plain words:** Gold hides customers' city and zip from analysts. Yesterday's experiment made
