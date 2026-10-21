@@ -2876,3 +2876,34 @@ the laptop's Task Scheduler).
 
 **Prevention (now).** A watcher is itself scheduled work: its own last run is checked whenever its
 targets are. Carried by name in `progress.md` `### Next` until two scheduled runs are seen.
+
+## [2026-10-19] — Masked Gold data escaped the mask: the experiment's copy in scratch schema S18 is readable in clear text by the analyst (Session 18, found S18b) — OPEN
+
+**In plain words:** Gold hides customers' city and zip from analysts. Yesterday's experiment made
+copies of Gold in the scratch schema `LEDGERLINE.S18`, signed in as the transformer (which sees
+clear text), so the copies hold the real values. The analyst was granted read access to every new
+table in S18 (to test policies from the reader's side). Result: the analyst reads **95,696 clear
+cities** in `S18.CUST_SRC` (checked 2026-10-19 as `LEDGERLINE_ANALYST`: 0 masked, `max(city)` =
+`zortea`) while Gold shows `***`. Scratch, but the same data: an escape of masked data.
+
+**Why nothing caught it.** The mask is bound to a tag set on the **GOLD schema only**, so it
+protects Gold and nothing copied out of it. `gold_governed` checks Gold's objects only. A copy made
+by a role that sees clear text is clear text, wherever it lands. The experiment's design (a reader
+grant on a scratch schema holding copies) was reviewed for what it tested, not for what it exposed.
+
+**Contain (pending the human's OK).** Drop the S18 tables that hold copies of Gold (`CUST_SRC`,
+`CUST`, `CUST_R`, `CUST_P`, `TT`, `TT_NEW`, `EX1`, `EX2`; reversible for a day by `UNDROP`), or drop
+S18 as the next session's housekeeping does.
+
+**Prevention (proposed, not yet decided).** Put the `restricted` tag on the **`LEDGERLINE`
+database** instead of the GOLD schema, so every schema, scratch included, is hidden by default for
+readers and only dbt's `public` columns open; and never grant a reader role on a scratch schema
+that holds copies of governed data. Either way, the rule: **a mask protects a place, not the data;
+any copy made by a role that sees clear text must land where the same mask applies.**
+
+**Contained (2026-10-19, same day).** The 8 S18 objects holding copies of Gold (`CUST_SRC`, `CUST`,
+`CUST_R`, `CUST_R_V`, `EX1`, `EX2`, `TT`, `TT_NEW`; 95,696 rows each, `TT` 55,553) dropped as the
+transformer. As the analyst after: `S18.CUST_SRC` → "does not exist or not authorized"; the only
+customer-named column left in S18 is `STATE_ACCESS.customer_state` (2 rows: role → state code, no
+person). Undroppable for 1 day (retention). The prevention is decided after experiment S18b-1
+(how masked data escapes), which recreates such copies on purpose and measures each route.

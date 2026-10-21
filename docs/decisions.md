@@ -3823,3 +3823,36 @@ delete still holds the row until the clone is dropped (S16).
   would still sit in RAW and in the history: that is access control called erasure.
 - **No guard, rely on `raw_fields_declared`.** It fails on an undeclared field, but a person adding
   `email` to `silver_tables()` would declare it and pass: the list is where contact data would enter.
+
+## S19b becomes "AI in data engineering, measured": the graded Q&A stays, smaller; an idempotent AI enrichment step and a repeatability count are added; the session ends with a table of where AI falls short, in our own numbers (2026-10-21, after Session 18)
+
+**In plain words:** S19b was planned as "ask Cortex Analyst and Genie the same 10 questions and
+grade them". At the human's request ("asking questions is only the analyst's side — how does it
+help a DE pipeline, and where is it actually lacking?"), it now also treats AI as **one step of a
+pipeline**: free text in, a structured column out. That step is built the way every other layer
+here is built: a re-run must give the same result. So each AI output is stored once, keyed by a
+hash of its input plus the model's name and version; a re-run never calls the model again, and a
+model change is a deliberate, versioned backfill. The same prompt is then sent several times on
+purpose, and the number of rows whose answer changes is counted.
+
+**Where the text comes from:** Olist's `order_reviews` (free-text comments, in Portuguese). It is
+not one of the three sources; it enters as an **experiment table only**, because it is the honest
+place for text classification and our sources have none (S17 rejected forcing AI functions onto
+them).
+
+**Gate:** AI functions are refused on the Snowflake trial (constraints, S18). The enrichment step is
+built on **Databricks** if its SQL AI functions (`ai_classify`, `ai_query`) work on Free Edition: a
+**B?**, probed first. If refused, the step is taught in words with the measured refusals.
+
+**The deliverable** is a written "where it falls short" table: invented numbers (Genie's 96,696,
+measured), repeatability (to measure), hidden serverless cost (measured), availability by account
+(measured), dependence on metadata (the grain trap, to measure), model drift (theory).
+
+**Rejected:**
+- **Keep S19b as Q&A grading only.** It shows the analyst's side and none of the DE side; the
+  part an interview probes ("how would you put an LLM in a pipeline safely?") stays unanswered.
+- **Recompute AI columns on every run, like any other derived column.** Not repeatable: the same
+  input can give a different output, so a backfill would silently rewrite history. That breaks the
+  project's thesis (replay gives the same result).
+- **Bring `order_reviews` in as a fourth production source.** A full lane (generator, Bronze,
+  Silver, bridge) for one experiment; the experiment needs a table, not a lane.

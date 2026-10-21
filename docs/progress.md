@@ -4029,3 +4029,52 @@ UDFs (small), Hybrid tables in words** (coverage). Every Task suspended at the e
   conftest or Kafka work; a rebuild after **~2026-10-30** needs a baseline; **~2026-11-05** drop
   `workspace.s12`; **~2026-10-27** Bronze replaced-files deadline; **~2027-01-04** `ledgerline-ci`
   secret; Git token ~2026-12-25; **Snowflake trial ends ~2026-11-10**.
+
+---
+
+## Session 18b — How masked data escapes, and AI on both platforms probed hands-on
+Date: 2026-10-19 → 10-21 (after S18; the human drove the console probes)
+
+**In plain words:** a question about interview-worthy experiments turned up a real leak: the
+analyst could read every customer's real city in the S18 scratch copies of Gold. It was contained
+the same day, then turned into an experiment: plain copies leak, clones and views keep the mask.
+Then AI on both platforms was probed by hand. Databricks runs AI functions on Free Edition;
+Snowflake's trial refuses them; Snowflake's PII classifier runs but missed the city column. S19b
+was reshaped around AI as a pipeline step.
+
+### Verified
+- **Leak:** as `LEDGERLINE_ANALYST`, `S18.CUST_SRC` returned 95,696 rows, 0 masked
+  (`max(city)` = `zortea`). **Contained:** 8 copies dropped; after, "does not exist or not
+  authorized" (incident 2026-10-19, open until prevention is chosen).
+- **`s18b_escape`: 9 of 9 as predicted.** As the analyst: a CTAS by the transformer → 0 of 95,696
+  masked; a CLONE → 95,696 masked (city tag `restricted`, state `public`, 1 row policy carried); a
+  CTAS from the clone → 0 masked; a view → 95,696 masked; the analyst's own CTAS → refused. No
+  copies left after.
+- **Databricks AI functions (human, SQL Editor):** `ai_classify` → `delivery` (~7 s);
+  `ai_query('databricks-meta-llama-3-3-70b-instruct', …, temperature 0)` → `delivery` (~1 s). The
+  Serving page lists no endpoints (models moved to Unity Gateway: 13 under `system.ai`; "Total
+  tokens (7d)" 0 for all right after a call).
+- **Snowflake (human, Snowsight):** `AI_CLASSIFY` refused ("not available for trial accounts").
+  `CALL SYSTEM$CLASSIFY` on `GOLD.CUSTOMER_CURRENT` ran (15 s): **no recommendation for city or
+  state**; zip → `POSTAL_CODE` / `QUASI_IDENTIFIER`, confidence LOW, coverage 0.4262, detail
+  `US_POSTAL_CODE`.
+
+### Decisions
+- S19b becomes "AI in data engineering, measured" (decisions.md, 2026-10-21): an idempotent
+  enrichment step on Olist review text (Databricks), a repeatability count, a "where AI falls
+  short" table; the graded Q&A kept, smaller. The human asked about a paid Snowflake account for
+  Cortex AI functions: not taken (advice recorded here). Databricks covers the enrichment for $0,
+  and resource monitors do not see serverless AI spend.
+
+### Not verified
+- Whether adding a card lifts the trial's AI-function block and keeps the free credits.
+- `job-watch`'s scheduled runs on 10-20 and 10-21 (not looked at yet).
+
+### Next (adds to Session 18's list, by name)
+- **Choose the leak prevention** (incident 2026-10-19 "Masked Gold data escaped"): **A**, tag the
+  `LEDGERLINE` database `restricted` (and `GOVERNANCE` `public`, or the row policy's mapping is
+  masked and readers see 0 rows), then re-run `s18b_escape` R1 expecting masked; or **B**, the rule
+  only (no reader grants on scratch schemas holding copies).
+- **Read `job-watch` in the Actions tab now** (runs due 10-20 and 10-21 at 03:30 UTC).
+- **S19b** inputs: Olist `order_reviews` (an experiment table only); `ai_query` with a named model at
+  temperature 0; record model name with every output; grade every number, prose included.
