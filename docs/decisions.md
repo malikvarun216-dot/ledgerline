@@ -4112,3 +4112,57 @@ above ("Rejected: after Drill 3"), so the reason is written here.
 - Where the key goes, decided while building: `ANTHROPIC_API_KEY` in **`.env.triage`**, read only by
   `scripts/triage_agent.py`. Rejected: `.env`, because docker-compose loads all of `.env` into every
   Airflow container, and no task needs the agent's key.
+
+## Session 20 (optional) is skipped: its four B? rows become theory, none probed (2026-10-22, the human's call)
+
+**In plain words:** the optional session on reading data across platforms without copying it
+(sharing, federation, UniForm, Iceberg) is not run. The time goes to Session 21 and Drill 3 while the
+Snowflake trial lasts. The four topics are taught as theory instead.
+
+- Chosen: **skip S20; its rows in `coverage.md` become `T ✓ S20`, marked "skipped by choice, never
+  probed"** — not "refused", because no platform said no. The pipeline loses nothing: each topic is a
+  no-copy alternative to the bridge (S13), and the bridge stays the honest choice for Gold, which is
+  built from changes (inserts, updates, deletes by version), not from a table's current state.
+- Rejected: **run a short probe of each B? first** (coverage.md rule 2's normal path). It would turn
+  "unknown" into a recorded fact, but costs most of a session; Delta Sharing and Snowflake sharing
+  each need a second account or recipient to show anything, and UniForm read by Snowflake was already
+  the least likely to work on Free Edition (Databricks-managed storage).
+- Rejected: **move S20 after the trial.** Snowflake's half needs the trial; only the Databricks half
+  would survive, and that is theory-weight (★★) work competing with the S19c resume.
+- Trade-off, accepted: an interview answer on these four is from reading, not from having done it,
+  and nothing about Free Edition's support for them goes into `constraints.md`.
+
+## S21 measures performance on TPC-H sample data, in our own copies, on a warehouse of its own; Snowflake half first (2026-10-22)
+
+**In plain words:** speed and cost are measured on Snowflake's and Databricks' built-in TPC-H sample
+tables (60 million and 30 million order lines), not on our Olist data, because Olist's biggest table
+is far too small to show pruning: the whole thing fits in a handful of files. We copy the sample into
+our scratch schema twice — once shuffled, once sorted by ship date — so the same query can be timed
+on a badly and a well laid-out table. The heavy queries run on a separate small warehouse with its
+own spending cap, so they cannot trip the project warehouse's daily limit.
+
+- Chosen: **two CTAS copies of `TPCH_SF10.LINEITEM` (random order vs sorted by `L_SHIPDATE`)**, then
+  `CLUSTER BY (L_SHIPDATE)` on the random copy with automatic clustering left on for a while and
+  measured (its spend is serverless: read in `AUTOMATIC_CLUSTERING_HISTORY`, not the monitors).
+  Rejected: **query the shared sample directly only** — it shows pruning but on a layout we did not
+  make and cannot change, so there is no before/after. Rejected: **Olist / Gold** — `FCT_ORDERS` is
+  checked once to show *why* it cannot teach pruning (too few micro-partitions), then left.
+- Chosen: **evidence from `GET_QUERY_OPERATOR_STATS`** (partitions scanned / total, bytes spilled,
+  rows in / out per join, percent scanned from cache) — the Query Profile as data, readable by the
+  script and pasted into progress.md. Rejected: **screenshots of the Query Profile** — the human
+  opens it to see the shape; the numbers come from the function.
+- Chosen: **warehouse `LEDGERLINE_S21_WH`** (XSMALL, multi-cluster 1–3, STANDARD scaling, 60 s
+  auto-suspend, 15 min statement cap, its own monitor `LEDGERLINE_S21_RM` = 6 credits, suspend at
+  100 %); the transformer gets USAGE, OPERATE, MODIFY, MONITOR on it only, so the experiment can
+  resize it (scale up vs out). Dropped at the end of S21. Rejected: **run on `LEDGERLINE_WH`** — its
+  daily monitor is 4 credits, and a spill test plus the concurrency test could stop the nightly work.
+- Chosen: **`ACCOUNT_USAGE` / `ACCESS_HISTORY` read by the human as ACCOUNTADMIN** from a file, like
+  `07_spend.sql`. Rejected: grant a `SNOWFLAKE` database role to the transformer — account-wide
+  history (every user's queries) is not something the pipeline role needs.
+- Order: **Snowflake half first** (the trial ends ~2026-11-10), Databricks half (liquid clustering
+  on `samples.tpch.lineitem`, plans, system tables as the human) after it.
+- Addendum, same day: `coverage.md` had planned the **TPC-DS** sample. Chosen instead: **TPC-H
+  `LINEITEM` at SF10** — one wide table of 59,986,052 rows with a natural filter column (ship date)
+  shows pruning, spilling and a sort in seconds on XSMALL. Rejected: **TPC-DS (`TPCDS_SF10TCL`)** —
+  10 TB and a star schema of 24 tables, so every lesson here would cost minutes per query and
+  credits, for the same mechanics.

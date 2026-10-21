@@ -4321,3 +4321,60 @@ would test behaviour not yet seen (deferred bank in `learning.md`, bound to S19c
   ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild baseline; ~2026-11-05 drop
   `workspace.s12`; Git token ~2026-12-25; `ledgerline-ci` secret ~2027-01-04; **Snowflake trial ends
   ~2026-11-10**.
+
+---
+
+## Session 20 — Skipped (optional session; the human's call)
+Date: 2026-10-22
+
+**In plain words:** the optional session on no-copy reads across platforms was not run. Its four B?
+rows (Delta Sharing / Lakehouse Federation, UniForm read by Snowflake, Snowflake data sharing,
+Iceberg tables on S3) became theory: `coverage.md` `T ✓ S20 — skipped by choice`, decisions.md
+"Session 20 (optional) is skipped".
+
+### Verified
+- Nothing. None of the four was probed, so `constraints.md` gets no row for them.
+
+### Next
+**S21 — performance and cost on both platforms**, then Drill 3. Everything Session 19c's `### Next`
+carried, unchanged.
+
+---
+
+## Session 21 — Speed and cost, measured: layout decides pruning, size cures spills, clusters cure queues (Snowflake half)
+Date: 2026-10-22
+
+**In plain words:** on two copies of the same 60 million TPC-H order lines, one shuffled and one sorted
+by ship date, asking for one day read 48 of 48 storage blocks on the shuffled copy and 1 of 50 on the
+sorted one. A full sort spilled 3.78 GB to disk on the smallest warehouse and nothing on the next size
+up, in half the time. Twelve queries at once waited 143 s in a queue on one cluster and 0.4 s when a
+second cluster was allowed to start. Every number comes from the Query Profile read as rows
+(`GET_QUERY_OPERATOR_STATS`). Databricks half not run yet.
+
+### Built
+- `snowflake/05_scratch_schemas.sql` — S21 block (run by the human): schema `LEDGERLINE.S21`, warehouse
+  `LEDGERLINE_S21_WH` (XSMALL, 1–3 clusters, monitor `LEDGERLINE_S21_RM` 6 credits/day); `S19B` dropped.
+- `snowflake/experiments/s21_performance.py` — parts copies / A / A2 / B / C / D / gold.
+- `snowflake/14_s21_usage.sql` — ACCOUNT_USAGE / ACCESS_HISTORY reads for the human (not run yet).
+- `experiments/s21_spark_performance.py` — the Databricks half (not run yet).
+- Decision: "S21 measures performance on TPC-H sample data …".
+
+### Verified
+- **Run 1, 18/21 as predicted**; the three misses, each checked:
+  - A6 (depth ≥ 50): a wrong guess — the copy has 48 partitions; depth 48.0 = the worst possible.
+  - B4 (warm cache > 90 %): a script bug — `percentage_scanned_from_cache` is a fraction; it read 1.0.
+  - C3 (join output): **a finding** — `COUNT(*)` over the join is aggregated below it (19,904 rows out
+    of the `Join`), while keeping the rows emits 3,144,254 from 5,016. Same answer.
+- **Run 2 (parts B, C, corrected script): 8/8.**
+- Numbers: pruning 1/50 sorted vs 48/48 shuffled vs 116/116 sample, same sum 959,433,229.17; depth 2.0
+  vs 48.0; metadata answers with the warehouse SUSPENDED; result reuse = one `QUERY RESULT REUSE`
+  operator; disk cache 0 → 100 → 0 % across a suspend; sort spill 3.78 GB / 28.5 s (XSMALL) vs 0 B /
+  14.7 s (SMALL); 12 queries: max 1 → 143.1 s queued, wall 59.4 s; max 3 → 2 clusters, 0.4 s, 43.2 s;
+  `FCT_ORDERS` = 1 micro-partition. 8 new rows in `constraints.md`.
+- Warehouse left SUSPENDED, XSMALL, max 3.
+
+### Built but NOT verified
+- **A2**: automatic clustering on `S21.LINEITEM_RANDOM` declared (`automatic_clustering ON`); depth
+  still 48.0 seven minutes later. Its effect and credits are read by `s21_performance.py A2`, which
+  then suspends it — **it spends serverless credits until then**.
+- `14_s21_usage.sql` (needs ACCOUNT_USAGE to catch up, ~3 h); the Databricks notebook.
