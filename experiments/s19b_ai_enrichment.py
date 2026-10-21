@@ -184,7 +184,9 @@ raw = (
     raw.select(
         "review_id", "order_id",
         F.col("review_score").cast("int").alias("review_score"),
-        F.trim("review_comment_message").alias("text"),
+        # Not F.trim: Spark's trim removes only spaces, so a review that is just "\n" survived as text
+        # and the model labelled it (first run: 40,968 texts, two "\n" reviews read as 5-star negative).
+        F.regexp_replace("review_comment_message", r"(?U)^\s+|\s+$", "").alias("text"),
     )
     .withColumn("input_hash", F.when(F.col("text") != "", F.sha2("text", 256)))
     .write.saveAsTable(REVIEWS)
@@ -211,6 +213,9 @@ print(f"A: {records:,} records, {with_text:,} with text, {distinct:,} distinct t
       f"-> {saved:,} calls saved by keying on the text ({saved / with_text:.1%})")
 print("   predicted 99,224 / 40,950 / 35,616 (pandas, locally)")
 assert records == 99_224, "the CSV must parse to one row per record (multiLine + escape)"
+assert (with_text, distinct) == (40_950, 35_616), "the counts differ from pandas: find out why first"
+blank = spark.table(TEXTS).where(r"text RLIKE '^\\s*$'").count()
+assert blank == 0, f"{blank} texts are only whitespace: the model would be asked to label nothing"
 
 # COMMAND ----------
 
