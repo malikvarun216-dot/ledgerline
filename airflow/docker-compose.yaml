@@ -42,10 +42,14 @@ x-airflow-common: &airflow-common
     DBT_TARGET_PATH: /tmp/dbt/target
     DBT_LOG_PATH: /tmp/dbt/logs
     PYTHONDONTWRITEBYTECODE: "1"
+    TRIAGE_INBOX: /opt/triage/inbox
   volumes:
     - ./dags:/opt/airflow/dags:ro
     - ..:/opt/ledgerline:ro
     - ${USERPROFILE:-~}/.snowflake:/opt/keys:ro
+    # Session 19c: the ONE writable mount. Failed tasks drop evidence files here for the triage
+    # agent (airflow/dags/failure_evidence.py); data/ is gitignored.
+    - ../data/triage:/opt/triage
   depends_on: &airflow-depends-on
     postgres:
       condition: service_healthy

@@ -4259,3 +4259,65 @@ Snowsight **$390 of $400 left** before the Cortex questions; trial ends in ~19 d
 - Unchanged: Drill 3's list; ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild
   baseline; ~2026-11-05 drop `workspace.s12`; Git token ~2026-12-25; `ledgerline-ci` secret
   ~2027-01-04; **Snowflake trial ends ~2026-11-10**.
+
+---
+
+## Session 19c — The self-healing triage agent: built and unit-tested, then parked before its live run
+Date: 2026-10-22
+
+**In plain words:** when a nightly Airflow task fails for good, a hook now writes one evidence file.
+A separate agent program reads it and asks Claude, which can only read, what kind of failure it is.
+A short rule file written in code, not Claude, then decides what the agent may do: re-run a task that
+is safe to repeat (at most twice), write a patch for a human to open as a PR, or hand the case to the
+human. An incident closes only after the data checks pass. All of this is built and tested with fakes.
+It has **not** answered a real failure yet. The human parked the session here, to resume after
+Drill 3 (decisions.md, S19c parked).
+
+### Built
+- `airflow/dags/failure_evidence.py` + `on_failure_callback` in `ledgerline_nightly`. Writes
+  `<dag>__<run>__<task>__try<n>.json` (log tail, exception, git sha) with exclusive create. Standard
+  library only, and it never raises.
+- `airflow/docker-compose.yaml`: one writable mount, `../data/triage:/opt/triage`, plus `TRIAGE_INBOX`.
+- `triage/` — `store.py` (SQLite: incidents, receipts with an enforced primary key, ai_calls),
+  `policy.py` (5 re-runnable tasks; `check_raw` and `dbt_build` never re-run; ≤ 2 re-runs; only
+  `high` confidence acts alone), `tools.py` (7 read-only tools; Snowflake as `LEDGERLINE_CI_RUNNER`
+  plus a one-read guard), `airflow_api.py` (token, clear task with downstream, run state), `agent.py`
+  (`claude-opus-5-5`, adaptive thinking, effort medium, ≤ 8 turns, strict `submit_triage`, fallbacks
+  on, every call's tokens and dollars logged, $5/day cap).
+- `scripts/triage_agent.py` (`--status`); `tests/test_triage.py`;
+  `ANTHROPIC_API_KEY` added to the credentials the test fixture strips.
+- Decisions ×2 (the agent's shape; parked).
+
+### Verified
+- `ruff check .` clean; **`pytest` green, 202 passed** (27 new): each failed try is written once; a
+  hook given no context prints and does not raise; a receipt claimed twice (two `Store` objects, one
+  file) is refused; the policy table holds (9 cases, including a "high-confidence re-run" of
+  `dbt_build` → escalate, a third re-run → escalate, a class the model invented → escalate); every
+  DAG task is on the policy's lists; a crash between claim and finish never re-fires the re-run; a
+  failed verification escalates; a code change becomes a `.patch` proposal.
+- `python scripts/triage_agent.py --status` on an empty store: 0 / 0 / 0.
+
+### Built but NOT verified
+- **Nothing has run live**: not the hook in the Airflow container, not the Airflow 3 REST calls
+  (`/auth/token`, `clearTaskInstances` body), not a Claude call, not the CI_RUNNER reads from the agent.
+  Each of these is one guess until it runs.
+- Spend: $0. No API call was made.
+
+### Learning check
+**Deferred, not skipped**: the session stopped before its live half, and four of the five questions
+would test behaviour not yet seen (deferred bank in `learning.md`, bound to S19c-resume).
+
+### Next
+**S20 (optional) / S21 / Drill 3**, as `coverage.md` orders them, inside the trial.
+
+**Carried, by name:**
+- **S19c resume, after Drill 3:** `.env.triage` with the key and a Console spend limit; `up -d`;
+  the live run (night 8 re-run, `silver` cancelled twice → re-run → verify → close); then replay
+  Drill 3's evidence files and score each one on class, action within policy, and verification run.
+- **Before Drill 3 uses Airflow:** `docker compose -f airflow/docker-compose.yaml up -d` once, so
+  the hook's mount exists and the breaks are kept as evidence.
+- Everything S19b's `### Next` carried, unchanged: Cortex Analyst's spend; drop scratch `workspace.s19b`
+  / `LEDGERLINE.S19B` / `workspace.s16`; leak prevention in a scratch database; governance under CI;
+  ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild baseline; ~2026-11-05 drop
+  `workspace.s12`; Git token ~2026-12-25; `ledgerline-ci` secret ~2027-01-04; **Snowflake trial ends
+  ~2026-11-10**.

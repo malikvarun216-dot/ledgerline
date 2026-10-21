@@ -33,6 +33,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.sensors.bash import BashSensor
 from airflow.sdk import DAG
 from airflow.timetables.events import EventsTimetable
+from failure_evidence import record_failure  # the DAG folder is on Airflow's import path
 
 FIRST_NIGHT = pendulum.datetime(2016, 9, 4, tz="UTC")
 LANDED = 8  # nights 1..8 (Session 15); a new night is one more date here and one more landing
@@ -51,6 +52,8 @@ with DAG(
         "depends_on_past": True,
         "retries": 1,
         "retry_delay": timedelta(minutes=2),
+        # Session 19c: a task that failed for good leaves one evidence file for the triage agent.
+        "on_failure_callback": record_failure,
     },
     tags=["ledgerline"],
 ) as dag:

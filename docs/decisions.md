@@ -4041,3 +4041,74 @@ counting the per-order `customer_id` gives **99,441**, 3,345 too many.
   measure the documentation, not the tool. Measured once (Q1, before instructions) and kept separate.
 - **Gold copied into Databricks for Genie:** a new lane for one comparison. Silver is the same data
   one join earlier, and the two keys prove it.
+
+## The triage agent's shape: Airflow only writes the evidence; the agent runs apart from Airflow, keeps its receipts in SQLite with an enforced primary key, and Claude only proposes — written policy code decides what is allowed (Session 19c)
+
+**In plain words:** when a task fails, Airflow's failure hook writes one JSON file of evidence and
+does nothing else. A separate program, the agent, picks the file up, asks Claude what kind of failure
+it is (Claude can only *read*: the log, git, the repo's incidents, Snowflake through a read-only
+role), and then a short piece of ordinary Python — not Claude — decides whether the proposed action is
+allowed. Before re-running anything the agent writes a receipt; a second copy of the agent, or the
+same one restarted, cannot write the same receipt again, so it cannot repeat the repair.
+
+- **Detect = a file, not a call.** `on_failure_callback` writes `<dag_run>__<task>__try<n>.json`
+  with exclusive create into `data/triage/inbox/` (a writable mount; the repo stays read-only in the
+  container). Exclusive create *is* the dedup: the same failed try written twice is refused by the
+  filesystem. The hook never raises: a broken hook must not hide the task's own failure.
+  - Rejected: **call Claude inside the callback.** The callback runs in the task's process; a slow or
+    failing API call would delay or hide the failure it is reporting, and the API key would have to
+    sit in every task's environment.
+- **Receipts in SQLite** (`data/triage/triage.db`), `PRIMARY KEY (dag_run_id, task_id, action, attempt)`.
+  Claim = `INSERT`; a duplicate key raises, so "write before acting" is atomic. A receipt left
+  `started` (agent died mid-action) is never re-fired: the agent reads Airflow's state instead.
+  - Rejected: **a Snowflake table.** Snowflake does not enforce primary or unique keys — two agents
+    could both "claim" the same repair. The guarantee would rest on a constraint that is only a label.
+  - Rejected: **Airflow's own Postgres.** It enforces keys, but its database belongs to Airflow
+    (migrations, upgrades); a second database there would also need the port opened to the laptop.
+    Production would use Postgres or a conditional write (DynamoDB); SQLite gives the same enforced key
+    on one machine.
+- **Claude classifies, policy decides.** Claude returns `runbook:rerun_task` / `code_change` /
+  `unknown` with evidence and confidence through a strict `submit_triage` tool. `triage/policy.py`
+  allows a re-run only for tasks marked safe to repeat AND whose DAG setting does not say "a failure
+  here is a finding" (`check_raw`, `dbt_build` have `retries=0` for exactly that reason), at most 2
+  per task per night. Everything else escalates.
+  - Rejected: **let Claude's class be the permission.** A model that misreads a failing dbt test as
+    "flaky" would re-run it; a rule in code cannot be talked out of its list.
+- **`code_change` writes a proposal (patch + PR text) to the incident; the human opens the draft PR.**
+  The agent holds no push credential. Rejected: **a GitHub token for the agent** — a token that can
+  open PRs can push branches; today's need is a reviewed diff, not a bot account.
+- **Model: `claude-opus-5-5`** (the current default; $4 / $20 per million tokens), adaptive thinking,
+  effort `medium`, ≤ 8 tool turns per failure, every call's tokens and cost logged in `ai_calls`.
+  At ~30k tokens per triage that is ~$0.15 per failure. Rejected: **Haiku 5.5 to save cents** —
+  the job is judgement on evidence, and the spend is already a few dollars total.
+- **Snowflake reads as `LEDGERLINE_CI_RUNNER`** (SELECT on RAW / STAGING / SNAPSHOTS / GOLD, cannot
+  write `LEDGERLINE`), plus a statement guard (one SELECT / SHOW / DESCRIBE) as a second wall. The
+  role is the real guarantee; the guard only stops wasted calls.
+
+## S19c is parked after the build, before its live run: the agent is finished and unit-tested, its live run and grading move to after Drill 3 (2026-10-22, the human's call)
+
+**In plain words:** the triage agent's code is done and tested, but it has never answered a real
+failure. Instead of running it now, the project moves on to the remaining Snowflake work and Drill 3
+while the trial lasts, and comes back to the agent at the end. This reverses one line of the entry
+above ("Rejected: after Drill 3"), so the reason is written here.
+
+- Chosen: **park now, resume after Drill 3.** The Snowflake trial ends ~2026-11-10; every remaining
+  Snowflake row is bound to it, and the agent's live run is not. The agent itself needs no Snowflake to
+  run; only one of its seven tools (`snowflake_select` / `raw_field_diff`) does.
+- **What makes the late order cheaper than it looked on 2026-10-21:** the failure hook is already in
+  the DAG. If Drill 3's breaks run through Airflow, each failure leaves its evidence file in
+  `data/triage/inbox/`, and the agent is not running to act on it. The files are Drill 3's breaks kept
+  as a test set, so the "breaks must be redone" cost from the rejected alternative mostly goes away.
+  Condition: Airflow restarted once with the new compose file (`up -d`) before Drill 3, so the
+  writable mount exists. Without it, the hook prints "evidence NOT written" and the task's own
+  failure is unchanged.
+- Cost of the order, accepted: replayed after the trial, the agent's Snowflake reads fail. It must
+  then triage from logs, git and the repo alone, and the grading says so per case.
+- Rejected: **finish the live run now.** It needs an API key, Airflow up, and a deliberately failed
+  night, which is about a session of time taken out of the trial's last 19 days for work that does
+  not need the trial.
+- Rejected: **drop the hook from the DAG until then.** It costs nothing when it fires and it collects
+  the test set. Removing it would lose Drill 3's evidence.
+- Where the key goes, decided while building: `ANTHROPIC_API_KEY` in **`.env.triage`**, read only by
+  `scripts/triage_agent.py`. Rejected: `.env`, because docker-compose loads all of `.env` into every
+  Airflow container, and no task needs the agent's key.
