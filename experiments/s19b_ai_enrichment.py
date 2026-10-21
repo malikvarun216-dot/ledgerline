@@ -186,7 +186,9 @@ raw = (
         F.col("review_score").cast("int").alias("review_score"),
         # Not F.trim: Spark's trim removes only spaces, so a review that is just "\n" survived as text
         # and the model labelled it (first run: 40,968 texts, two "\n" reviews read as 5-star negative).
-        F.regexp_replace("review_comment_message", r"(?U)^\s+|\s+$", "").alias("text"),
+        # No "(?U)" flag: on Databricks it meant UNGREEDY, not Unicode, so "\r\n\r\nRecomendo. " kept a
+        # leading "\n" (second run: 35,617 distinct, one too many). Plain \s matches Python's strip here.
+        F.regexp_replace("review_comment_message", r"^\s+|\s+$", "").alias("text"),
     )
     .withColumn("input_hash", F.when(F.col("text") != "", F.sha2("text", 256)))
     .write.saveAsTable(REVIEWS)
