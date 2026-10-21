@@ -4189,7 +4189,7 @@ Both scored 7 of 7 once the meaning of the data was written down. Genie with not
 Start reads → enrichment notebook → CI red (final newline) → run 1 (fingerprint overflow) → run 2
 (blank text labelled: Spark `trim`) → run 3 stopped by the new count assert (`(?U)` = ungreedy) →
 per-review hash diff found it → run 4 green → answer key (Gold, Silver, semantic view) → Genie bare,
-Genie instructed, Cortex → findings. The human asked for a private CI/CD lesson; slotted after S19b.
+Genie instructed, Cortex → findings.
 
 ### Built
 - `experiments/s19b_ai_enrichment.py` (scratch `workspace.s19b`): `ai_calls` append-only log,
@@ -4248,17 +4248,14 @@ Snowsight **$390 of $400 left** before the Cortex questions; trial ends in ~19 d
 (10,400 AI calls). Cortex Analyst: 8 questions, cost not read yet.
 
 ### Next
-**CI/CD lesson** (private, its own short slot, before S19c): the hands-on PR is also the carried
-"governance under CI" read.
+**S19c — self-healing triage agent** (coverage), before Drill 3.
 
 **Carried, by name:**
 - **Read Cortex Analyst's spend** (`07_spend.sql` as ACCOUNTADMIN) once ACCOUNT_USAGE has caught up.
 - **Drop scratch:** `workspace.s19b` (Databricks) and `LEDGERLINE.S19B` once this session's numbers
   are no longer needed; `workspace.s16` (since S16).
 - **Leak prevention, structural** (incidents 2026-10-19 + 2026-10-21): probe in a scratch database.
-- **S19c — self-healing triage agent**, before Drill 3.
-- **Governance under CI:** the next PR's slim CI runs `apply_governance` as CI_RUNNER (the CI/CD
-  lesson's PR).
+- **Governance under CI:** the next PR's slim CI runs `apply_governance` as CI_RUNNER — read it.
 - Unchanged: Drill 3's list; ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild
   baseline; ~2026-11-05 drop `workspace.s12`; Git token ~2026-12-25; `ledgerline-ci` secret
   ~2027-01-04; **Snowflake trial ends ~2026-11-10**.
