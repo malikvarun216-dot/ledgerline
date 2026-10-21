@@ -90,9 +90,12 @@ def merges(table):
 
 
 def fingerprint(table, where="true"):
-    """Row count and an order-free hash of every row: equal fingerprints = the same rows."""
+    """Row count and an order-free hash of every row: equal fingerprints = the same rows. The sum is a
+    DECIMAL(38,0): 1,000 signed 64-bit hashes summed as BIGINT overflowed under ANSI mode (first run,
+    case C: ARITHMETIC_OVERFLOW)."""
     r = spark.sql(
-        f"SELECT count(*) AS n, coalesce(sum(xxhash64(*)), 0) AS h FROM {table} WHERE {where}"
+        f"SELECT count(*) AS n, coalesce(sum(CAST(xxhash64(*) AS DECIMAL(38, 0))), 0) AS h "
+        f"FROM {table} WHERE {where}"
     ).first()
     return (r.n, r.h)
 
