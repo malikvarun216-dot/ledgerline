@@ -12,7 +12,7 @@ USE WAREHOUSE LEDGERLINE_WH;
 SELECT 'unknown table name' AS problem, TABLE_NAME, COUNT(*) AS rows_
 FROM LEDGERLINE.RAW.SILVER_CHANGES
 WHERE TABLE_NAME IS NULL
-   OR TABLE_NAME NOT IN ('customer', 'product', 'seller', 'customer_order_link', 'orders', 'order_items', 'inventory', 'inventory_events')
+   OR TABLE_NAME NOT IN ('customer', 'product', 'seller', 'customer_order_link', 'review', 'review_labels', 'orders', 'order_items', 'inventory', 'inventory_events')
 GROUP BY 1, 2;
 
 -- B. The label disagrees with the file path the row came from.

@@ -1,5 +1,5 @@
 {#-
-  The Silver tables (seven, eight with Session 15's customer_order_link) as they reach RAW.SILVER_CHANGES: each one's key and every field its
+  The Silver tables (seven; customer_order_link S15; review and review_labels S22) as they reach RAW.SILVER_CHANGES: each one's key and every field its
   Parquet rows carry, with the type Snowflake reads each field as (TYPEOF of the VARIANT value).
 
   ONE list, used three ways, so they cannot disagree:
@@ -72,6 +72,33 @@
             "customer_unique_id": "VARCHAR",
             "dim_updated_at": "TIMESTAMP_NTZ",
         }, **dims_lineage),
+    },
+    "review": {
+        "key": ["review_id", "order_id"],
+        "fields": dict({
+            "review_id": "VARCHAR",
+            "order_id": "VARCHAR",
+            "review_score": "INTEGER",
+            "review_comment_title": "VARCHAR",
+            "review_comment_message": "VARCHAR",
+            "review_creation_date": "TIMESTAMP_NTZ",
+            "review_answer_timestamp": "TIMESTAMP_NTZ",
+            "dim_updated_at": "TIMESTAMP_NTZ",
+        }, **dims_lineage),
+    },
+    "review_labels": {
+        "key": ["input_hash", "model", "prompt_version"],
+        "fields": {
+            "input_hash": "VARCHAR",
+            "model": "VARCHAR",
+            "prompt_version": "VARCHAR",
+            "sentiment": "VARCHAR",
+            "topic": "VARCHAR",
+            "label_ok": "BOOLEAN",
+            "response": "VARCHAR",
+            "called_at": "TIMESTAMP_NTZ",
+            "batch_id": "INTEGER",
+        },
     },
     "orders": {
         "key": ["order_id"],
@@ -148,6 +175,7 @@
         "DOUBLE": "FLOAT",
         "DATE": "DATE",
         "TIMESTAMP_NTZ": "TIMESTAMP_NTZ",
+        "BOOLEAN": "BOOLEAN",
     } -%}
     {{ return(types[variant_type]) }}
 {%- endmacro %}

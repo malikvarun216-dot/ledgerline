@@ -4,7 +4,7 @@
 # environment_version = "6"
 # ///
 # MAGIC %md
-# MAGIC # Silver — customer, product, seller (and the customer-order link) as they are now
+# MAGIC # Silver — customer, product, seller (and the customer-order link, and reviews) as they are now
 # MAGIC
 # MAGIC **Pattern:** one `MERGE` per night, oldest first, with `WHEN NOT MATCHED BY SOURCE DELETE` —
 # MAGIC the snapshot path. The code is in `_merge_dims`; this notebook runs it and checks the result.
@@ -31,7 +31,7 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SILVER}")
 create_merge_log()
 
 # A night listed here may delete more than MAX_DELETE_FRACTION. Empty unless a person decided.
-ALLOW_MASS_DELETE = {"customer": [], "product": [], "seller": [], "customer_order_link": []}
+ALLOW_MASS_DELETE = {"customer": [], "product": [], "seller": [], "customer_order_link": [], "review": []}
 
 
 def run_all():
@@ -84,6 +84,12 @@ GOLDEN_MERGE = {
         "2017-08-30": (14_908, 0, 0), "2017-12-28": (21_976, 0, 0),
         "2018-04-27": (27_873, 0, 0), "2018-08-25": (26_221, 0, 0), "2018-12-23": (223, 0, 0),
     },
+    # Session 22: an update is a review answered since the night before. No file on night 1.
+    "review": {
+        "2017-01-02": (325, 0, 0), "2017-05-02": (6_206, 11, 0), "2017-08-30": (14_979, 94, 0),
+        "2017-12-28": (20_843, 358, 0), "2018-04-27": (27_663, 569, 0),
+        "2018-08-25": (27_493, 630, 0), "2018-12-23": (1_715, 754, 0),
+    },
 }
 
 first_applied = {
@@ -120,16 +126,15 @@ for dim in DIMS:
     table = f"{SILVER}.{dim}"
     newest = spark.table(f"{BRONZE}.{dim}").agg(F.max("dump_date")).first()[0]
     extra, missing = compare_to_night(table, typed_night(dim, bronze_night(dim, newest)), dim)
-    key = DIMS[dim]["key"]
-    keys = spark.table(table).agg(F.count("*").alias("n"), F.count_distinct(key).alias("d")).first()
+    counted = spark.table(table).agg(F.count("*").alias("n"), F.count_distinct(*keys(dim)).alias("d")).first()
     zips = [c for c, kind in DIMS[dim]["columns"].items() if kind == "zip"]
     bad_zips = sum(
         spark.table(table).where(f"{c} IS NULL OR NOT {c} RLIKE '^[0-9]{{5}}$'").count() for c in zips
     )
-    print(f"{dim:9} newest {newest}: extra={extra} missing={missing}  rows={keys.n:,} "
-          f"distinct keys={keys.d:,}  zips not five digits={bad_zips}")
+    print(f"{dim:9} newest {newest}: extra={extra} missing={missing}  rows={counted.n:,} "
+          f"distinct keys={counted.d:,}  zips not five digits={bad_zips}")
     assert (extra, missing) == (0, 0), f"{dim}: Silver differs from night {newest}"
-    assert keys.n == keys.d, f"{dim}: duplicate keys in Silver"
+    assert counted.n == counted.d, f"{dim}: duplicate keys in Silver"
     assert bad_zips == 0, f"{dim}: a zip is not five digits"
 
 # COMMAND ----------

@@ -27,6 +27,10 @@ vars:
   as_of_night: null
   # Where the governor keeps tags and policies (snowflake/09_governance.sql, Session 18).
   governance_schema: LEDGERLINE.GOVERNANCE
+  # The AI answers Gold shows (Session 22): ONE pinned (model, prompt version), the same pair the
+  # Databricks labelling step asks under. A new pair is a deliberate backfill, then a change here.
+  ai_label_model: databricks-meta-llama-3-3-70b-instruct
+  ai_label_prompt_version: v1
 
 models:
   ledgerline:

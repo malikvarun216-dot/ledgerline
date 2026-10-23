@@ -9,6 +9,7 @@ Hive-partitioned prefix that Auto Loader can pick up:
     dims/product/dump_date=2017-05-01/product.csv
     dims/seller/dump_date=2017-05-01/seller.csv
     dims/customer_order_link/dump_date=2017-05-01/customer_order_link.csv   (Session 15)
+    dims/review/dump_date=2017-05-01/review.csv                             (Session 22)
 
 Full snapshot, not a delta — that is the whole point. A row that vanishes
 between two nights *is* a deletion, which is what ``WHEN NOT MATCHED BY SOURCE
@@ -95,16 +96,33 @@ class DimensionSpec:
     ``attributes`` is what the change hash covers. A column left out of it can
     change without moving ``dim_updated_at`` — so the list is a statement about
     which fields are business-meaningful, not just a column dump.
+
+    ``key`` is one column, or a tuple when the source's key has more than one
+    (reviews, Session 22: neither ``review_id`` nor ``order_id`` is unique alone).
     """
 
     name: str
-    key: str
+    key: str | tuple[str, ...]
     attributes: tuple[str, ...]
     root: str = ROOT_PREFIX
+    # Attributes that are dates. Read back from last night's file they are text, and pandas writes a
+    # column of midnights as "2017-01-13" — so they are parsed back, or every row hashes as changed.
+    dates: tuple[str, ...] = ()
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return (self.key,) if isinstance(self.key, str) else self.key
 
     @property
     def columns(self) -> list[str]:
-        return [self.key, *self.attributes]
+        return [*self.keys, *self.attributes]
+
+
+def row_keys(frame: pd.DataFrame, spec: DimensionSpec) -> list[Any]:
+    """Each row's key: the value itself for a one-column key, a tuple for a longer one."""
+    if isinstance(spec.key, str):
+        return frame[spec.key].tolist()
+    return list(zip(*(frame[column] for column in spec.keys), strict=True))
 
 
 CUSTOMER = DimensionSpec(
@@ -152,7 +170,27 @@ CUSTOMER_ORDER_LINK = DimensionSpec(
     key="customer_id",
     attributes=("customer_unique_id",),
 )
-ALL_SPECS = {**DIMENSIONS, CONTACT.name: CONTACT, CUSTOMER_ORDER_LINK.name: CUSTOMER_ORDER_LINK}
+# A customer's review and the marketplace's answer to it (Session 22). Keyed on both ids: 789
+# review ids sit on more than one order and 547 orders have more than one review, in the real file.
+# A review changes once — when it is answered — and is never deleted by this generator.
+REVIEW = DimensionSpec(
+    name="review",
+    key=("review_id", "order_id"),
+    attributes=(
+        "review_score",
+        "review_comment_title",
+        "review_comment_message",
+        "review_creation_date",
+        "review_answer_timestamp",
+    ),
+    dates=("review_creation_date", "review_answer_timestamp"),
+)
+ALL_SPECS = {
+    **DIMENSIONS,
+    CONTACT.name: CONTACT,
+    CUSTOMER_ORDER_LINK.name: CUSTOMER_ORDER_LINK,
+    REVIEW.name: REVIEW,
+}
 
 
 # --------------------------------------------------------------------------
@@ -219,6 +257,30 @@ def link_snapshot(links: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
     return (
         visible[[*CUSTOMER_ORDER_LINK.columns, UPDATED_AT]]
         .sort_values(CUSTOMER_ORDER_LINK.key, kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+# --------------------------------------------------------------------------
+# Reviews: every review written by the night, answered only if the answer came by then
+# --------------------------------------------------------------------------
+
+
+def review_snapshot(reviews: pd.DataFrame, as_of: datetime) -> pd.DataFrame:
+    """The review export as it stood at ``as_of``.
+
+    A review written by then is in the file; its answer only if the answer had come by then — an
+    answer from the future is blanked, not dropped with the review. ``dim_updated_at`` = the answer
+    time once answered, else the creation date: the moment the row last really changed.
+    """
+    cutoff = pd.Timestamp(as_of)
+    visible = reviews[reviews["review_creation_date"] <= cutoff].copy()
+    answered = visible["review_answer_timestamp"] <= cutoff
+    visible["review_answer_timestamp"] = visible["review_answer_timestamp"].where(answered)
+    visible[UPDATED_AT] = visible["review_answer_timestamp"].fillna(visible["review_creation_date"])
+    return (
+        visible[[*REVIEW.columns, UPDATED_AT]]
+        .sort_values(list(REVIEW.keys), kind="stable")
         .reset_index(drop=True)
     )
 
@@ -411,6 +473,9 @@ def _normalize_attribute(value: Any) -> Any:
     """
     if pd.isna(value):
         return None
+    # One text form for a date, whichever way it was built (see DimensionSpec.dates).
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return str(pd.Timestamp(value))
     # np.int64 is NOT a subclass of Python's int (on any platform), so an
     # (int, float) check silently misses it and this fix would not fire on
     # the exact values it exists to normalize.
@@ -458,13 +523,13 @@ def carry_forward_updated_at(
         return result, stats
 
     previous_hash = {
-        row[spec.key]: attribute_hash(row, spec) for _, row in previous.iterrows()
+        key: attribute_hash(row, spec)
+        for key, (_, row) in zip(row_keys(previous, spec), previous.iterrows(), strict=True)
     }
-    previous_stamp = dict(zip(previous[spec.key], previous[UPDATED_AT], strict=True))
+    previous_stamp = dict(zip(row_keys(previous, spec), previous[UPDATED_AT], strict=True))
 
     stamps: list[Any] = []
-    for _, row in result.iterrows():
-        key = row[spec.key]
+    for key, (_, row) in zip(row_keys(result, spec), result.iterrows(), strict=True):
         if key not in previous_hash:
             stats["new"] += 1
             stamps.append(row[UPDATED_AT])
@@ -524,8 +589,12 @@ def read_previous(sink: BlobSink, dimension: str, before: date) -> tuple[pd.Data
         return None, None
     latest_date, latest_key = max(candidates)
     frame = pd.read_csv(io.StringIO(sink.get_text(latest_key)))
-    if UPDATED_AT in frame.columns:
-        frame[UPDATED_AT] = pd.to_datetime(frame[UPDATED_AT])
+    spec = ALL_SPECS.get(dimension)
+    for column in (UPDATED_AT, *(spec.dates if spec else ())):
+        if column in frame.columns:
+            # ISO8601 takes "2017-08-19" and "2017-08-19 00:00:00" in one column: a file written
+            # without a pinned date format (below) may hold either, by pandas' block layout.
+            frame[column] = pd.to_datetime(frame[column], format="ISO8601")
     return frame, latest_date
 
 
@@ -548,10 +617,19 @@ def write_night(
     # from Linux CI, for identical input. Auto Loader reads these files in
     # Session 6, and the project's byte-identical-replay claim has to hold
     # across machines to mean anything.
-    sink.put_text(dump_key(spec.name, dump_date), ordered.to_csv(index=False, lineterminator="\n"))
+    #
+    # A spec with date attributes pins the date text too: pandas writes a datetime column as
+    # "2017-08-19" or "2017-08-19 00:00:00" depending on which other columns share its memory
+    # block, so one review could be written two ways on two nights. Only those specs: the dims
+    # files landed before Session 22 must stay byte-identical.
+    date_format = "%Y-%m-%d %H:%M:%S" if spec.dates else None
+    sink.put_text(
+        dump_key(spec.name, dump_date),
+        ordered.to_csv(index=False, lineterminator="\n", date_format=date_format),
+    )
 
     if previous is not None:
-        stats["deleted_vs_previous"] = len(set(previous[spec.key]) - set(frame[spec.key]))
+        stats["deleted_vs_previous"] = len(set(row_keys(previous, spec)) - set(row_keys(frame, spec)))
     else:
         stats["deleted_vs_previous"] = 0
     return stats
@@ -637,7 +715,9 @@ def run(
     (default: the second night). ``redeliver``: landed nights this run may rewrite.
     ``pii_from``: the customer-contact lane (synthetic PII) is written for every night on or
     after this date; ``None`` = no contact files at all. The dims files are the same either way.
+    ``frames["reviews"]``, when present, adds the review lane (Session 22); without it no review file.
     """
+    reviews = frames.get("reviews")
     timeline = customer_timeline(frames["customers"], frames["orders"])
     links = order_links(frames["customers"], frames["orders"])
     first_seen = timeline.groupby(CUSTOMER.key)["observed_at"].min()
@@ -719,6 +799,22 @@ def run(
         )
         report.append(stats)
 
+        # The review lane starts on the first night that holds a review: Silver refuses an empty night
+        # (a truncated file looks the same), so a night before the source existed gets no file at all.
+        if reviews is not None:
+            tonight = review_snapshot(reviews, as_of)
+            if not tonight.empty:
+                stats = write_night(plan, REVIEW, tonight, dump_date)
+                stats.update(
+                    {
+                        "dimension": REVIEW.name,
+                        DUMP_DATE: dump_date.isoformat(),
+                        "synthetic_changes": 0,
+                        "removed_cumulative": 0,
+                    }
+                )
+                report.append(stats)
+
     status = land(sink, plan.planned, redeliver)
     for stats in report:
         stats["landed"] = status[dump_key(stats["dimension"], date.fromisoformat(stats[DUMP_DATE]))]
@@ -764,7 +860,10 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20260919)
     args = parser.parse_args()
 
-    frames = {name: olist.load(name, args.raw_dir) for name in ("customers", "orders", "products", "sellers")}
+    frames = {
+        name: olist.load(name, args.raw_dir)
+        for name in ("customers", "orders", "products", "sellers", "reviews")
+    }
 
     if args.start_date:
         start = date.fromisoformat(args.start_date)

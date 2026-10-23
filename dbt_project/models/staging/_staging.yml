@@ -47,6 +47,32 @@ models:
       - name: customer_unique_id
         data_tests: [not_null]
 
+  - name: stg_review
+    description: >
+      Every change of a customer's review (Session 22). Keyed on review_id + order_id: neither is
+      unique alone. An update is the marketplace's answer arriving; dim_updated_at = the answer time,
+      or the creation date while unanswered.
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['review_id', 'order_id']}}
+    columns:
+      - name: review_id
+        data_tests: [not_null]
+      - name: order_id
+        data_tests: [not_null]
+      - name: review_score
+        data_tests:
+          - accepted_values: {arguments: {values: [1, 2, 3, 4, 5], quote: false}}
+
+  - name: stg_review_labels
+    description: >
+      Every AI answer for a review text (Session 22): one per (input_hash, model, prompt_version),
+      insert-only on Databricks (databricks/ai/label_reviews).
+    data_tests:
+      - no_conflicting_changes: {arguments: {key: ['input_hash', 'model', 'prompt_version']}}
+    columns:
+      - name: input_hash
+        data_tests: [not_null]
+
   - name: int_customer_order_link
     description: >
       The link as Silver holds it now — one row per customer_id. Derived (newest change, deletes

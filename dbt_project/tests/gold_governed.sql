@@ -19,6 +19,12 @@
 -- depends_on: {{ ref('fct_orders') }}
 -- depends_on: {{ ref('fct_order_items') }}
 -- depends_on: {{ ref('order_items_at_sale') }}
+-- depends_on: {{ ref('fct_reviews') }}
+-- depends_on: {{ ref('delivery_promise') }}
+-- depends_on: {{ ref('late_vs_rating') }}
+-- depends_on: {{ ref('seller_scorecard') }}
+-- depends_on: {{ ref('review_labels') }}
+-- depends_on: {{ ref('complaint_trends') }}
 {%- set gov = var('governance_schema', 'LEDGERLINE.GOVERNANCE') %}
 {%- set checks = [] %}
 {%- if execute and target.type == 'snowflake' %}  {#- tags and policies are Snowflake's; the databricks target has neither #}

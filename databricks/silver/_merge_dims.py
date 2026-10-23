@@ -103,10 +103,31 @@ DIMS = {
             "dim_updated_at": "timestamp",
         },
     },
+    # Customers' reviews (Session 22). The key is two columns: in the real file 789 review ids sit on
+    # more than one order and 547 orders have more than one review (decisions.md, Session 22). A review
+    # changes once, when it is answered; nothing here deletes one, but a withdrawn review would be
+    # deleted like any row missing from a full snapshot, behind the same breaker.
+    "review": {
+        "key": ["review_id", "order_id"],
+        "columns": {
+            "review_score": "int",
+            "review_comment_title": "string",
+            "review_comment_message": "string",
+            "review_creation_date": "timestamp",
+            "review_answer_timestamp": "timestamp",
+            "dim_updated_at": "timestamp",
+        },
+    },
 }
 REQUIRED = {"dim_updated_at"}  # never NULL, besides the key
 SQL_TYPE = {"zip": "STRING", "int": "INT", "timestamp": "TIMESTAMP", "string": "STRING"}
 LINEAGE = ["_first_seen_dump_date", "_last_changed_dump_date", "_source_file", "_merged_at"]
+
+
+def keys(dim):
+    """The key columns, as a list: one for most dimensions, two for review."""
+    key = DIMS[dim]["key"]
+    return [key] if isinstance(key, str) else list(key)
 
 
 class NightRefused(Exception):
@@ -174,11 +195,13 @@ def check_night(dim, raw):
     source is a delete, so dropping a bad row deletes it (exp_03 D).
     """
     spec = DIMS[dim]
-    key = spec["key"]
+    # count_distinct over several columns skips a row where any of them is NULL, so a row with a
+    # NULL in any key column is a null key — and the duplicate arithmetic below stays right.
+    any_null = " OR ".join(f"{k} IS NULL" for k in keys(dim))
     aggs = [
         F.count(F.lit(1)).alias("rows"),
-        F.count_distinct(key).alias("distinct_keys"),
-        F.sum(F.col(key).isNull().cast("int")).alias("null_keys"),
+        F.count_distinct(*keys(dim)).alias("distinct_keys"),
+        F.sum(F.expr(any_null).cast("int")).alias("null_keys"),
         F.sum(F.expr(bad_row(dim)).cast("int")).alias("held"),
     ]
     for column, kind in spec["columns"].items():
@@ -209,7 +232,7 @@ def typed_night(dim, raw):
     held row, which stays in the source (its key protects it from the delete) but changes nothing."""
     spec = DIMS[dim]
     return raw.select(
-        F.col(spec["key"]),
+        *[F.col(k) for k in keys(dim)],
         *[F.expr(typed_value(c, kind)).alias(c) for c, kind in spec["columns"].items()],
         F.to_date("dump_date").alias("_dump_date"),
         F.col("_source_file"),
@@ -218,13 +241,14 @@ def typed_night(dim, raw):
 
 
 def rejected_rows(dim, raw):
-    """One row per (key, unfit column) of this night, with the raw text exactly as delivered."""
-    key = DIMS[dim]["key"]
+    """One row per (key, unfit column) of this night, with the raw text exactly as delivered. A key of
+    several columns is written joined by `|`."""
+    key = F.concat_ws("|", *keys(dim))
     parts = [
         raw.where(F.expr(unfit(c, kind))).select(
             F.lit(dim).alias("dimension"),
             F.to_date("dump_date").alias("dump_date"),
-            F.col(key).alias("key"),
+            key.alias("key"),
             F.lit(c).alias("column"),
             F.col(c).alias("raw_value"),
             F.col("_source_file"),
@@ -255,7 +279,7 @@ def ensure_properties(table):
 
 def create_silver(table, dim):
     spec = DIMS[dim]
-    columns = [f"{spec['key']} STRING NOT NULL"]
+    columns = [f"{k} STRING NOT NULL" for k in keys(dim)]
     columns += [f"{c} {SQL_TYPE[kind]}" for c, kind in spec["columns"].items()]
     columns += [
         "_first_seen_dump_date DATE",  # the night this key first appeared; set once, never updated
@@ -313,7 +337,7 @@ def merge_sql(target, source, dim, *, delete_missing=True, only_changed=True):
     """The whole statement. The two switches exist for exp_03, which runs the wrong versions on
     purpose; production never passes them."""
     spec = DIMS[dim]
-    key, cols = spec["key"], list(spec["columns"])
+    key, cols = keys(dim), list(spec["columns"])
     # <=> is "equal, counting two NULLs as equal". Plain = gives NULL for NULL = NULL, and
     # NOT (NULL) is NULL, so a row with any NULL would never count as changed.
     same = " AND ".join(f"t.{c} <=> s.{c}" for c in cols)
@@ -324,14 +348,14 @@ def merge_sql(target, source, dim, *, delete_missing=True, only_changed=True):
         "t._source_file = s._source_file",
         "t._merged_at = current_timestamp()",
     ]
-    insert_cols = [key, *cols, *LINEAGE]
-    insert_vals = [f"s.{c}" for c in (key, *cols)] + [
+    insert_cols = [*key, *cols, *LINEAGE]
+    insert_vals = [f"s.{c}" for c in (*key, *cols)] + [
         "s._dump_date", "s._dump_date", "s._source_file", "current_timestamp()",
     ]
     sql = (
         f"MERGE INTO {target} AS t\n"
         f"USING {source} AS s\n"
-        f"ON t.{key} = s.{key}\n"
+        f"ON {' AND '.join(f't.{k} = s.{k}' for k in key)}\n"
         f"{matched} THEN UPDATE SET {', '.join(sets)}\n"
         f"WHEN NOT MATCHED AND s._ok THEN INSERT ({', '.join(insert_cols)}) VALUES ({', '.join(insert_vals)})"
     )
@@ -345,14 +369,16 @@ def latest_version(table):
 
 
 def planned_deletes(table, typed, key):
-    """Rows Silver holds that tonight's file does not: exactly what NOT MATCHED BY SOURCE deletes."""
-    return spark.table(table).join(typed.select(key), key, "left_anti").count()
+    """Rows Silver holds that tonight's file does not: exactly what NOT MATCHED BY SOURCE deletes.
+    `key`: the key column, or a list of them."""
+    key = [key] if isinstance(key, str) else key
+    return spark.table(table).join(typed.select(*key), key, "left_anti").count()
 
 
 def check_deletes(table, typed, dim, *, allowed=False):
     """The circuit breaker. Returns (rows now, rows tonight would delete); raises over the limit."""
     current = spark.table(table).count()
-    doomed = planned_deletes(table, typed, DIMS[dim]["key"])
+    doomed = planned_deletes(table, typed, keys(dim))
     if current and doomed / current > MAX_DELETE_FRACTION and not allowed:
         raise MassDeleteRefused(
             f"{table}: tonight's file would delete {doomed:,} of {current:,} rows "
@@ -521,7 +547,7 @@ def apply_dim(
 
 
 def business_columns(dim):
-    return [DIMS[dim]["key"], *DIMS[dim]["columns"]]
+    return [*keys(dim), *DIMS[dim]["columns"]]
 
 
 def compare_to_night(table, typed, dim):
@@ -529,8 +555,8 @@ def compare_to_night(table, typed, dim):
 
     Held keys are left out on both sides: Silver keeps their previous values on purpose.
     """
-    cols, key = business_columns(dim), DIMS[dim]["key"]
-    held = typed.where(~F.col("_ok")).select(key)
+    cols, key = business_columns(dim), keys(dim)
+    held = typed.where(~F.col("_ok")).select(*key)
     silver = spark.table(table).select(*cols).join(held, key, "left_anti")
     night = typed.where("_ok").select(*cols)
     return silver.exceptAll(night).count(), night.exceptAll(silver).count()

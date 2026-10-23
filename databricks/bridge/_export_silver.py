@@ -49,6 +49,8 @@ TABLES = {
     "product": ["product_id"],
     "seller": ["seller_id"],
     "customer_order_link": ["customer_id"],  # Session 15; its first export is its whole history
+    "review": ["review_id", "order_id"],  # Session 22; neither id is unique alone
+    "review_labels": ["input_hash", "model", "prompt_version"],  # Session 22; the AI answers, insert-only
     "orders": ["order_id"],
     "order_items": ["order_id", "order_item_id"],
     "inventory": ["sku_key"],

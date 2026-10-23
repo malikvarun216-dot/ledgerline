@@ -273,6 +273,34 @@ def sellers() -> pd.DataFrame:
     ).astype({"seller_zip_code_prefix": "Int64"})
 
 
+REVIEW_NOTE = 'Chegou rápido,\r\nmas veio "amassado"'
+
+
+@pytest.fixture
+def reviews() -> pd.DataFrame:
+    """The real file's traps, small: one review id on two orders, one order with two reviews, an answer
+    that comes after a night, and a message with a line break, a comma and quotes."""
+
+    def ts(value: str):
+        return pd.Timestamp(value)
+
+    rows = [
+        # review_id, order_id, score, title, message, created, answered
+        ("RV_SHARED", "ORD_MULTI", 5, None, None, ts("2017-01-13"), ts("2017-01-14 09:00:00")),
+        ("RV_SHARED", "ORD_OVERLAP", 5, None, None, ts("2017-01-13"), ts("2017-01-14 09:00:00")),
+        ("RV_A", "ORD_SIMPLE", 4, "ok", None, ts("2017-02-16"), ts("2017-02-17 10:00:00")),
+        # written before night 2 (2017-02-28), answered after it
+        ("RV_B", "ORD_SIMPLE", 2, None, REVIEW_NOTE, ts("2017-02-27"), ts("2017-03-02 08:30:00")),
+        ("RV_LATE", "ORD_PARTIAL", 1, None, None, ts("2017-04-10"), ts("2017-04-11 12:00:00")),
+    ]
+    frame = pd.DataFrame(rows, columns=[
+        "review_id", "order_id", "review_score", "review_comment_title", "review_comment_message",
+        "review_creation_date", "review_answer_timestamp",
+    ])
+    frame["review_score"] = frame["review_score"].astype("Int64")
+    return frame
+
+
 @pytest.fixture
 def olist_frames(customers, orders, order_items, products, sellers) -> dict[str, pd.DataFrame]:
     """All five generator inputs, keyed by the logical names in generators/olist.py."""
@@ -286,7 +314,7 @@ def olist_frames(customers, orders, order_items, products, sellers) -> dict[str,
 
 
 @pytest.fixture
-def raw_dir(tmp_path, olist_frames) -> Path:
+def raw_dir(tmp_path, olist_frames, reviews) -> Path:
     """Materialize the fixture as CSVs laid out exactly like data/raw/.
 
     Lets tests exercise the real loader — column contract, dtype coercion and
@@ -297,6 +325,6 @@ def raw_dir(tmp_path, olist_frames) -> Path:
 
     target = tmp_path / "raw"
     target.mkdir()
-    for name, frame in olist_frames.items():
+    for name, frame in {**olist_frames, "reviews": reviews}.items():
         frame.to_csv(target / TABLES[name].filename, index=False)
     return target

@@ -4,7 +4,7 @@
 # environment_version = "6"
 # ///
 # MAGIC %md
-# MAGIC # Bronze — nightly dimension dumps (customer, product, seller, customer_order_link)
+# MAGIC # Bronze — nightly dimension dumps (customer, product, seller, customer_order_link, review)
 # MAGIC
 # MAGIC **Pattern:** Auto Loader + `Trigger.AvailableNow` + `replaceWhere` on `dump_date` — the code is in
 # MAGIC `_autoload_dims`. Source is read-only (`ledgerline_landing` external location); state lives in a
@@ -30,7 +30,12 @@ SCHEMA = "bronze"
 STATE = f"/Volumes/{CATALOG}/{SCHEMA}/checkpoints/dims"
 # customer_order_link (Session 15): which person each order's customer_id belongs to — a fourth
 # dump through the same path (decisions.md, Session 15).
-DIMS = ["customer", "product", "seller", "customer_order_link"]
+# review (Session 22): customers' reviews and the answers to them, from night 2 (2017-01-02) on.
+DIMS = ["customer", "product", "seller", "customer_order_link", "review"]
+# A review's message may hold a line break (3,852 of them do), a comma or a quote. The file quotes such
+# a field and doubles a quote inside it ("" — the CSV standard). Spark's defaults read every line as a
+# record and take \ as the escape, so: multiLine, and " as the escape (decisions.md, Session 22).
+CSV_OPTIONS = {"review": {"multiLine": "true", "escape": '"'}}
 
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.checkpoints")
@@ -40,7 +45,13 @@ def run_all():
     for dim in DIMS:
         # Paths unchanged since Session 6 ({STATE}/{dim}/schema and /checkpoint): moving them
         # would start a new stream that re-reads every file.
-        ingest(f"{LANDING}/{dim}/", f"{CATALOG}.{SCHEMA}.{dim}", f"{STATE}/{dim}", allow_overwrites=True)
+        ingest(
+            f"{LANDING}/{dim}/",
+            f"{CATALOG}.{SCHEMA}.{dim}",
+            f"{STATE}/{dim}",
+            allow_overwrites=True,
+            csv_options=CSV_OPTIONS.get(dim),
+        )
 
 
 run_all()
@@ -80,20 +91,28 @@ GOLDEN = {
         "2016-09-04": 1, "2017-01-02": 329, "2017-05-02": 8_240, "2017-08-30": 23_148, "2017-12-28": 45_124,
         "2018-04-27": 72_997, "2018-08-25": 99_218, "2018-12-23": 99_441,
     },
+    # Session 22, counted by pandas on the generator's output; no file for night 1 (no review yet).
+    "review": {
+        "2017-01-02": 325, "2017-05-02": 6_531, "2017-08-30": 21_510, "2017-12-28": 42_353,
+        "2018-04-27": 70_016, "2018-08-25": 97_509, "2018-12-23": 99_224,
+    },
 }
 
 
-def landing_counts(source):
+def landing_counts(source, csv_options=None):
     # recursiveFileLookup turns off folder-name inference, so dump_date=... does not become a
     # second dump_date column next to the file's own.
-    files = spark.read.option("header", "true").option("recursiveFileLookup", "true").csv(source)
+    files = (
+        spark.read.option("header", "true").option("recursiveFileLookup", "true")
+        .options(**(csv_options or {})).csv(source)
+    )
     return {r.dump_date: r.n for r in files.groupBy("dump_date").agg(F.count("*").alias("n")).collect()}
 
 
 def check_counts():
     for dim in DIMS:
         table = f"{CATALOG}.{SCHEMA}.{dim}"
-        got, landed = night_counts(table), landing_counts(f"{LANDING}/{dim}/")
+        got, landed = night_counts(table), landing_counts(f"{LANDING}/{dim}/", CSV_OPTIONS.get(dim))
         golden = {d: n for d, n in GOLDEN[dim].items() if d in landed}
         ok = got == landed and all(got.get(d) == n for d, n in golden.items())
         print(f"{dim:9} {'OK' if ok else 'MISMATCH'}  table={dict(sorted(got.items()))}")
@@ -104,6 +123,25 @@ def check_counts():
 
 
 check_counts()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Why the review options matter — the same files read with Spark's defaults (a read, no write)
+# MAGIC
+# MAGIC Without `multiLine`, each line is a record: a message with a line break becomes two short rows,
+# MAGIC the second with its text in `review_id`. The count goes up and `dump_date` lands in the wrong
+# MAGIC column, so some rows have none. Nothing errors — that is the danger.
+
+# COMMAND ----------
+
+naive = spark.read.option("header", "true").option("recursiveFileLookup", "true").csv(f"{LANDING}/review/")
+right = landing_counts(f"{LANDING}/review/", CSV_OPTIONS["review"])
+naive_night_8 = naive.where("dump_date = '2018-12-23'").count()
+print(f"night 8 with the options: {right.get('2018-12-23'):,}; with Spark's defaults: {naive_night_8:,} "
+      f"rows dated that night, {naive.count():,} rows in all vs {sum(right.values()):,}")
+undated = naive.where(~F.col("dump_date").rlike("^[0-9]{4}-")).count()
+print(f"defaults: rows with no valid dump_date: {undated:,}")
 
 # COMMAND ----------
 

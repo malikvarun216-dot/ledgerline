@@ -268,6 +268,177 @@ models:
       - {name: product_found, data_type: boolean}
       - {name: seller_found, data_type: boolean}
 
+  - name: fct_reviews
+    description: >
+      One row per customer review (review_id + order_id: neither is unique alone), as Silver holds it
+      now. Incremental, merge_changes, arrival mark (Session 22). The review text is restricted:
+      readers get the score and, through review_labels, the AI's sentiment and topic — not the words.
+    config:
+      contract: {enforced: true}
+    data_tests:
+      - fct_equals_rebuild:
+          arguments: {staging: stg_review, key: [review_id, order_id]}
+    columns:
+      - name: review_id
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        constraints: [{type: not_null}]
+        data_tests: [not_null]
+      - name: order_id
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        constraints: [{type: not_null}]
+        data_tests:
+          - not_null
+          - relationships: {arguments: {to: ref('fct_orders'), field: order_id}}
+      - name: review_score
+        data_type: number
+        data_tests:
+          - accepted_values: {arguments: {values: [1, 2, 3, 4, 5], quote: false}}
+      - {name: review_comment_title, data_type: varchar, description: "Free text; masked ('***') for readers.", config: {meta: {pii_class: restricted}}}
+      - {name: review_comment_message, data_type: varchar, description: "Free text; masked ('***') for readers.", config: {meta: {pii_class: restricted}}}
+      - {name: has_message, data_type: boolean, description: "The message holds more than white space."}
+      - {name: message_hash, data_type: varchar, description: "SHA-256 of the trimmed message, the key of review_labels; NULL when there is nothing to label.", config: {meta: {pii_class: public}}}
+      - {name: review_created_at, data_type: timestamp_ntz, description: "The day the customer wrote it (Olist gives a date)."}
+      - {name: review_answered_at, data_type: timestamp_ntz, description: "When the marketplace answered; NULL until then."}
+      - {name: silver_version, data_type: number}
+      - {name: silver_change_type, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: raw_loaded_at, data_type: timestamp_ltz}
+
+  - name: delivery_promise
+    description: >
+      Are our delivery promises honest? One row per delivered order: promised date, delivered date,
+      days late (negative = early), the lateness bucket, and the order's newest review (Session 22).
+    config:
+      materialized: table
+      meta: {row_policy: customer_state}
+      contract: {enforced: true}
+    columns:
+      - name: order_id
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - {name: customer_unique_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - name: customer_state
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        description: Where the person lived when they ordered (point in time). The row policy's column.
+        data_tests: [not_null]
+      - {name: seller_count, data_type: number}
+      - {name: items, data_type: number}
+      - {name: order_status, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: purchased_at, data_type: timestamp_ntz}
+      - {name: purchase_month, data_type: date}
+      - {name: promised_at, data_type: timestamp_ntz, description: "The estimated delivery date shown at purchase."}
+      - {name: delivered_at, data_type: timestamp_ntz}
+      - {name: promised_days, data_type: number}
+      - {name: actual_days, data_type: number}
+      - {name: days_late, data_type: number, description: "Delivered date minus promised date, in calendar days; negative = early."}
+      - {name: is_late, data_type: boolean}
+      - {name: lateness_bucket, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: lateness_bucket_order, data_type: number}
+      - {name: review_score, data_type: number}
+      - {name: reviewed_at, data_type: timestamp_ntz}
+      - {name: reviewed_before_delivery, data_type: boolean, description: "The customer rated the order before it arrived."}
+
+  - name: late_vs_rating
+    description: >
+      Does a late delivery cost ratings? Delivered orders by purchase month x customer state x
+      lateness bucket, with SUMS and COUNTS of review scores — divide summed score by summed count
+      when rolling rows together, never average avg_score (Session 22).
+    config:
+      materialized: table
+      meta: {row_policy: customer_state}
+      contract: {enforced: true}
+    columns:
+      - {name: purchase_month, data_type: date}
+      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: lateness_bucket, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: lateness_bucket_order, data_type: number}
+      - {name: is_late, data_type: boolean}
+      - {name: delivered_orders, data_type: number}
+      - {name: reviewed_orders, data_type: number}
+      - {name: score_sum, data_type: number}
+      - {name: low_score_orders, data_type: number, description: "Reviewed 1 or 2 stars."}
+      - {name: five_star_orders, data_type: number}
+      - {name: reviewed_before_delivery, data_type: number}
+      - {name: avg_score, data_type: number, description: "For reading ONE row only."}
+
+  - name: seller_scorecard
+    description: >
+      Which sellers hurt us? One row per seller per purchase month with volume, lateness and review
+      score, and a tier from written rules (no model). A review counts for a seller only on a
+      single-seller order (Session 22).
+    config:
+      materialized: table
+      contract: {enforced: true}
+    columns:
+      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}, constraints: [{type: not_null}]}
+      - {name: purchase_month, data_type: date, constraints: [{type: not_null}]}
+      - {name: orders, data_type: number}
+      - {name: items, data_type: number}
+      - {name: revenue, data_type: "number(14,2)"}
+      - {name: freight, data_type: "number(14,2)"}
+      - {name: canceled_orders, data_type: number}
+      - {name: delivered_orders, data_type: number}
+      - {name: late_orders, data_type: number}
+      - {name: reviewed_orders, data_type: number}
+      - {name: score_sum, data_type: number}
+      - {name: low_score_orders, data_type: number}
+      - {name: shared_reviews_not_credited, data_type: number, description: "Reviews of multi-seller orders: counted here, credited to no seller."}
+      - {name: late_rate, data_type: number}
+      - {name: avg_score, data_type: number}
+      - name: tier
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        data_tests:
+          - accepted_values: {arguments: {values: ['at risk', 'watch', 'good', 'too few orders']}}
+
+  - name: review_labels
+    description: >
+      The AI's sentiment and topic per distinct review text, under the pinned model and prompt version
+      (Session 22). Join to fct_reviews on message_hash.
+    config:
+      materialized: table
+      contract: {enforced: true}
+    columns:
+      - name: message_hash
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        constraints: [{type: not_null}, {type: primary_key}]
+        data_tests: [unique, not_null]
+      - name: sentiment
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        data_tests:
+          - accepted_values: {arguments: {values: ['positive', 'neutral', 'negative']}}
+      - name: topic
+        data_type: varchar
+        config: {meta: {pii_class: public}}
+        data_tests:
+          - accepted_values: {arguments: {values: ['delivery', 'product', 'seller', 'price', 'other']}}
+      - {name: label_ok, data_type: boolean, description: "false = the model answered outside the label set."}
+      - {name: model, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: prompt_version, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: labelled_at, data_type: timestamp_ntz}
+      - {name: silver_version, data_type: number}
+
+  - name: complaint_trends
+    description: >
+      Reviews by month x AI topic x sentiment (Session 22). Grain = review. 'no text', 'not labelled'
+      and 'unreadable answer' are kept as topics so a report shows what the AI did not cover.
+    config:
+      materialized: table
+      contract: {enforced: true}
+    columns:
+      - {name: review_month, data_type: date}
+      - {name: topic, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: sentiment, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: reviews, data_type: number}
+      - {name: score_sum, data_type: number}
+      - {name: low_score_reviews, data_type: number}
+
 unit_tests:
   # B68, as a test: the newest change wins, a key whose newest change is a delete is gone, and a
   # change row loaded twice is one row. Filter-deletes-first would bring C2 back at its insert.

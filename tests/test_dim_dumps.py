@@ -36,7 +36,7 @@ from generators.dim_dumps import (
     run,
     write_night,
 )
-from tests.conftest import CU_DOOMED, CU_MOVER, CU_SOLO, CU_STAYER
+from tests.conftest import CU_DOOMED, CU_MOVER, CU_SOLO, CU_STAYER, REVIEW_NOTE
 
 # Chosen so each night lands just after a real observation in the fixture.
 START = date(2017, 1, 31)
@@ -681,3 +681,68 @@ def test_link_dim_updated_at_is_the_purchase_time(olist_frames, sink):
     link = read_dump(sink, "customer_order_link", nights(4)[3]).set_index("customer_id")
     purchased = olist_frames["orders"].set_index("customer_id")["order_purchase_timestamp"]
     assert (link[UPDATED_AT] == purchased.reindex(link.index)).all()
+
+
+# --------------------------------------------------------------------------
+# Reviews (Session 22): a two-column key, a later answer, free text
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def with_reviews(olist_frames, reviews) -> dict[str, pd.DataFrame]:
+    return {**olist_frames, "reviews": reviews}
+
+
+def test_review_key_is_both_ids(with_reviews, sink):
+    run(with_reviews, sink, start=START, nights=4, stride_days=STRIDE)
+    last = read_dump(sink, "review", nights(4)[3])
+    assert len(last) == 5
+    assert not last["review_id"].is_unique, "one review id sits on two orders"
+    assert not last["order_id"].is_unique, "one order has two reviews"
+    assert not last.duplicated(["review_id", "order_id"]).any()
+
+
+def test_no_review_file_before_the_first_review(with_reviews, sink):
+    start = date(2017, 1, 3)  # night 1 is before the first review (2017-01-13)
+    run(with_reviews, sink, start=start, nights=2, stride_days=STRIDE)
+    keys = sink.list_keys("dims/review/")
+    assert keys == [dump_key("review", date(2017, 1, 31))]
+
+
+def test_an_answer_appears_on_the_night_it_came_and_moves_only_that_row(with_reviews, sink):
+    run(with_reviews, sink, start=START, nights=3, stride_days=STRIDE)
+    two = read_dump(sink, "review", nights(3)[1]).set_index(["review_id", "order_id"])
+    three = read_dump(sink, "review", nights(3)[2]).set_index(["review_id", "order_id"])
+
+    assert pd.isna(two.loc[("RV_B", "ORD_SIMPLE"), "review_answer_timestamp"]), "answer from the future"
+    assert two.loc[("RV_B", "ORD_SIMPLE"), UPDATED_AT] == pd.Timestamp("2017-02-27")
+    assert "2017-02-27 00:00:00" in sink.get_text(dump_key("review", nights(3)[1])), "date text pinned"
+    assert three.loc[("RV_B", "ORD_SIMPLE"), UPDATED_AT] == pd.Timestamp("2017-03-02 08:30:00")
+
+    # Every other review is unchanged, timestamp included — the read-back trap (dates come back as text).
+    others = two.drop(index=("RV_B", "ORD_SIMPLE")).index
+    assert (two.loc[others, UPDATED_AT] == three.loc[others, UPDATED_AT]).all()
+
+
+def test_review_report_counts_one_change_on_the_answer_night(with_reviews, sink):
+    report = run(with_reviews, sink, start=START, nights=3, stride_days=STRIDE)
+    review = {row[DUMP_DATE]: row for row in report if row["dimension"] == "review"}
+    third = review[nights(3)[2].isoformat()]
+    assert (third["new"], third["changed"], third["unchanged"]) == (0, 1, 3)
+
+
+def test_review_text_survives_the_csv_byte_for_byte(with_reviews, sink):
+    run(with_reviews, sink, start=START, nights=2, stride_days=STRIDE)
+    text = sink.get_text(dump_key("review", nights(2)[1]))
+    assert '"Chegou rápido,\r\nmas veio ""amassado"""' in text, "quoted, quotes doubled"
+    back = read_dump(sink, "review", nights(2)[1]).set_index(["review_id", "order_id"])
+    assert back.loc[("RV_B", "ORD_SIMPLE"), "review_comment_message"] == REVIEW_NOTE
+    # Why Bronze needs multiLine: one record is more lines than the file has rows.
+    assert text.count("\n") > len(back) + 1
+
+
+def test_adding_the_review_lane_leaves_every_other_file_byte_identical(olist_frames, with_reviews, counting):
+    run(olist_frames, counting, start=START, nights=3, stride_days=STRIDE)
+    before = {k: counting.get_text(k) for k in counting.list_keys("dims/")}
+    report = run(with_reviews, counting, start=START, nights=3, stride_days=STRIDE)
+    assert {r["dimension"] for r in report if r["landed"] == "new"} == {"review"}
+    assert all(counting.get_text(k) == text for k, text in before.items())

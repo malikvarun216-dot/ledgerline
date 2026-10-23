@@ -4229,3 +4229,44 @@ or an agent that a reader uses. Everything that reads Snowflake Gold must finish
 - Trade-off, accepted: four sessions in ~17 days (S22, S23, S24, Drill 3), against a pace of about one
   session a day. The S19c triage resume and `docs/data_journey.md` stay after Drill 3, and
   data_journey gains stops for BI and the copilot.
+
+## Reviews arrive as a fifth nightly dump keyed on `(review_id, order_id)`; Silver applies them with the snapshot MERGE; Gold keeps one row per review as an incremental fact (Session 22)
+
+**In plain words:** a customer's review is written once and, usually a day or two later, gets an
+answer from the marketplace (`review_answer_timestamp`). So a review is not an immutable event like
+an order, and not a slowly-changing attribute either: it appears, changes once, and stays. Reviews
+come in the way a survey vendor delivers them — a nightly file of every review known so far — through
+the same dims pipeline (Auto Loader → Silver MERGE → bridge → Snowpipe) as customers and products.
+
+Measured on the real file before choosing (99,224 rows):
+- **`review_id` is not a key**: 98,410 distinct; **789 review ids sit on more than one order**. And
+  `order_id` is not either: **547 orders have more than one review**. `(review_id, order_id)` is unique
+  on all 99,224 rows. Keyed on `review_id` alone, Silver's contract would refuse every night with
+  `duplicate_keys`; picking one row per id would silently drop real reviews.
+- The answer is a **real change between nights**: at night 7 (2018-08-25) 97,509 reviews exist and
+  96,755 are answered; 754 change at night 8. `dim_updated_at` = the answer time if answered by that
+  night, else the creation date — a business time, so nothing moves without a real change.
+- **Night 1 (2016-09-04) has no reviews** (the first is 2016-10-02). The Silver contract refuses an
+  empty night (a truncated file looks the same), so the lane **starts at night 2**: the generator
+  writes no file for a night before the source holds a row. The contract is not weakened.
+- **3,852 messages contain a line break** (`\r\n`), 172 a quote, 14,447 a comma. A CSV reader that
+  treats every line as a row would split them, so Bronze reads this one source with `multiLine` and
+  `"` as the escape character. The other dims files stay read exactly as before.
+
+- Chosen: **the dims pipeline, with a two-column key** — the generator, Bronze, Silver, the bridge and
+  dbt's `silver_tables()` learn a key of more than one column (the bridge and dbt already take a list).
+- Chosen: in Gold, **`fct_reviews` is an incremental fact** (one row per review, MERGE on the key), not
+  an SCD2 snapshot — the only change is the answer, and its time is in the row itself; no question
+  asks "what did this review look like before it was answered".
+- Rejected: **a Kafka topic `reviews`**, like orders. Orders are immutable facts; a review is updated
+  once, so the topic would need update events and a CDC-style `seq` — a second CDC lane for one field,
+  plus a new stream job and Confluent traffic, for a source that changes once a day at most.
+- Rejected: **an incremental nightly export** (only the reviews created or answered that day). Smaller
+  files, but absence then means nothing, so a review withdrawn by moderation would never be seen; it
+  would need an in-band delete flag — the CDC pattern again. At 99,224 rows a full snapshot costs
+  nothing and keeps "absent = gone" true.
+- Rejected: **a synthetic single key** (`review_id || order_id`) made by the generator — a column the
+  source does not have, invented to fit the pipeline; the honest fix is a pipeline that takes the
+  source's real key.
+- Trade-off, accepted: a key of two columns touches shared Silver code that four dimensions use; their
+  golden counts must come out unchanged, which is the check.

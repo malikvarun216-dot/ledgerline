@@ -80,7 +80,9 @@ def write_batch(batch_df, batch_id, table, keep=None):
     print(f"{table}: batch {batch_id} replaced dump_date {dates}")
 
 
-def ingest(source, table, state, *, allow_overwrites=False, keep=None, retention=FILE_RETENTION):
+def ingest(
+    source, table, state, *, allow_overwrites=False, keep=None, retention=FILE_RETENTION, csv_options=None
+):
     """One AvailableNow pass over `source`. State (schema + checkpoint) lives under `state`.
 
     `allow_overwrites`: whether a file rewritten in place (same path, newer modification time) is
@@ -89,11 +91,14 @@ def ingest(source, table, state, *, allow_overwrites=False, keep=None, retention
 
     `keep`: optional `DataFrame -> DataFrame` applied to each batch before it is written.
     `retention`: how long replaced files stay for time travel — shorter for personal data.
+    `csv_options`: extra CSV reader options for one source — reviews hold free text with line breaks
+    and quotes (Session 22). Passed only where needed: the other dims are read exactly as before.
     """
     stream = (
         spark.readStream.format("cloudFiles")
         .option("cloudFiles.format", "csv")
         .option("header", "true")
+        .options(**(csv_options or {}))
         # Bronze keeps strings; typing is Silver's job.
         .option("cloudFiles.inferColumnTypes", "false")
         # Don't turn the dump_date=... folder into a column: the file already has one.
