@@ -140,7 +140,9 @@ right = landing_counts(f"{LANDING}/review/", CSV_OPTIONS["review"])
 naive_night_8 = naive.where("dump_date = '2018-12-23'").count()
 print(f"night 8 with the options: {right.get('2018-12-23'):,}; with Spark's defaults: {naive_night_8:,} "
       f"rows dated that night, {naive.count():,} rows in all vs {sum(right.values()):,}")
-undated = naive.where(~F.col("dump_date").rlike("^[0-9]{4}-")).count()
+# IS NULL first: NOT (NULL RLIKE ...) is NULL, which a filter drops — the first run printed 0 here
+# while 16,835 extra rows existed (S22).
+undated = naive.where(F.col("dump_date").isNull() | ~F.col("dump_date").rlike("^[0-9]{4}-")).count()
 print(f"defaults: rows with no valid dump_date: {undated:,}")
 
 # COMMAND ----------

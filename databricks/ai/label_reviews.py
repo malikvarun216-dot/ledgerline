@@ -120,17 +120,24 @@ def todo():
 
 # COMMAND ----------
 
+# Only answers whose text is in Silver BYTE FOR BYTE (its hash is one of texts()). The first run carried
+# all 1,500 and 101 matched nothing: S19b read the raw Olist file, whose lines end in \r\n, and Spark's
+# CSV reader turned a line break INSIDE a message into \n; our landed file ends lines in \n, so Silver
+# keeps \r\n. 2,678 distinct texts differ that way (incidents.md 2026-10-24). An answer to a different
+# string is not an answer to this one.
 carried = 0
 if spark.catalog.tableExists(S19B_LABELS):
     s19b = spark.table(S19B_LABELS).where(
         (F.col("model") == MODEL) & (F.col("prompt_version") == PROMPT_VERSION)
     )
-    new = s19b.join(spark.table(LABELS).select("input_hash", "model", "prompt_version"),
-                    ["input_hash", "model", "prompt_version"], "left_anti")
+    s19b_here = s19b.join(texts().select("input_hash"), "input_hash", "left_semi")
+    new = s19b_here.join(spark.table(LABELS).select("input_hash", "model", "prompt_version"),
+                         ["input_hash", "model", "prompt_version"], "left_anti")
     carried = new.count()
-    print(f"S19b answers for {MODEL} / {PROMPT_VERSION}: {s19b.count():,}; not yet here: {carried:,}")
+    print(f"S19b answers for {MODEL} / {PROMPT_VERSION}: {s19b.count():,}; their text in Silver: "
+          f"{s19b_here.count():,}; not yet here: {carried:,}")
     if MODE == "label" and carried:
-        s19b.createOrReplaceTempView("_s19b")
+        s19b_here.createOrReplaceTempView("_s19b")
         spark.sql(
             f"""MERGE INTO {LABELS} t
                 USING (SELECT input_hash, model, prompt_version, sentiment, topic, label_ok, response,
@@ -140,6 +147,36 @@ if spark.catalog.tableExists(S19B_LABELS):
         )
 else:
     print(f"{S19B_LABELS} not found — nothing to carry over")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Remove what the first carry wrongly inserted (2026-10-24; a no-op once done)
+# MAGIC
+# MAGIC A pinned answer whose hash is neither a Silver text nor ever asked in production can only have come
+# MAGIC from the unfiltered carry: 101 rows, each the answer to a string Silver does not hold. They are
+# MAGIC deleted, not left: kept, they would fail Gold's join-back test forever and stand for texts that do
+# MAGIC not exist. Their texts are asked again under their real hash (101 calls, $0). Time travel keeps them.
+
+# COMMAND ----------
+
+asked = spark.table(CALLS).where("purpose = 'production'").select("input_hash").distinct()
+wrong = (
+    spark.table(LABELS).where((F.col("model") == MODEL) & (F.col("prompt_version") == PROMPT_VERSION))
+    .join(texts().select("input_hash"), "input_hash", "left_anti")
+    .join(asked, "input_hash", "left_anti")
+    .select("input_hash", "model", "prompt_version")
+)
+n_wrong = wrong.count()
+print(f"carried answers matching no Silver text: {n_wrong:,}")
+if MODE == "label" and n_wrong:
+    wrong.createOrReplaceTempView("_wrong")
+    spark.sql(
+        f"""MERGE INTO {LABELS} t USING _wrong s
+            ON t.input_hash = s.input_hash AND t.model = s.model AND t.prompt_version = s.prompt_version
+            WHEN MATCHED THEN DELETE"""
+    )
+    print(f"deleted {n_wrong:,}")
 
 # COMMAND ----------
 

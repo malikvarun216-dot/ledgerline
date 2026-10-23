@@ -3013,3 +3013,35 @@ no inline regex flags in Spark SQL without a check on real data (constraints row
 
 **Verified (2026-10-22, third run):** A printed 40,950 texts / 35,616 distinct (= pandas); the blank-text
 and count asserts passed; B–H ran with 0 errors. The incident is closed.
+
+## [2026-10-24] — 101 AI answers carried from the S19b experiment matched no review in production: the same words had different bytes, because Spark rewrites a line break inside a CSV field to match the file's own line endings (Session 22)
+
+**In plain words:** the production labelling step reused Session 19b's 1,500 AI answers, keyed by
+the SHA-256 of each review's text. 101 of them matched no text in `silver.review`. The words were the
+same; the bytes were not. S19b had read the raw Olist file, where every line ends in `\r\n`; Spark's
+CSV reader (with `multiLine`) turned a line break *inside* a quoted message into `\n`. Our nightly
+file ends its lines in `\n`, so the same reader kept the message's `\r\n`. Different bytes, different
+hash, no match.
+
+**What happened, in numbers:** plan run — 35,616 distinct texts in Silver, the same count as S19b, so
+it looked identical. First labelling run (batch 1): 1,500 carried, 5,000 asked in 172.4 s, 0 errors, 2
+bad answers; verify: "answers whose text is no longer in Silver: **101**". Locally, with pandas:
+**2,678** of the 35,616 distinct texts hold an internal `\r\n`; rewriting it to `\n` and ordering by
+the resulting hash, S19b's first 1,500 contain **exactly 101** such texts — the hypothesis predicts
+the number to the row.
+
+**Why it was invisible:** the distinct count is identical on both sides (each text maps to exactly one
+text on the other side), and "same count" was read as "same texts". The carry step copied answers by
+key without checking the key exists here. Only the orphan count in the verify cell showed it.
+
+**Response:** contained (no Gold built from it; the bridge had not run). Fixed forward in
+`databricks/ai/label_reviews`: the carry now copies only answers whose hash is a Silver text; a cell
+deletes the 101 wrongly carried rows (pinned answers whose hash is neither a Silver text nor ever asked
+in production) — deleted rather than kept, because each is an answer to a string production does not
+hold and would fail Gold's join-back test forever; time travel keeps them; their texts are asked
+again under the right hash (101 calls, $0).
+
+**Prevention rule:** a hash is a promise about bytes, not words. Before reusing anything keyed by a
+content hash from another source, check the keys exist here (`left_semi` against the live texts) and
+count the misses; two sources of "the same" text are compared by key overlap, never by count. And
+Gold's `review_labels_join_back` test fails a build if a pinned label matches no review.

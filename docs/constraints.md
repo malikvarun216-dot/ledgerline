@@ -65,6 +65,7 @@ they were found within each section.
 | **A DataFrame fed to a batch function by hand is re-run at every action** — one defined over a table the batch writes changes after the batch's first write | Materialise hand-made inputs first (`createDataFrame(df.collect(), df.schema)` or a fixed table version). Drill 2 C counted 0 breaks until it did |
 | **A streaming row is judged late against the previous micro-batch's watermark**: the progress report for batch k shows *newest event time through batch k−2 − delay* (S11: batch 2 ran under batch 0's newest − 1 h) | Predict lateness against that, not the newest data. On a replay with months-wide batches nothing is late whatever the delay — size watermarks from live disorder, never from a replay |
 | **Chained stateful operators work on serverless `AvailableNow`**: `dropDuplicatesWithinWatermark` feeding a stream-stream left outer join with watermarks on both sides | Verified S11 (`windowed_streaming` part B), no error, = the batch answer |
+| **Spark's CSV reader (`multiLine`) rewrites a line break INSIDE a quoted field to match the file's own line endings**: from a file whose lines end in CRLF an embedded CRLF comes back as LF; from an LF file it stays CRLF. Same words, different bytes | S22: 2,678 of 35,616 distinct review texts differ between the raw Olist file (CRLF, read by S19b) and our landed dump (LF); 101 carried AI answers matched nothing (incidents.md 2026-10-24). Anything keyed by a text hash is reused only after a key-overlap check |
 
 ## Databricks — Free Edition, serverless, jobs, alerts
 
