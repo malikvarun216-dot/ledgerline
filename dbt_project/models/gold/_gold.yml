@@ -323,8 +323,14 @@ models:
       - name: customer_state
         data_type: varchar
         config: {meta: {pii_class: public}}
-        description: Where the person lived when they ordered (point in time). The row policy's column.
-        data_tests: [not_null]
+        description: >
+          Where the person lived when they ordered (point in time). The row policy's column. NULL for
+          149 orders whose person the generator deleted before their first dump night, so no customer
+          version exists (decisions.md S15: 154 orders in all). Readers mapped to '*' see them.
+        data_tests:
+          - not_null:
+              config:
+                severity: warn   # 149 known; more would mean a new gap
       - {name: seller_count, data_type: number}
       - {name: items, data_type: number}
       - {name: order_status, data_type: varchar, config: {meta: {pii_class: public}}}

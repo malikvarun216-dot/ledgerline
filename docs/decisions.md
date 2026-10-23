@@ -4270,3 +4270,35 @@ Measured on the real file before choosing (99,224 rows):
   source's real key.
 - Trade-off, accepted: a key of two columns touches shared Silver code that four dimensions use; their
   golden counts must come out unchanged, which is the check.
+
+## Review text is redacted in Silver: anything shaped like an email, a phone or an ID number becomes `[redacted]`; the older RAW rows are rewritten in place (2026-10-24, Session 22, the human's choice)
+
+**In plain words:** the first Gold build failed its own guard: 7 review titles held runs of 8 to 14
+digits. Three are order numbers ("Pedido 12-…"); four are bare numbers we cannot identify — 11 digits is
+exactly a Brazilian CPF (tax ID) or a mobile number with area code. A number nobody can identify is
+treated as personal. Silver now writes such text as `[redacted]`, so neither Databricks' cleaned layer
+nor Snowflake holds it; Bronze keeps the file as delivered, as for every source.
+
+- Chosen: **a `free_text` type in Silver's dims typing** — `regexp_replace` with an email shape or
+  `[0-9]{4,5}-?[0-9]{4,}` (8+ digits in a run, or 4-5, a dash, 4+: phones like `98765-4321`). Zip codes
+  (`12345-678`), prices and dates are untouched (checked on examples). Measured with pandas before the
+  run: **7 reviews, all in titles, 0 messages** — so no message hash changes and the 35,616 AI labels
+  stay valid without a single call.
+- Chosen: **re-apply the newest night** with the same `apply_night` (contract, breaker, MERGE, log line)
+  from a plan-first notebook (`databricks/ops/reapply_night`): the merge log would otherwise never apply
+  a night twice, and a rule change in Silver is exactly the case it was not built for. Only the newest
+  night: an older one would take Silver back in time. Expected: 7 updates.
+- Chosen: **RAW rows rewritten, not deleted** (`snowflake/repairs/2026-10-24_redact_review_text.sql`,
+  as the table's owner LOADER): deleting rows breaks `12_check_raw`'s per-file row count and lineage;
+  rewriting the text keeps both. Time Travel (1 day) and Fail-safe (7 days) keep the old values ~8 days.
+- The guard test now checks **RAW as well as Gold**, since RAW keeps every past version of a review.
+- Rejected: **accept and record** (warn on these 7, fail on any new one) — cheapest and honest about
+  the doubt, but Snowflake would keep four numbers nobody can prove are not personal, against S18's
+  promise that Snowflake holds nothing an erasure must delete.
+- Rejected: **keep review text out of Snowflake** (export only a hash) — the strongest minimisation, but
+  the hash would then have to be computed on Databricks and RAW still purged; and the Databricks copy in
+  Silver would keep the numbers.
+- Not covered, on record: **Bronze** (`workspace.bronze.review`) and the **bridge's first export file**
+  (`silver/review/v0000000000-0000000007/`, S3) still hold the 7 original titles. Bronze is the
+  delivered file by design; the bridge file is history RAW was loaded from. Both are carried by name to
+  `### Next` (a retention rule for them, or a rewrite).

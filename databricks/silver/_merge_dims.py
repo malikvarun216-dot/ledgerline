@@ -62,6 +62,13 @@ spark.conf.set("spark.sql.session.timeZone", "UTC")
 #   int        whole number
 #   timestamp  a date, or a date and time, with no zone
 #   string     kept as it is
+#   free_text  a customer's own words: anything shaped like an email, a phone number or an ID number
+#              (a run of 8+ digits, or 4-5 digits, a dash, 4+ digits) becomes [redacted]. Session 22:
+#              7 review titles held 8-14 digit runs — order numbers, and numbers that may be a phone
+#              or a CPF (tax ID); a number nobody can identify is treated as personal (decisions.md S22).
+#              Bronze keeps the text as delivered, as it does for every source.
+REDACT = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]{2,}|[0-9]{4,5}-?[0-9]{4,}"
+REDACTED = "[redacted]"
 DIMS = {
     "customer": {
         "key": "customer_unique_id",
@@ -111,8 +118,8 @@ DIMS = {
         "key": ["review_id", "order_id"],
         "columns": {
             "review_score": "int",
-            "review_comment_title": "string",
-            "review_comment_message": "string",
+            "review_comment_title": "free_text",
+            "review_comment_message": "free_text",
             "review_creation_date": "timestamp",
             "review_answer_timestamp": "timestamp",
             "dim_updated_at": "timestamp",
@@ -120,7 +127,9 @@ DIMS = {
     },
 }
 REQUIRED = {"dim_updated_at"}  # never NULL, besides the key
-SQL_TYPE = {"zip": "STRING", "int": "INT", "timestamp": "TIMESTAMP", "string": "STRING"}
+SQL_TYPE = {
+    "zip": "STRING", "int": "INT", "timestamp": "TIMESTAMP", "string": "STRING", "free_text": "STRING",
+}
 LINEAGE = ["_first_seen_dump_date", "_last_changed_dump_date", "_source_file", "_merged_at"]
 
 
@@ -157,6 +166,8 @@ def typed_value(column, kind):
         return f"try_cast({column} AS INT)"
     if kind == "timestamp":
         return f"try_cast({column} AS TIMESTAMP)"
+    if kind == "free_text":
+        return f"regexp_replace({column}, '{REDACT}', '{REDACTED}')"
     return column
 
 
@@ -497,46 +508,56 @@ def apply_dim(
     if not apply:
         print(f"{dim:9} nothing new")
     for night in apply:
-        raw = bronze_night(dim, night, bronze)
-        stats, problems = check_night(dim, raw)
-        if problems:
-            raise NightRefused(
-                f"{table}: night {night} refused before its MERGE: {problems}. "
-                "Silver still shows the previous night."
-            )
-        typed = typed_night(dim, raw)
-        current, doomed = check_deletes(table, typed, dim, allowed=night in allow_mass_delete)
-        result = merge_night(table, typed, dim)
-        record_rejected(dim, night, raw, stats["held"], rejected)
-        held_total += stats["held"]
-        rows_after = spark.table(table).count()
-
-        # Built inside Spark: the Bronze file time is never pulled into Python and written back,
-        # so the next run compares it with exactly the value it read (plan_nights).
-        def n(value, name):
-            return F.lit(value).cast("bigint").alias(name)
-
-        raw.agg(F.max("_source_modified_at").alias("bronze_modified_at")).select(
-            F.lit(dim).alias("dimension"),
-            F.lit(night).cast("date").alias("dump_date"),
-            "bronze_modified_at",
-            n(stats["rows"], "source_rows"),
-            n(result["inserted"], "inserted"),
-            n(result["updated"], "updated"),
-            n(result["deleted"], "deleted"),
-            n(rows_after, "rows_after"),
-            n(result["version"], "silver_version"),
-            n(stats["padded_zips"], "padded_zips"),
-            F.current_timestamp().alias("applied_at"),
-            n(stats["held"], "held"),
-        ).write.mode("append").saveAsTable(log)
-        share = f"{doomed / current:.2%} of {current:,}" if current else "empty table"
-        print(
-            f"{dim:9} {night}: {stats['rows']:>6,} rows in file -> +{result['inserted']:,} "
-            f"~{result['updated']:,} -{result['deleted']:,} ({share}); {stats['held']:,} held; "
-            f"{rows_after:,} in Silver; {stats['padded_zips']:,} zips padded; version {result['version']}"
+        held_total += apply_night(
+            dim, night, table, allowed=night in allow_mass_delete, bronze=bronze, log=log, rejected=rejected
         )
     return held_total
+
+
+def apply_night(dim, night, table, *, allowed=False, bronze=BRONZE, log=MERGE_LOG, rejected=REJECTED):
+    """One night: contract, breaker, MERGE, held rows, a merge-log line. Returns the rows held.
+
+    Called by apply_dim for each new night, and by ops/reapply_night for a deliberate re-apply of the
+    newest night after Silver's typing changed (Session 22: redaction) — the same guards either way."""
+    raw = bronze_night(dim, night, bronze)
+    stats, problems = check_night(dim, raw)
+    if problems:
+        raise NightRefused(
+            f"{table}: night {night} refused before its MERGE: {problems}. "
+            "Silver still shows the previous night."
+        )
+    typed = typed_night(dim, raw)
+    current, doomed = check_deletes(table, typed, dim, allowed=allowed)
+    result = merge_night(table, typed, dim)
+    record_rejected(dim, night, raw, stats["held"], rejected)
+    rows_after = spark.table(table).count()
+
+    # Built inside Spark: the Bronze file time is never pulled into Python and written back,
+    # so the next run compares it with exactly the value it read (plan_nights).
+    def n(value, name):
+        return F.lit(value).cast("bigint").alias(name)
+
+    raw.agg(F.max("_source_modified_at").alias("bronze_modified_at")).select(
+        F.lit(dim).alias("dimension"),
+        F.lit(night).cast("date").alias("dump_date"),
+        "bronze_modified_at",
+        n(stats["rows"], "source_rows"),
+        n(result["inserted"], "inserted"),
+        n(result["updated"], "updated"),
+        n(result["deleted"], "deleted"),
+        n(rows_after, "rows_after"),
+        n(result["version"], "silver_version"),
+        n(stats["padded_zips"], "padded_zips"),
+        F.current_timestamp().alias("applied_at"),
+        n(stats["held"], "held"),
+    ).write.mode("append").saveAsTable(log)
+    share = f"{doomed / current:.2%} of {current:,}" if current else "empty table"
+    print(
+        f"{dim:9} {night}: {stats['rows']:>6,} rows in file -> +{result['inserted']:,} "
+        f"~{result['updated']:,} -{result['deleted']:,} ({share}); {stats['held']:,} held; "
+        f"{rows_after:,} in Silver; {stats['padded_zips']:,} zips padded; version {result['version']}"
+    )
+    return stats["held"]
 
 # COMMAND ----------
 
