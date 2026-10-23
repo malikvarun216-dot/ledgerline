@@ -4436,3 +4436,67 @@ Not yet written into `coverage.md`: it waits for the human's yes.
   analyst, S24 LangGraph copilot, then Drill 3 — now in `coverage.md` §5b and §6 and decisions.md.
   **`workspace.s19b` is no longer to be dropped** before S22 moves its labels. S21 warehouse and monitor
   dropped (`SHOW WAREHOUSES`: no S21; monitors: account 4.45 / 40 credits used this month, daily 0.15 / 4).
+
+---
+
+## Session 22 — Reviews become a source; Gold answers "does a late delivery cost ratings?"
+Date: 2026-10-24
+
+**In plain words:** customers' reviews (99,224) now flow like every other source — a nightly file on
+S3, Bronze, Silver, the bridge, Snowflake — and Gold has four new tables that answer business
+questions. The headline: an order delivered on or before its promised date averages **4.29 stars**; a
+late one **2.27**, and **62%** of late orders get 1–2 stars against **9%**. Every distinct review text
+(35,616) has an AI sentiment and topic. Two findings changed the build: Spark rewrites line breaks
+inside CSV fields to match the file's line endings (101 reused AI answers matched nothing), and 7 review
+titles held numbers that might be phone or tax IDs — now redacted in Silver and in RAW.
+
+### Built
+- Generator: `review` as a fifth nightly dump, key `(review_id, order_id)`, no file before the first
+  review; date attributes pinned (`DimensionSpec.dates`). 6 new tests (`tests/test_dim_dumps.py`).
+- Bronze: `csv_options` per source (review: `multiLine`, `escape '"'`). Silver: keys of more than one
+  column; `free_text` type that redacts email / phone / ID shapes; `apply_night` split out;
+  `databricks/ops/reapply_night` (plan first).
+- `databricks/ai/label_reviews` — production labelling (`silver.review_ai_calls`, `silver.review_labels`).
+- Bridge + dbt: `review`, `review_labels` in `TABLES` / `silver_tables()`; `stg_review`,
+  `stg_review_labels`; Gold `fct_reviews` (incremental), `review_labels`, `delivery_promise`,
+  `late_vs_rating`, `seller_scorecard`, `complaint_trends`; macro `lateness`; tests `marts_tie_out`,
+  `review_labels_join_back`, `review_text_has_no_contact_data` (Gold + RAW).
+- `snowflake/repairs/2026-10-24_redact_review_text.sql`. Decisions ×2, incident ×1, constraints +5.
+
+### Verified
+- **Landing:** 7 new files; the 37 landed files byte-identical (also proven locally, old vs new generator).
+- **Bronze:** review per night 325 → 99,224 = pandas; re-run wrote nothing. Spark's default CSV options
+  on the same files: **354,303 rows vs 337,468** (16,835 fragments), night 8 dated 95,312 vs 99,224.
+- **Silver:** 7 nights = pandas golden (updates 11/94/358/569/630/754 = answers); 99,224 rows = keys;
+  feed = log; the four old dimensions' 32 golden rows unchanged.
+- **AI labels:** 35,616 distinct texts (= S19b); batch 1 5,000 calls 172.4 s, batch 2 29,217 calls
+  397 s, 0 errors, **15 unreadable (0.04%)**; 101 wrongly carried rows found and deleted (incident).
+- **Bridge → RAW:** review 101,640 change rows, labels 35,818; Snowpipe in ~2 s; `12_check_raw` empty.
+- **Gold = pandas answer key** on every number: 96,476 delivered orders, 6,535 late, avg 2.2709 vs
+  4.2901, 1–2 star share 62.39% vs 9.27%, 4,967 rated before arrival. By bucket: early 8+ days 4.32 →
+  late 8+ days 1.70 (79% low). Scorecard: 2,375 rated seller-months, 281 at risk, 609 watch; 2,588
+  multi-seller reviews credited to nobody. `review_labels_join_back` passes (platforms hash alike).
+- **Redaction:** plan 7 → apply `+0 ~7 -0` (v8), exported 7 updates; RAW repair rewrote **8 rows** (one
+  review had two versions), after 0; `fct_reviews` merged 7; guard passes on Gold and RAW.
+- **Readers:** ANALYST sees 99,224 reviews, every text `***`; ANALYST_SP sees 1 state (SP), 40,434 orders.
+- `ruff` + `pytest` (208) green; dbt: 22 pass + 1 warn (149 orders with no person — S15's known 154).
+
+### Not verified / not done
+- `label_reviews` is not a task of the nightly `ledgerline-silver` job yet (run by hand twice).
+- Bronze and the first bridge file still hold the 7 original titles (decisions.md S22).
+
+### Learning check
+**Skipped by choice** ("skip test", 2026-10-24). The five planned questions are in the bank as
+`parked` (B121–B125, learning.md).
+
+### Next
+**S23 — Power BI on Gold as the analyst** (B?: sign-in method first), boards from `delivery_promise`,
+`late_vs_rating` (divide sums, never average `avg_score`), `seller_scorecard`, `complaint_trends`.
+**Carried, by name:**
+- Add `databricks/ai/label_reviews` (mode `label`) as a task after `merge_dims` in `ledgerline-silver`.
+- The 7 original review titles in `workspace.bronze.review` and `s3://…bridge…/silver/review/v0000000000-0000000007/`:
+  a retention rule or a rewrite.
+- `workspace.s19b` can now be dropped (its labels are in production; the 101 misses explained).
+- Everything S21 carried (S19c resume after Drill 3; `up -d` before Drill 3; drop `workspace.s16`,
+  `LEDGERLINE.S21` / `workspace.s21`; ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild
+  baseline; ~2026-11-05 drop `workspace.s12`; **Snowflake trial ends ~2026-11-10**).

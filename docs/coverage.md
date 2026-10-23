@@ -169,8 +169,8 @@ question a marketplace asks, from data in to a reader.
 
 | Topic | Weight | Status |
 |---|---|---|
-| `order_reviews` as a production source (Bronze, Silver, bridge, Gold fact) | ★★ | B S22 |
-| Gold marts: `delivery_promise`, `seller_scorecard` (rules), `late_vs_rating` (cohorts); AI review labels in the production path | ★★★ | B S22 |
+| `order_reviews` as a production source (Bronze, Silver, bridge, Gold fact) | ★★ | ✓ S22 |
+| Gold marts: `delivery_promise`, `seller_scorecard` (rules), `late_vs_rating` (cohorts); AI review labels in the production path | ★★★ | ✓ S22 (labels run by hand; nightly task carried) |
 | BI tool on Snowflake Gold — Power BI Desktop as the analyst role (promise accuracy, seller scorecard, rating cohorts, complaint trends); masks and row policy inside the report | ★★★ | B? S23 — sign-in method verified first |
 | Analyst copilot: LangGraph agent, SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 answer-key questions, beside Cortex Analyst | ★★★ | B S24 |
 | Delivery-days model (regression) beside S12b's late yes/no | ★★ | B after the trial (Databricks) |
@@ -200,7 +200,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S19c** (added 2026-10-21; built 2026-10-22, **live run parked → after Drill 3**) | **Self-healing triage agent, measured** (decisions.md): Airflow `on_failure_callback` → evidence bundle; Claude with read-only tools classifies runbook / code change / unknown; runbook = re-run an idempotent task, ≤ 2 tries, an action-receipts table so a restarted agent never repeats a repair; code change = a draft PR through slim CI, human merges; data verified by the existing checks before an incident closes. Spend capped and read. Before Drill 3, which is its test set | autonomous code fixes; agent memory across incidents |
 | S20 — **skipped** (2026-10-22, the human's call) | nothing built; all four B? rows became theory | sharing on both platforms; Lakehouse Federation; UniForm read by Snowflake; Iceberg tables on S3 |
 | **S21** ✓ (2026-10-22 → 24) | performance and cost on both: pruning, clustering keys, Query Profile, **the three caches, spilling, multi-cluster, liquid clustering on a large sample, Spark plans, system tables, `ACCOUNT_USAGE`** | search optimization; Spark UI; Photon |
-| **S22** (added 2026-10-24) | **reviews as a source** (Bronze, Silver, bridge, Gold); marts `delivery_promise`, `seller_scorecard`, `late_vs_rating`; AI labels into the production path | — |
+| **S22** ✓ (2026-10-24) | **reviews as a source** (Bronze, Silver, bridge, Gold); marts `delivery_promise`, `seller_scorecard`, `late_vs_rating`; AI labels into the production path | — |
 | **S23** (added 2026-10-24) | **Power BI on Gold as the analyst role** (B?: sign-in first): promise accuracy, seller scorecard, rating cohorts, complaint trends | — |
 | **S24** (added 2026-10-24) | **analyst copilot, LangGraph**: SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 questions, beside Cortex Analyst | — |
 | **Drill 3** | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) | — |
