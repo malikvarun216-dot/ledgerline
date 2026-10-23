@@ -4378,3 +4378,61 @@ second cluster was allowed to start. Every number comes from the Query Profile r
   still 48.0 seven minutes later. Its effect and credits are read by `s21_performance.py A2`, which
   then suspends it — **it spends serverless credits until then**.
 - `14_s21_usage.sql` (needs ACCOUNT_USAGE to catch up, ~3 h); the Databricks notebook.
+
+### Added 2026-10-24 — A2 and the Databricks half
+- **A2, 3/3**: automatic clustering had not started 52 min after `CLUSTER BY`; two days later depth
+  48.0 → 4.0 (48 → 43 partitions) and one ship date read **3 of 43** partitions (was 48 of 48).
+  `SUSPEND RECLUSTER` done (`automatic_clustering OFF`). Its credits: not in
+  `INFORMATION_SCHEMA.AUTOMATIC_CLUSTERING_HISTORY` (0 rows) — to read from `ACCOUNT_USAGE`.
+- **Databricks notebook `s21_spark_performance`, 12/13** (run by the human 2026-10-22):
+  - Z: all 7 probed system tables readable by the owner on Free Edition (coverage B? → ✓).
+  - A: four layouts of 29,999,795 rows, same answer 476,268,129.98; files 34 (shuffled) / **2,526 ×
+    0.27 MB** (partitioned by date) / 2 (Z-order) / 15 (liquid). The miss: predicted *more than* 2,526
+    files, got exactly 2,526 — one file per date. Files read per layout: not yet (the Query History API
+    returned nothing; `system.query.history` was > 40 min behind when queried).
+  - B: 5/5 — broadcast of 25-row `nation`, `ShuffledHashJoin` on `orders`, hint flips it,
+    `PartitionFilters`, `AdaptiveSparkPlan`; every operator Photon; `spark.conf.get` refused.
+- **Correction (same day):** the A2 line above says automatic clustering ran "two days later".
+  `ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY` shows it ran in the **21:00–22:00 UTC hour of 2026-10-21**,
+  15–75 min after the last check: **0.022 credits**, 1.57 GB / 58,708,100 rows rewritten. "Two days" was
+  only when we next looked.
+- **Files read per layout, on the SQL warehouse: 5/5** (`experiments/s21_skipping_on_warehouse.py`, as
+  `ledgerline-ci`, after `GRANT USE SCHEMA, SELECT ON SCHEMA workspace.s21`): shuffled 34/34 (140.3 MB),
+  partitioned 1/2,526 (0.2 MB), Z-ordered 1/2 (65.3 MB), liquid 1/15 (6.9 MB). Notebook queries are not
+  in `system.query.history` with their text: the only match for the marker was the search itself.
+- **`ACCOUNT_USAGE` (14_s21_usage.sql), first read:** its "last 2 days" window, run on 2026-10-23 UTC,
+  missed the main run (2026-10-21 20:15–20:45 UTC); window now pinned to 2026-10-21. Seen anyway:
+  `LEDGERLINE_S21_WH` 0.023 credits (A2 only), `ACCESS_HISTORY` reads of GOLD — all by
+  `LEDGERLINE_SVC` as TRANSFORMER in the top 30 (`FCT_ORDERS.ORDER_ID` 146 reads).
+- **`ACCOUNT_USAGE`, second read (window pinned to 2026-10-21):** `LEDGERLINE_S21_WH` **0.333** credits
+  (compute 0.326 + cloud services 0.007), automatic clustering **0.022** (serverless) — S21 ≈ **0.36
+  credits** of the trial's $400, well under the S21 monitor's 6. Dearest query: the SMALL re-sort,
+  **0.0361** credits, vs < 0.0099 for the same sort on XSMALL — the 60-second minimum of newly started
+  compute, so the S21 row "about the same credits" was wrong for a 16-second query (constraints.md
+  corrected). `ACCESS_HISTORY` lineage: all 5 S21 writes trace to `SNOWFLAKE_SAMPLE_DATA.TPCH_SF*.LINEITEM`
+  (a share is recorded; the first empty result was the window).
+
+### Learning check
+**Skipped by choice** ("skip test", 2026-10-24). The five planned questions are in the bank as
+`parked` (B116–B120, learning.md).
+
+### Next
+**S22 — reviews lane + Gold marts**, if the plan proposed on 2026-10-24 is confirmed (reviews as a
+source; `delivery_promise`, `seller_scorecard`, `late_vs_rating`; then S23 Power BI on Gold as the
+analyst role, S24 the LangGraph analyst copilot, Drill 3 — all before the trial ends ~2026-11-10).
+Not yet written into `coverage.md`: it waits for the human's yes.
+
+**Carried, by name:**
+- **S21 clean-up:** drop warehouse `LEDGERLINE_S21_WH` and monitor `LEDGERLINE_S21_RM` (decided: dropped
+  at the end of S21 — the block at the end of `05_scratch_schemas.sql`, run by the human); schema
+  `LEDGERLINE.S21` and `workspace.s21` once nothing needs the copies, which also removes
+  `ledgerline-ci`'s grant on `workspace.s21`.
+- Everything S19c's `### Next` carried, unchanged (S19c resume after Drill 3; `up -d` before Drill 3;
+  Cortex Analyst's spend; drop `workspace.s19b` / `workspace.s16`; leak prevention in a scratch database;
+  governance under CI; ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild baseline;
+  ~2026-11-05 drop `workspace.s12`; Git token ~2026-12-25; `ledgerline-ci` secret ~2027-01-04;
+  **Snowflake trial ends ~2026-11-10**).
+- **Plan confirmed by the human (2026-10-24):** S22 reviews lane + marts, S23 Power BI on Gold as the
+  analyst, S24 LangGraph copilot, then Drill 3 — now in `coverage.md` §5b and §6 and decisions.md.
+  **`workspace.s19b` is no longer to be dropped** before S22 moves its labels. S21 warehouse and monitor
+  dropped (`SHOW WAREHOUSES`: no S21; monitors: account 4.45 / 40 credits used this month, daily 0.15 / 4).

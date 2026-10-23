@@ -59,9 +59,9 @@ session · **X** skip (no honest use here).
 | Asset Bundles deployed from CI | ★★★ | ✓ S12 (`databricks.yml` job `ledgerline-pii`, deployed by GitHub Actions after lint + tests as `ledgerline-ci`, run as `ledgerline-jobs`; first run failed — the runner could not read the deployer's files — fixed by bundle permissions) |
 | ML: feature table with point-in-time joins, MLflow experiment, model in UC (no serving) | ★★ (point-in-time ★★★) | ✓ S12b (`databricks/ml/late_delivery`: `TIMESERIES` feature table; hand as-of join = Feature Engineering's on 96,470 rows; leaky join test AUC 0.731 vs 0.547 in use vs 0.598 honest; MLflow 3.12 runs; `workspace.ml.late_delivery@champion` scored by `score_batch` in a fresh session = training on 52,777 of 52,777) |
 | `SHALLOW` / `DEEP CLONE` (vs Snowflake's zero-copy clone) | ★★ | ✓ S16 (`experiments/delta_clone`: deep clone copies files + carries constraints, own history; shallow copies 0 and reads the source's files; writes stay in the clone; clone of a past version; incremental re-clone copies only new files; **VACUUM on a UC managed source keeps files a shallow clone uses** — control twin lost its file) |
-| Liquid clustering vs partitioning vs Z-order; data skipping | ★★★ | B S21 — on a large sample table, never Olist (Session 0: Olist is too small, "that session would be theater") |
-| Spark performance: broadcast vs shuffle joins, skew, AQE, small files, reading the query profile | ★★★ | B S21 (mostly reading plans — serverless hides most settings) |
-| System tables (billing, audit) | ★★ | B? S21 |
+| Liquid clustering vs partitioning vs Z-order; data skipping | ★★★ | ✓ S21 on `samples.tpch.lineitem` (29,999,795 rows), not Olist: one date reads 34/34 files shuffled, 1/2,526 partitioned (0.27 MB files), 1/2 Z-ordered, 1/15 liquid (6.9 MB read) — on the SQL warehouse |
+| Spark performance: broadcast vs shuffle joins, skew, AQE, small files, reading the query profile | ★★★ | ✓ S21 (plans: broadcast of 25-row `nation`, `ShuffledHashJoin` on 7.5 M `orders`, hint flips it, `PartitionFilters`, `AdaptiveSparkPlan`; skew 50.6 % on one flag; small files 2,526 × 0.27 MB when partitioned by date) |
+| System tables (billing, audit) | ★★ | ✓ S21 — B? verified: all 7 probed readable by the owner on Free Edition (`billing.usage` 2,988 rows, `access.audit` 203,868, `query.history` 19,564); the service principal sees only `system.ai` |
 | Delta Sharing; Lakehouse Federation | ★★ | T ✓ S20 — session skipped by choice 2026-10-22 (not refused, never probed); theory in learning C11 |
 | UniForm / Iceberg read by Snowflake | ★★ | T ✓ S20 — session skipped by choice 2026-10-22 (not refused, never probed); theory in learning C11; was the most doubtful on Free Edition (tables live in Databricks-managed storage) |
 | Genie (AI/BI Genie space: questions in plain words → SQL) | ★★ | **✓ S19b** — Genie space on 5 Silver tables: bare, Q1 = 99,441 (wrong, trap); with 3 sentences of instructions, **7 of 7** numbers right (Q7: 4-table CTE, 5.61%); prose invented "$" twice (progress.md S19b). Earlier: verified S18: a Genie Agent on `workspace.silver.customer` answered "customers per state" on Free Edition; table = Snowflake (SP 40,143, RJ 12,323), but its prose said 96,696 total (truth 95,696, cross-checked in Silver: the model summed the groups itself; its SQL had no total). (S17, at the human's request): verify on Free Edition first; same 10 questions as Cortex Analyst, graded against an answer key. If refused: T with the finding |
@@ -84,14 +84,14 @@ session · **X** skip (no honest use here).
 | Masking policies, row access policies, tag-based masking | ★★ | ✓ S18 (`09_governance.sql`: a governor role; tag `PII_CLASS` on the GOLD schema masks every text column by default, dbt tags 39 columns public; row policy by mapping table: SP analyst 40,143 of 95,696; survives dbt rebuilds, guard test `gold_governed`; one build incident: an exempt mask is needed under a row policy) |
 | Streams (standard vs append-only), Tasks (DAGs, serverless), Dynamic Tables vs materialized views | ★★★ | ✓ S19 — `s19_streams_tasks` 29/29: append-only stream + task MERGE (dedup, `seq` guard, tombstones) rebuilt current stock from 158,446 events = GOLD (34,348, 0 different); a read / rollback does not consume; empty run SKIPPED; replay changed nothing; child task 4 runs; standard stream 20 rows vs append-only 0; a serverless task. `s19_dynamic_mv` 14/14: MV refuses `QUALIFY`, joins, `MAX_BY`; DT INCREMENTAL, stale until refresh (11 s / 52 s at 1-minute lag), = the task's result. Every task and the DT suspended |
 | Snowpark, UDFs, stored procedures | ★★ | ✓ S19 (small) — `s19_snowpark` 7/7: Python UDF = `LPAD` on 96,358 rows (built-in preferred); Snowpark Python procedure `SUSPEND_ALL_TASKS` suspended a started root + child in one CALL |
-| Micro-partitions, pruning, clustering keys | ★★★ | **pruning ✓ S21** on TPC-H SF10, not TPC-DS (60 M rows was enough; decisions.md S21) (1 of 50 partitions sorted vs 48 of 48 shuffled; depth 2.0 vs 48.0); **clustering key: B S21** — automatic clustering declared, its effect and credits read in part A2 (pending) |
+| Micro-partitions, pruning, clustering keys | ★★★ | **pruning ✓ S21** on TPC-H SF10, not TPC-DS (60 M rows was enough; decisions.md S21) (1 of 50 partitions sorted vs 48 of 48 shuffled; depth 2.0 vs 48.0); **clustering key ✓ S21** — automatic clustering ran on its own schedule (not within 33 min; in the next hour, 0.022 credits): depth 48 → 4, one day 48/48 → **3/43** partitions; then suspended. Credits read in `ACCOUNT_USAGE` (the live history showed 0 runs) |
 | The three caches (result, warehouse, metadata) | ★★★ | ✓ S21 (metadata with the warehouse suspended; result reuse 0 partitions; disk cache 0 → 100 → 0 % across a suspend) |
 | Query Profile: spilling, exploding joins | ★★★ | ✓ S21 (3.78 GB spill on XSMALL, 0 on SMALL; join 5,016 → 3,144,254 rows; `COUNT(*)` aggregates below the join) |
 | Multi-cluster warehouses: scale up vs scale out | ★★ | ✓ S21 (12 queries: max 1 queued 143.1 s, max 3 started 2 clusters, 0.4 s) |
-| `ACCOUNT_USAGE`, `ACCESS_HISTORY` | ★★ | B S21 |
+| `ACCOUNT_USAGE`, `ACCESS_HISTORY` | ★★ | ✓ S21 (`14_s21_usage.sql` as ACCOUNTADMIN: S21 = 0.333 warehouse credits + 0.022 automatic clustering; per-query attribution (SMALL sort 0.0361 > XSMALL < 0.0099); `ACCESS_HISTORY` column reads of GOLD by role, and lineage of every S21 write back to the shared sample) |
 | Data sharing, Marketplace | ★★ | T ✓ S20 — session skipped by choice 2026-10-22 (not refused, never probed); theory in learning C11; sharing needs a second account |
 | Iceberg tables on our own S3 | ★★ | T ✓ S20 — session skipped by choice 2026-10-22 (not refused, never probed); theory in learning C11 |
-| Search optimization, query acceleration | ★ | T S21 |
+| Search optimization, query acceleration | ★ | T ✓ S21 |
 
 ## 3. dbt, orchestration, CI
 
@@ -114,8 +114,8 @@ session · **X** skip (no honest use here).
 |---|---|---|
 | Classic clusters: sizing, autoscaling, spot instances, job vs all-purpose clusters, pools, policies | ★★★ | T ✓ S10 |
 | Continuous / `ProcessingTime` triggers, latency tuning | ★★★ | T ✓ S11 |
-| Spark UI and most Spark settings (serverless manages them) | ★★★ | T S21 |
-| Photon on vs off (serverless always runs it) | ★★ | T S21 |
+| Spark UI and most Spark settings (serverless manages them) | ★★★ | T ✓ S21 (`spark.conf.get` refused: `CONFIG_NOT_AVAILABLE`) |
+| Photon on vs off (serverless always runs it) | ★★ | T ✓ S21 (every operator in the plan is `Photon…`) |
 | Account console: SCIM, account groups, multiple workspaces | ★★ | T ✓ S12 |
 | Networking: PrivateLink, customer VPC, IP access lists, NAT (the S4 cost lesson) | ★★ | T ✓ S12 |
 | Terraform provider | ★★ | T ✓ S12 |
@@ -162,6 +162,21 @@ session · **X** skip (no honest use here).
   Snowflake — masks and row access (S18).
 - **Theory only:** disaster recovery, multi-region, network isolation.
 
+## 5b. Business questions — BI, ML and agents end to end (added 2026-10-24)
+
+Decided 2026-10-24 (decisions.md, "Business questions decide the last sessions"). Each row answers a
+question a marketplace asks, from data in to a reader.
+
+| Topic | Weight | Status |
+|---|---|---|
+| `order_reviews` as a production source (Bronze, Silver, bridge, Gold fact) | ★★ | B S22 |
+| Gold marts: `delivery_promise`, `seller_scorecard` (rules), `late_vs_rating` (cohorts); AI review labels in the production path | ★★★ | B S22 |
+| BI tool on Snowflake Gold — Power BI Desktop as the analyst role (promise accuracy, seller scorecard, rating cohorts, complaint trends); masks and row policy inside the report | ★★★ | B? S23 — sign-in method verified first |
+| Analyst copilot: LangGraph agent, SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 answer-key questions, beside Cortex Analyst | ★★★ | B S24 |
+| Delivery-days model (regression) beside S12b's late yes/no | ★★ | B after the trial (Databricks) |
+| Hand-labelled evaluation set for the review labels (100–200) | ★★ | B after the trial (Databricks) |
+| ETA scoring endpoint; demand forecast; stock-out board | ★ | optional — built only if time remains, else X with that reason |
+
 ## 6. Session by session — the full plan
 
 Existing plan items (decisions.md since Session 0) and the additions from this
@@ -184,9 +199,12 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S19b** ✓ (added S17; reshaped 2026-10-21; done 2026-10-22) | **AI in data engineering, measured** (decisions.md): an idempotent AI enrichment step on Olist review text (Databricks `ai_classify` / `ai_query` — **verified on Free Edition 2026-10-21**: both answered, Llama 3.3 70B at temperature 0) + a repeatability count + a "where AI falls short" table in our numbers; and, smaller, **the same business questions, two AIs, one answer key:** a semantic view on GOLD + **Cortex Analyst**; a **Genie space** on the same tables (Databricks); each answer graded against trusted SQL (grain traps: `customer_unique_id` vs `customer_id`, units vs orders); both B? — verified first. Before the trial ends | Cortex AI functions; Cortex Agents / Search |
 | **S19c** (added 2026-10-21; built 2026-10-22, **live run parked → after Drill 3**) | **Self-healing triage agent, measured** (decisions.md): Airflow `on_failure_callback` → evidence bundle; Claude with read-only tools classifies runbook / code change / unknown; runbook = re-run an idempotent task, ≤ 2 tries, an action-receipts table so a restarted agent never repeats a repair; code change = a draft PR through slim CI, human merges; data verified by the existing checks before an incident closes. Spend capped and read. Before Drill 3, which is its test set | autonomous code fixes; agent memory across incidents |
 | S20 — **skipped** (2026-10-22, the human's call) | nothing built; all four B? rows became theory | sharing on both platforms; Lakehouse Federation; UniForm read by Snowflake; Iceberg tables on S3 |
-| **S21** | performance and cost on both: pruning, clustering keys, Query Profile, **the three caches, spilling, multi-cluster, liquid clustering on a large sample, Spark plans, system tables, `ACCOUNT_USAGE`** | search optimization; Spark UI; Photon |
+| **S21** ✓ (2026-10-22 → 24) | performance and cost on both: pruning, clustering keys, Query Profile, **the three caches, spilling, multi-cluster, liquid clustering on a large sample, Spark plans, system tables, `ACCOUNT_USAGE`** | search optimization; Spark UI; Photon |
+| **S22** (added 2026-10-24) | **reviews as a source** (Bronze, Silver, bridge, Gold); marts `delivery_promise`, `seller_scorecard`, `late_vs_rating`; AI labels into the production path | — |
+| **S23** (added 2026-10-24) | **Power BI on Gold as the analyst role** (B?: sign-in first): promise accuracy, seller scorecard, rating cohorts, complaint trends | — |
+| **S24** (added 2026-10-24) | **analyst copilot, LangGraph**: SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 questions, beside Cortex Analyst | — |
 | **Drill 3** | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) | — |
-| After the trial | Gold on Databricks via dbt's second target | — |
+| After the trial | Gold on Databricks via dbt's second target; delivery-days model; hand-labelled review eval set; optional ETA endpoint / demand forecast / stock-out board | — |
 
 **Cost of the additions:** about 10–12 hours spread over existing sessions, two
 optional sessions (S12b, S20 — S12b kept on 2026-10-06, so now one), and roughly 10 minutes per theory hook.

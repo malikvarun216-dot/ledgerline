@@ -4166,3 +4166,66 @@ own spending cap, so they cannot trip the project warehouse's daily limit.
   shows pruning, spilling and a sort in seconds on XSMALL. Rejected: **TPC-DS (`TPCDS_SF10TCL`)** —
   10 TB and a star schema of 24 tables, so every lesson here would cost minutes per query and
   credits, for the same mechanics.
+
+## The analyst copilot (planned S24) is built with LangGraph, not a hand-written tool loop (2026-10-24, the human's call)
+
+**In plain words:** the agent that answers analysts' questions in plain English over Gold will be a
+LangGraph graph: a "write SQL" step, a "run it as the analyst role" step, and when the SQL fails, a
+"repair and retry" step, with its state saved between steps. The project's other agent (the S19c
+triage agent) keeps its plain loop.
+
+- Chosen: **LangGraph** — the retry path is a real branch in the work (Snowflake rejects a query →
+  the error goes back to the model → a corrected query, at most N times), and a graph makes that
+  branch, its cap and its state explicit and testable node by node. It also gives this portfolio's
+  agents/LangChain row one honest home.
+- Rejected: **a plain tool loop like `triage/agent.py`** — simpler and already proven here; it would
+  do the job. Rejected because the copilot's retry-on-error path is the part worth showing, and in a
+  loop it lives as an implicit "the model tried again".
+- Rejected: **LangChain's prebuilt SQL agent** — it would hide the exact behaviour we need to grade
+  (which SQL ran, as which role, how many repairs), and its default toolkit can run any statement
+  the connection allows; ours is one read-only tool whose guarantee is the `ANALYST` role.
+- Unchanged by the choice: the SQL tool signs in as `LEDGERLINE_ANALYST` (masks and row policy apply
+  to the agent), and it is scored on execution accuracy against an answer key.
+
+## Business questions decide the last sessions: reviews become a source, Gold gets three marts, Power BI and a LangGraph copilot read it as the analyst — S22–S24, before Drill 3 (2026-10-24, the human's plan)
+
+**In plain words:** until now the project was built pattern by pattern. The last sessions are chosen
+by the questions a marketplace would ask of its data — *are our delivery promises honest, which
+sellers hurt us, does a late delivery cost ratings, why are customers unhappy, can analysts ask Gold
+in plain English safely* — and each is answered end to end: data in, a table that answers it, a report
+or an agent that a reader uses. Everything that reads Snowflake Gold must finish before the trial ends
+(~2026-11-10), so it comes first; Databricks-only work comes after.
+
+- **S22 — reviews lane + Gold marts.** `order_reviews` (99,224 rows) becomes a production source
+  through Bronze, Silver, the bridge and a Gold fact; dbt marts **`delivery_promise`** (promised vs
+  delivered, by state and seller), **`seller_scorecard`** (rules, no model), **`late_vs_rating`**
+  (cohorts of late vs on-time orders and their scores); the S19b AI labels move from scratch into the
+  production path for complaint trends.
+- **S23 — Power BI Desktop on Gold, signed in as the analyst role** (**B?**: how Power BI signs in to
+  Snowflake is verified first — key pair, or a password user, which now needs MFA). Boards: promise
+  accuracy, seller scorecard, rating cohorts, complaint trends. Masks and the row policy apply inside
+  the report, because it reads as `LEDGERLINE_ANALYST` / `_SP`.
+- **S24 — the analyst copilot**, LangGraph (decided above), its one SQL tool signed in as
+  `LEDGERLINE_ANALYST`, scored on execution accuracy against S19b's answer key grown to ~20 questions,
+  beside Cortex Analyst on the same key.
+- **Drill 3** after S24, still inside the trial.
+- **After the trial (Databricks only):** a delivery-*days* model beside S12b's late yes/no; a
+  hand-labelled evaluation set (100–200 reviews) for the S19b labels. Optional, if time: an ETA
+  scoring endpoint, a demand forecast, a stock-out board.
+
+- **Reverses one rejection** in "S19b becomes 'AI in data engineering, measured'" (2026-10-21):
+  *"Bring `order_reviews` in as a fourth production source … the experiment needs a table, not a
+  lane."* That was right for one experiment. Now two business questions (ratings after a late
+  delivery; complaint trends) and a report read reviews every night, which is what a lane is for. So
+  `workspace.s19b` (the labels) is **not** dropped until S22 has moved what it needs.
+- Rejected: **load the reviews CSV straight into Snowflake** as reference data. One session cheaper,
+  but Gold would hold a table with no Bronze, no Silver, no replay and no lineage — the one table the
+  project could not rebuild or explain.
+- Rejected: **Looker instead of Power BI.** Looker needs a paid instance; Looker Studio has no native
+  Snowflake connector. Power BI Desktop is free on Windows and connects to Snowflake directly.
+- Rejected: **BI and the copilot after Drill 3.** Drill 3 attacks Gold; doing it last means its
+  attacks also hit the marts and the reports, and it has no Snowflake dependency the others lack. But
+  the reverse order would risk the trial ending before the reports exist.
+- Trade-off, accepted: four sessions in ~17 days (S22, S23, S24, Drill 3), against a pace of about one
+  session a day. The S19c triage resume and `docs/data_journey.md` stay after Drill 3, and
+  data_journey gains stops for BI and the copilot.
