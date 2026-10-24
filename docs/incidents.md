@@ -3068,3 +3068,49 @@ failed, the `deploy` job was skipped on both pushes.
 - **Prevention rule:** **the commit message is handed over only with a `ruff` + `pytest` run whose
   output is newer than the last file edit** — a green run before the last edit proves nothing about
   the commit. Any new notebook is checked by `tests/test_notebooks.py` before it is reported done.
+
+## [2026-10-24] — Power BI signed in to Snowflake as the human ACCOUNTADMIN with a password alone, and our docs had claimed that user had MFA (Session 23) — OPEN
+
+**In plain words:** Power BI's sign-in window opened on its "username + password" tab, and the human's
+own admin login (`ZUBA11`) was typed in — the instructions named the right tab (Key pair) two messages
+earlier, not at the moment the window appeared. Snowflake accepted the password **with no second
+factor** and Power BI saved it. The Navigator then listed `USER$ZUBA11`, `LEDGERLINE_CI` and the
+learning database — objects the reader user cannot see — which is how it was caught. **Nothing was
+loaded**: no clear-text Gold reached a report file.
+
+- **Evidence** (`INFORMATION_SCHEMA.LOGIN_HISTORY`, as the human): 10:53:15 UTC `ZUBA11`,
+  `PASSWORD`, second factor `null`, `GO_DRIVER` (Power BI's ADBC driver), success. The human's own
+  Snowsight login at 10:58:47: also `PASSWORD`, second factor `null`. `DESC USER ZUBA11`:
+  **`HAS_MFA = false`**, `DEFAULT_MFA_METHOD = null`, `EXT_AUTHN_DUO = false`. `SHOW AUTHENTICATION
+  POLICIES ON ACCOUNT`: only Snowflake's `BUILT-IN` policy (set on `SYSTEM`).
+- **What it would have done:** the `Role` box said `LEDGERLINE_ANALYST`, but `ZUBA11` has
+  `DEFAULT_SECONDARY_ROLES = ALL` (constraints.md, S14), so every role the user holds — ACCOUNTADMIN,
+  TRANSFORMER — was active too. Import mode would have copied clear cities and every state into the
+  `.pbix`: the S18 leak, in a file on disk.
+- **Why nothing caught it.** Three layers each assumed another held. (1) CLAUDE.md records `ZUBA11` as
+  "ACCOUNTADMIN, MFA" since S13, and decisions.md S13 / S23 argue from "a password user now meets
+  MFA" — **never verified**; `HAS_MFA` was first read today. (2) Power BI keeps every credential kind
+  for a server behind one window, defaulting to the one we must not use. (3) Nothing watches logins:
+  the resource monitors see credits, `job_watch` sees jobs, and a password sign-in from a new client
+  costs nothing.
+- **Contain:** the saved credential cleared in Power BI (Data source settings → Clear Permissions);
+  reconnect with the Key pair tab as `LEDGERLINE_BI_SVC`.
+- **Prevention (proposed, the human decides):**
+  1. **The human admin enrolls in MFA** (Snowsight → profile → Multi-factor authentication), then
+     **an authentication policy on `ZUBA11`**: `CLIENT_TYPES = ('SNOWFLAKE_UI')`,
+     `MFA_ENROLLMENT = REQUIRED` — the admin signs in only through the browser, with MFA, and any
+     desktop tool or driver offered that password is refused. Probed first on a scratch person user
+     (incidents.md 2026-10-21 rule: no governance change without a scratch probe), because a wrong
+     policy on the only admin is a lockout.
+  2. **A connection is proven by what it can see before anything is loaded**: the Navigator must list
+     only `LEDGERLINE` → `GOLD` (and Snowflake's shared databases). Any other database = wrong
+     identity: cancel, clear, reconnect.
+  3. **A security property in CLAUDE.md is a claim until a query shows it.** "MFA" is struck there
+     until `HAS_MFA = true`.
+
+**Update (2026-10-24, same session).** Contained: the saved password cleared, Power BI reconnected with
+the KeyPair tab; the Navigator then listed `LEDGERLINE`, `SNOWFLAKE`, `SNOWFLAKE_LEARNING_DB`,
+`SNOWFLAKE_SAMPLE_DATA` — the reader's view, checked against `SHOW DATABASES` as `LEDGERLINE_BI_SVC`.
+Preventions 2 and 3 are in force (the Navigator check is in constraints.md; CLAUDE.md corrected).
+**Prevention 1 is parked by the human** (decisions.md 2026-10-24, "The admin-login prevention is
+parked"); the incident stays OPEN until it is decided before Drill 3.

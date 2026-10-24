@@ -4302,3 +4302,82 @@ nor Snowflake holds it; Bronze keeps the file as delivered, as for every source.
   (`silver/review/v0000000000-0000000007/`, S3) still hold the 7 original titles. Bronze is the
   delivered file by design; the bridge file is history RAW was loaded from. Both are carried by name to
   `### Next` (a retention rule for them, or a rewrite).
+
+## Power BI signs in to Snowflake as a service user of its own, by key pair, holding only the two reader roles, on a warehouse of its own (Session 23)
+
+**In plain words:** the report must see Gold exactly as an analyst does — `***` where text is masked,
+one state for the regional analyst. Snowflake applies masks and row policies to *the identity that
+connects*, not to whoever looks at the report later. So the report gets an identity that cannot be
+anything but a reader: a new user `LEDGERLINE_BI_SVC` that holds `LEDGERLINE_ANALYST` and
+`LEDGERLINE_ANALYST_SP` and nothing else, signs in with a key pair, and runs on `LEDGERLINE_BI_WH`.
+
+- **B? answered on paper first** (Microsoft Learn, Power Query Snowflake connector, updated
+  2026-10-09): authentication kinds are **KeyPair, Microsoft Account, Snowflake (user + password)**;
+  key pair runs on the new ADBC driver ("implementation 2.0"), encrypted or unencrypted key; the
+  password kind is marked for deprecation. Proven on the platform only when Power BI shows Gold.
+- Rejected: **reuse `LEDGERLINE_SVC`** (its key already works). Power BI's *Role* box is free text and
+  the report gets every role the user holds — that user holds TRANSFORMER, which reads clear text and
+  every state. A typo would bypass all of S18's governance without an error.
+- Rejected: **a password user (`TYPE = PERSON`)** — Snowflake is blocking single-factor passwords and
+  would require MFA, which a scheduled refresh cannot answer; Microsoft is deprecating the kind.
+- Rejected: **a programmatic access token (PAT) typed as the password** — third-party guides say it
+  works, Microsoft does not list it, and a PAT needs a network policy or an authentication policy
+  exception. Key pair is the documented path with nothing extra to open.
+- Rejected: **Microsoft Account (Entra ID SSO)** — the only option where the policy follows *each
+  viewer* (the right answer for a real team), but it needs an Entra tenant wired to Snowflake as
+  external OAuth and works only in DirectQuery. This project has no tenant. Recorded as the
+  production answer; taught, not built.
+- Rejected: **share `LEDGERLINE_WH`** — a refresh fires many queries at once and would queue behind
+  dbt on one XSMALL cluster (S21), and BI credits could not be told from dbt's. Own warehouse,
+  XSMALL, 60 s auto-suspend, 5-minute statement cap, daily monitor 1 credit.
+- Accepted: **the report's viewers all see what the connection's role sees.** One report per reader
+  role (ANALYST, ANALYST_SP) is how Desktop shows it; per-viewer security would be SSO above.
+
+## The Power BI boards use Import mode; one DirectQuery page is kept as a probe (Session 23)
+
+**In plain words:** Power BI can either copy the data into the report file (*Import*) or leave it in
+Snowflake and send a SQL query every time a visual is drawn (*DirectQuery*). The four boards read
+Gold's marts — summaries of a few thousand rows that change once a night — so they copy them, and the
+report is refreshed after the nightly dbt build. One page stays on DirectQuery, to watch the SQL
+Power BI writes (it appears in Snowflake's query history) and to test it against the answer key.
+
+- **What Import means for governance:** the copy holds what the connecting role saw — `***` and one
+  state for the SP reader — because the masks ran in Snowflake before the rows left. Nobody can
+  unmask a copied `***`. But the copy is frozen until the next refresh: an erasure or a policy
+  change reaches the report only then.
+- Rejected: **DirectQuery for every board** — always current and nothing stored in the file, but
+  every click on a slicer resumes `LEDGERLINE_BI_WH` (60 s minimum each time) and waits on it; for
+  data that changes nightly that is paying for freshness nobody gets.
+- Rejected: **Import of the base facts (`fct_orders`, `fct_reviews`) and modelling in DAX** — the
+  marts already hold the business rules (lateness buckets, the scorecard's thresholds) tested
+  against a pandas answer key in S22; re-deriving them in DAX would make two definitions of "late".
+  The board divides the marts' sums; it never averages an average.
+- Watched: Microsoft lists a known issue in the new ADBC driver — *a query with `count distinct`
+  returns incorrect results*. The DirectQuery page checks one distinct count against Snowflake.
+
+> **Correction (2026-10-24, S23, same day).** The rejection above of "a password user (`TYPE =
+> PERSON`)" says Snowflake "would require MFA". On this account it does not: `ZUBA11` signed in from
+> Power BI with a password alone (`HAS_MFA = false`, only the `BUILT-IN` authentication policy) —
+> incidents.md 2026-10-24. The rejection still stands, for a stronger reason: a password identity can
+> be typed into the tool by anyone who knows it, and a human admin's password reaches every role it
+> holds. S13's line "a password user now meets MFA" was the same unverified assumption.
+
+## The admin-login prevention is parked and the learning role stays on PUBLIC; both are recorded, not fixed (2026-10-24, Session 23, the human's call)
+
+**In plain words:** today showed that the human admin user signs in with a password alone (no MFA)
+and that every role, readers included, inherits a trial role that may create schemas in the learning
+database. The human chose to change neither now: the incident stays open and both facts are written
+down, so the risk is known rather than hidden.
+
+- Parked: **MFA enrollment for `ZUBA11`** and the **browser-only authentication policy**
+  (`CLIENT_TYPES = ('SNOWFLAKE_UI')`, probed first on a scratch user). Carried by name in `### Next`;
+  incidents.md 2026-10-24 stays OPEN. Until then the working rule holds: the admin password is typed
+  only into Snowsight, never into a tool (CLAUDE.md).
+- Kept: **`SNOWFLAKE_LEARNING_ROLE` granted to `PUBLIC`** (trial default). Recorded in constraints.md;
+  it reads nothing of ours (`LEDGERLINE` "does not exist or not authorized"), and anything a reader
+  copied there from Gold would still be `***`.
+- Rejected for now: **MFA alone** — the cheapest real fix (2 minutes, no lockout risk); not chosen
+  today. **Revoke the learning role** — one statement, but it changes a trial default that Snowsight's
+  tutorials may rely on, for a risk that holds no data today.
+- Trade-off, accepted: Drill 3 attacks Gold before the trial ends; a password-only ACCOUNTADMIN is the
+  one identity Drill 3 cannot harden around. Re-decide before Drill 3.

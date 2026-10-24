@@ -171,7 +171,7 @@ question a marketplace asks, from data in to a reader.
 |---|---|---|
 | `order_reviews` as a production source (Bronze, Silver, bridge, Gold fact) | ★★ | ✓ S22 |
 | Gold marts: `delivery_promise`, `seller_scorecard` (rules), `late_vs_rating` (cohorts); AI review labels in the production path | ★★★ | ✓ S22 (labels run by hand; nightly task carried) |
-| BI tool on Snowflake Gold — Power BI Desktop as the analyst role (promise accuracy, seller scorecard, rating cohorts, complaint trends); masks and row policy inside the report | ★★★ | B? S23 — sign-in method verified first |
+| BI tool on Snowflake Gold — Power BI Desktop as the analyst role (promise accuracy, seller scorecard, rating cohorts, complaint trends); masks and row policy inside the report | ★★★ | ✓ S23 (key pair verified; Import + DirectQuery; ANALYST and ANALYST_SP = answer key) |
 | Analyst copilot: LangGraph agent, SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 answer-key questions, beside Cortex Analyst | ★★★ | B S24 |
 | Delivery-days model (regression) beside S12b's late yes/no | ★★ | B after the trial (Databricks) |
 | Hand-labelled evaluation set for the review labels (100–200) | ★★ | B after the trial (Databricks) |
@@ -201,7 +201,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | S20 — **skipped** (2026-10-22, the human's call) | nothing built; all four B? rows became theory | sharing on both platforms; Lakehouse Federation; UniForm read by Snowflake; Iceberg tables on S3 |
 | **S21** ✓ (2026-10-22 → 24) | performance and cost on both: pruning, clustering keys, Query Profile, **the three caches, spilling, multi-cluster, liquid clustering on a large sample, Spark plans, system tables, `ACCOUNT_USAGE`** | search optimization; Spark UI; Photon |
 | **S22** ✓ (2026-10-24) | **reviews as a source** (Bronze, Silver, bridge, Gold); marts `delivery_promise`, `seller_scorecard`, `late_vs_rating`; AI labels into the production path | — |
-| **S23** (added 2026-10-24) | **Power BI on Gold as the analyst role** (B?: sign-in first): promise accuracy, seller scorecard, rating cohorts, complaint trends | — |
+| **S23** ✓ (2026-10-24) | **Power BI on Gold as the analyst role** (B?: sign-in first): promise accuracy, seller scorecard, rating cohorts, complaint trends | — |
 | **S24** (added 2026-10-24) | **analyst copilot, LangGraph**: SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 questions, beside Cortex Analyst | — |
 | **Drill 3** | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) | — |
 | After the trial | Gold on Databricks via dbt's second target; delivery-days model; hand-labelled review eval set; optional ETA endpoint / demand forecast / stock-out board | — |

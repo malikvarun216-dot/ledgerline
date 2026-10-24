@@ -4500,3 +4500,69 @@ titles held numbers that might be phone or tax IDs — now redacted in Silver an
 - Everything S21 carried (S19c resume after Drill 3; `up -d` before Drill 3; drop `workspace.s16`,
   `LEDGERLINE.S21` / `workspace.s21`; ~2026-10-27 Bronze replaced-files deadline; ~2026-10-30 rebuild
   baseline; ~2026-11-05 drop `workspace.s12`; **Snowflake trial ends ~2026-11-10**).
+
+---
+
+## Session 23 — Power BI reads Gold as the analyst: one key-pair reader, six boards, every number equal to Snowflake's
+Date: 2026-10-24
+
+**In plain words:** a Power BI report now answers the marketplace's questions from Gold — are delivery
+promises honest, does lateness cost ratings, which sellers hurt us, why customers complain — signed in
+to Snowflake as a reader that can be nothing else. The same report, switched from the all-states analyst
+to the São Paulo analyst by one parameter, shows 40,434 orders instead of 96,476 and `***` for every
+city: Snowflake's masks and row policy decide what the report holds. Two findings were bigger than the
+report: the human admin user has **no MFA** (Power BI signed in with its password alone — caught before
+anything loaded), and CI had been red since S22 (a notebook's final newline).
+
+### Built
+- `snowflake/15_bi_reader.sql`: service user **`LEDGERLINE_BI_SVC`** (key pair, ANALYST + ANALYST_SP only,
+  secondary roles off) and **`LEDGERLINE_BI_WH`** (XSMALL, 60 s, 5-min cap, daily monitor 1 credit).
+- `scripts/sf.py --as-bi`; `sf_keypair.py` names the right `.env` line; `.env.example`.
+- `powerbi/` — Power BI project (PBIP): 5 Import tables + 1 DirectQuery table, parameter `ReaderRole`,
+  27 measures (each divides sums like its dbt mart), stored averages hidden, buckets sorted, auto
+  date/time off; six pages from `build_pages.py`; `answer_key.sql`. `cache.abf` git-ignored twice.
+- Decisions ×4 (+1 correction), incidents ×2, constraints +13 (Power BI section; 205 facts).
+
+### Verified
+- **Sign-in (the B? row):** the KeyPair tab exists in Desktop 2.159; the reader's Navigator = `SHOW
+  DATABASES` as `LEDGERLINE_BI_SVC` (4 databases, `LEDGERLINE` → `GOLD` only). TRANSFORMER refused at
+  sign-in (`390186`); `LOGIN_HISTORY` shows every BI login `RSA_KEYPAIR`.
+- **Every board = `answer_key.sql`**, as ANALYST: 96,476 delivered · 6,535 late · 6.77% · 24.37 / 12.50 /
+  10.62 days; on time 4.2901 vs late 2.2709, 1–2 stars 9.27% vs 62.39%, 4,967 rated before arrival;
+  buckets 4.3166 → 1.6963; tiers 281 / 609 / 1,485 / 14,066 seller-months (175 / 296 / 434 / 3,063
+  sellers), 3,095 sellers, revenue 13,591,643.70; topics (delivery 15,243 / 7,483 negative …), 99,224.
+- **As ANALYST_SP (one parameter):** 40,434 · 1,819 · 4.50% · 19.78 / 8.70 / 8.33; 4.3244 vs 2.5496;
+  buckets 4.3478 → 1.8376; 1,246 rated before arrival; customers **40,143, all 40,143 cities `***`, one
+  state**. As ANALYST: 95,696 / 95,696 masked, 27 states. Seller scorecard and complaint trends
+  **unchanged** for SP (no state column — open decision).
+- **The trap, measured:** averaging the stored `avg_score` gives 3.4403 for all reviews (right: 4.1557),
+  3.1613 for SP (right: 4.2456).
+- **DirectQuery:** distinct customers 93,356 live = 93,356 Import = 93,356 Snowflake (SP: 39,084 in the
+  key); Power BI sent `COUNT(DISTINCT x) + MAX(null flag)`, 171 ms. Microsoft's listed ADBC
+  count-distinct issue did not reproduce.
+- `QUERY_HISTORY`: 85 queries as ANALYST, 20 as ANALYST_SP, all on `LEDGERLINE_BI_WH`, tagged
+  `{"PowerQuery":true,…}`, ~22 s of query time in total.
+- **CI fix:** `reapply_night.py` final newline stripped; full suite 208 green locally after the last
+  edit; pushed as `902f752` (human). Green on GitHub not seen from here (`gh` not installed).
+
+### Not verified / not done
+- The report is not published to the Power BI service (no tenant; Desktop only) — per-viewer security
+  (Entra SSO) is taught, not built.
+- The admin-login prevention (MFA, browser-only policy) — parked by the human.
+
+### Learning check
+**Skipped by choice** ("skip test", 2026-10-24). The five planned questions are in the bank as
+`parked` (B126–B130, learning.md).
+
+### Next
+**S24 — the analyst copilot (LangGraph)**, its SQL tool signed in as a reader the way this report is
+(the `LEDGERLINE_BI_SVC` pattern), scored on execution accuracy beside Cortex Analyst.
+**Carried, by name:**
+- **Decide the row policy's meaning** (customer rows only, or regional business scope — then
+  `seller_scorecard` / `complaint_trends` need a state column). Asked S23, not yet answered.
+- **Admin-login prevention** (incident 2026-10-24, OPEN): MFA for `ZUBA11`, browser-only policy
+  probed on a scratch user — re-decide before Drill 3.
+- Everything S22 carried: `label_reviews` as a nightly task; the 7 original review titles in Bronze and
+  the first bridge file; drop `workspace.s19b`; S21's list (S19c after Drill 3; `up -d` before Drill 3;
+  drop `workspace.s16`, `LEDGERLINE.S21` / `workspace.s21`; ~2026-10-27 Bronze replaced-files deadline;
+  ~2026-10-30 rebuild baseline; ~2026-11-05 drop `workspace.s12`; **Snowflake trial ends ~2026-11-10**).
