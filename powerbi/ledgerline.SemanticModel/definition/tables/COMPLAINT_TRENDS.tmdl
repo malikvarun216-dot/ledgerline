@@ -1,0 +1,89 @@
+table COMPLAINT_TRENDS
+	lineageTag: 88c83c08-1fdb-4dbd-a9ff-5047138fdc78
+
+	measure 'Review count' = SUM(COMPLAINT_TRENDS[REVIEWS])
+		formatString: #,0
+		lineageTag: 644175f0-7b67-4762-80e6-5151ffba3927
+
+	measure 'Negative reviews' = CALCULATE(SUM(COMPLAINT_TRENDS[REVIEWS]), COMPLAINT_TRENDS[SENTIMENT] = "negative")
+		formatString: #,0
+		lineageTag: d41fe1f4-9067-4a8c-be39-7f9318fa5e5c
+
+	measure 'Negative share' = DIVIDE([Negative reviews], [Review count])
+		formatString: 0.00%
+		lineageTag: e3502e31-089e-4da8-b2cd-031ab5321bd1
+
+	measure 'Review avg score' = DIVIDE(SUM(COMPLAINT_TRENDS[SCORE_SUM]), SUM(COMPLAINT_TRENDS[REVIEWS]))
+		formatString: 0.0000
+		lineageTag: 8bf3e3d1-57ed-4d7d-99ea-bdc952e5a56d
+
+	column REVIEW_MONTH
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: eddcf3bd-7cd3-4d7a-ac6d-e4e9ce99c24c
+		summarizeBy: none
+		sourceColumn: REVIEW_MONTH
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column TOPIC
+		dataType: string
+		lineageTag: ef919059-c813-42b9-aa40-a84df6cfbf29
+		summarizeBy: none
+		sourceColumn: TOPIC
+
+		annotation SummarizationSetBy = Automatic
+
+	column SENTIMENT
+		dataType: string
+		lineageTag: 6e0ddb92-209d-4b52-9538-dbe93691fc28
+		summarizeBy: none
+		sourceColumn: SENTIMENT
+
+		annotation SummarizationSetBy = Automatic
+
+	column REVIEWS
+		dataType: double
+		lineageTag: a0f46475-3331-46a5-9433-5fde420835e7
+		summarizeBy: sum
+		sourceColumn: REVIEWS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column SCORE_SUM
+		dataType: double
+		lineageTag: a51c0fc2-87ee-4dfc-a6ce-52e402d78021
+		summarizeBy: sum
+		sourceColumn: SCORE_SUM
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column LOW_SCORE_REVIEWS
+		dataType: double
+		lineageTag: 0ae011d8-5ba4-4e06-b410-2d8cd56cc623
+		summarizeBy: sum
+		sourceColumn: LOW_SCORE_REVIEWS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition COMPLAINT_TRENDS = m
+		mode: import
+		source =
+				let
+				    Source = Snowflake.Databases("zanvoyn-ig57260.snowflakecomputing.com","LEDGERLINE_BI_WH",[Role=ReaderRole, Implementation="2.0"]),
+				    LEDGERLINE_Database = Source{[Name="LEDGERLINE",Kind="Database"]}[Data],
+				    GOLD_Schema = LEDGERLINE_Database{[Name="GOLD",Kind="Schema"]}[Data],
+				    COMPLAINT_TRENDS_Table = GOLD_Schema{[Name="COMPLAINT_TRENDS",Kind="Table"]}[Data]
+				in
+				    COMPLAINT_TRENDS_Table
+
+	annotation PBI_ResultType = Table
+

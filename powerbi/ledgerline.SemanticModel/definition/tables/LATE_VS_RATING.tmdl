@@ -1,0 +1,158 @@
+table LATE_VS_RATING
+	lineageTag: 12daa6aa-d2c5-452c-87cb-687c7857f1bf
+
+	measure 'Cohort delivered orders' = SUM(LATE_VS_RATING[DELIVERED_ORDERS])
+		formatString: #,0
+		lineageTag: db76cce9-d6da-4b15-95d8-42c8d6210132
+
+	measure 'Reviewed orders' = SUM(LATE_VS_RATING[REVIEWED_ORDERS])
+		formatString: #,0
+		lineageTag: 182db966-62ae-4cd9-b977-0dae047dc3cc
+
+	measure 'Avg score' = DIVIDE(SUM(LATE_VS_RATING[SCORE_SUM]), SUM(LATE_VS_RATING[REVIEWED_ORDERS]))
+		formatString: 0.0000
+		lineageTag: e2e97b87-65b3-4b77-9ecd-a7343cd2b2a4
+
+	measure 'Low score share' = DIVIDE(SUM(LATE_VS_RATING[LOW_SCORE_ORDERS]), SUM(LATE_VS_RATING[REVIEWED_ORDERS]))
+		formatString: 0.00%
+		lineageTag: 9571e518-2190-4c71-9abb-f856d2b86bdf
+
+	measure 'Rated before arrival' = SUM(LATE_VS_RATING[REVIEWED_BEFORE_DELIVERY])
+		formatString: #,0
+		lineageTag: 620977b5-b6b7-4485-aec5-2553e70d9f41
+
+	measure 'Avg score WRONG (average of averages)' = AVERAGE(LATE_VS_RATING[AVG_SCORE])
+		formatString: 0.0000
+		lineageTag: 83c6b47a-b8e6-441a-b046-c5125a041a7e
+
+	column PURCHASE_MONTH
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 1186fc5d-7835-48c6-8fba-3af64ea2cf5f
+		summarizeBy: none
+		sourceColumn: PURCHASE_MONTH
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column CUSTOMER_STATE
+		dataType: string
+		lineageTag: b302b844-1df9-45b6-81e0-2cc7c0fa6a7c
+		summarizeBy: none
+		sourceColumn: CUSTOMER_STATE
+
+		annotation SummarizationSetBy = Automatic
+
+	column LATENESS_BUCKET
+		dataType: string
+		lineageTag: a3fbe314-b339-42b0-ab5f-6f600f47c25f
+		summarizeBy: none
+		sourceColumn: LATENESS_BUCKET
+		sortByColumn: LATENESS_BUCKET_ORDER
+
+		annotation SummarizationSetBy = Automatic
+
+	column LATENESS_BUCKET_ORDER
+		dataType: double
+		lineageTag: e9565422-7b6e-4689-8581-5bbc54f3a296
+		summarizeBy: sum
+		sourceColumn: LATENESS_BUCKET_ORDER
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column IS_LATE
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 9b777c87-defe-46d1-995a-5bc6a271beda
+		summarizeBy: none
+		sourceColumn: IS_LATE
+
+		annotation SummarizationSetBy = Automatic
+
+	column DELIVERED_ORDERS
+		dataType: double
+		lineageTag: 94434846-dc3a-467a-be00-2ba0592b5a9a
+		summarizeBy: sum
+		sourceColumn: DELIVERED_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column REVIEWED_ORDERS
+		dataType: double
+		lineageTag: 1d0b59e6-5110-4f6d-a6db-7fc514edc7a2
+		summarizeBy: sum
+		sourceColumn: REVIEWED_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column SCORE_SUM
+		dataType: double
+		lineageTag: 0c405350-4d83-455b-b02b-2e701b026baa
+		summarizeBy: sum
+		sourceColumn: SCORE_SUM
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column LOW_SCORE_ORDERS
+		dataType: double
+		lineageTag: 6bf43cb1-39a5-472b-8a8d-2080f251352f
+		summarizeBy: sum
+		sourceColumn: LOW_SCORE_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column FIVE_STAR_ORDERS
+		dataType: double
+		lineageTag: 9eb65f57-bc3e-423d-a0fe-8bb903411ad1
+		summarizeBy: sum
+		sourceColumn: FIVE_STAR_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column REVIEWED_BEFORE_DELIVERY
+		dataType: double
+		lineageTag: fdad1a6b-2a71-4d19-89f6-4efc8f4a5f74
+		summarizeBy: sum
+		sourceColumn: REVIEWED_BEFORE_DELIVERY
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column AVG_SCORE
+		dataType: double
+		isHidden
+		lineageTag: c4dfec43-cbc7-46e1-8a93-d447d84caf5f
+		summarizeBy: none
+		sourceColumn: AVG_SCORE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition LATE_VS_RATING = m
+		mode: import
+		source =
+				let
+				    Source = Snowflake.Databases("zanvoyn-ig57260.snowflakecomputing.com","LEDGERLINE_BI_WH",[Role=ReaderRole, Implementation="2.0"]),
+				    LEDGERLINE_Database = Source{[Name="LEDGERLINE",Kind="Database"]}[Data],
+				    GOLD_Schema = LEDGERLINE_Database{[Name="GOLD",Kind="Schema"]}[Data],
+				    LATE_VS_RATING_Table = GOLD_Schema{[Name="LATE_VS_RATING",Kind="Table"]}[Data]
+				in
+				    LATE_VS_RATING_Table
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "fe69f5adbb360fda1062",
+  "position": {
+    "x": 20,
+    "y": 180,
+    "z": 3,
+    "height": 520,
+    "width": 820,
+    "tabOrder": 3
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "DQ_DELIVERY_PROMISE"
+                    }
+                  },
+                  "Property": "CUSTOMER_STATE"
+                }
+              },
+              "queryRef": "DQ_DELIVERY_PROMISE.CUSTOMER_STATE",
+              "nativeQueryRef": "CUSTOMER_STATE"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "DQ_DELIVERY_PROMISE"
+                    }
+                  },
+                  "Property": "DQ delivered orders"
+                }
+              },
+              "queryRef": "DQ_DELIVERY_PROMISE.DQ delivered orders",
+              "nativeQueryRef": "DQ delivered orders"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "DQ_DELIVERY_PROMISE"
+                    }
+                  },
+                  "Property": "DQ late orders"
+                }
+              },
+              "queryRef": "DQ_DELIVERY_PROMISE.DQ late orders",
+              "nativeQueryRef": "DQ late orders"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "DQ_DELIVERY_PROMISE"
+                    }
+                  },
+                  "Property": "DQ distinct customers"
+                }
+              },
+              "queryRef": "DQ_DELIVERY_PROMISE.DQ distinct customers",
+              "nativeQueryRef": "DQ distinct customers"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'By state - DirectQuery'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

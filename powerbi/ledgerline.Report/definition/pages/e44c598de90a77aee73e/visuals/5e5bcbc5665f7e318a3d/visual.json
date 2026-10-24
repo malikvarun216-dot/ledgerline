@@ -1,0 +1,88 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "5e5bcbc5665f7e318a3d",
+  "position": {
+    "x": 20,
+    "y": 150,
+    "z": 3,
+    "height": 220,
+    "width": 520,
+    "tabOrder": 3
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "TIER"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.TIER",
+              "nativeQueryRef": "TIER"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "Seller-months"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.Seller-months",
+              "nativeQueryRef": "Seller-months"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "Sellers"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.Sellers",
+              "nativeQueryRef": "Sellers"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Seller-months by tier'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

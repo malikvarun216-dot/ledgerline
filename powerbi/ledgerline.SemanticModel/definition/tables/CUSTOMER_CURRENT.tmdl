@@ -1,0 +1,107 @@
+table CUSTOMER_CURRENT
+	lineageTag: f5b24089-6d79-47bf-88ba-a494dd136572
+
+	measure Customers = COUNTROWS(CUSTOMER_CURRENT)
+		formatString: #,0
+		lineageTag: 15b1b8f1-7f78-4606-b75f-e5c99906258e
+
+	measure 'Cities masked' = CALCULATE(COUNTROWS(CUSTOMER_CURRENT), CUSTOMER_CURRENT[CUSTOMER_CITY] = "***")
+		formatString: #,0
+		lineageTag: 2cc19d97-07db-462b-8206-cd526788d5d5
+
+	column CUSTOMER_UNIQUE_ID
+		dataType: string
+		lineageTag: 0352143c-6610-4873-b3b7-d18e50314fbd
+		summarizeBy: none
+		sourceColumn: CUSTOMER_UNIQUE_ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column CUSTOMER_ZIP_CODE_PREFIX
+		dataType: string
+		lineageTag: ceea0e7b-2556-4956-a860-6d4f50cd38d5
+		summarizeBy: none
+		sourceColumn: CUSTOMER_ZIP_CODE_PREFIX
+
+		annotation SummarizationSetBy = Automatic
+
+	column CUSTOMER_CITY
+		dataType: string
+		lineageTag: 45c05086-f2d5-4fa5-839b-dd1f0eddfd07
+		summarizeBy: none
+		sourceColumn: CUSTOMER_CITY
+
+		annotation SummarizationSetBy = Automatic
+
+	column CUSTOMER_STATE
+		dataType: string
+		lineageTag: 1307a8ee-263a-4c11-a027-2921c29441eb
+		summarizeBy: none
+		sourceColumn: CUSTOMER_STATE
+
+		annotation SummarizationSetBy = Automatic
+
+	column DIM_UPDATED_AT
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 235cb387-9a8a-44f6-88cc-1a9bdb025e94
+		summarizeBy: none
+		sourceColumn: DIM_UPDATED_AT
+
+		annotation SummarizationSetBy = Automatic
+
+	column _FIRST_SEEN_DUMP_DATE
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: fe6d1074-e78d-4dfb-802d-3d9f45c2ba07
+		summarizeBy: none
+		sourceColumn: _FIRST_SEEN_DUMP_DATE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column _LAST_CHANGED_DUMP_DATE
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 2c9ece32-01f7-4104-8875-faeb81019964
+		summarizeBy: none
+		sourceColumn: _LAST_CHANGED_DUMP_DATE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column SILVER_VERSION
+		dataType: double
+		lineageTag: b7c8a23b-8b1b-44f3-a60c-8b5baf1d7bce
+		summarizeBy: sum
+		sourceColumn: SILVER_VERSION
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column SILVER_NIGHT
+		dataType: double
+		lineageTag: 420e1440-9f6e-4f87-8d24-6a94d5ea80a3
+		summarizeBy: sum
+		sourceColumn: SILVER_NIGHT
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition CUSTOMER_CURRENT = m
+		mode: import
+		source =
+				let
+				    Source = Snowflake.Databases("zanvoyn-ig57260.snowflakecomputing.com","LEDGERLINE_BI_WH",[Role=ReaderRole, Implementation="2.0"]),
+				    LEDGERLINE_Database = Source{[Name="LEDGERLINE",Kind="Database"]}[Data],
+				    GOLD_Schema = LEDGERLINE_Database{[Name="GOLD",Kind="Schema"]}[Data],
+				    CUSTOMER_CURRENT_Table = GOLD_Schema{[Name="CUSTOMER_CURRENT",Kind="Table"]}[Data]
+				in
+				    CUSTOMER_CURRENT_Table
+
+	annotation PBI_ResultType = Table
+

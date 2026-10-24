@@ -31,13 +31,16 @@ MAX_ROWS = 50
 WIDTH = 110  # widest cell printed; longer values are cut
 
 
-def connect(role: str | None = None, as_ci: bool = False):
+def connect(role: str | None = None, as_ci: bool = False, as_bi: bool = False):
     """Sign in as the laptop's service user — or, with ``as_ci``, as the CI user (Session 16), whose
-    name and key come from SNOWFLAKE_CI_USER / SNOWFLAKE_CI_PRIVATE_KEY_PATH."""
+    name and key come from SNOWFLAKE_CI_USER / SNOWFLAKE_CI_PRIVATE_KEY_PATH; or, with ``as_bi``, as
+    the Power BI reader (Session 23), SNOWFLAKE_BI_USER / SNOWFLAKE_BI_PRIVATE_KEY_PATH, on the
+    user's own default warehouse and role — what the report itself gets."""
     import snowflake.connector
 
     user_var, key_var = (
         ("SNOWFLAKE_CI_USER", "SNOWFLAKE_CI_PRIVATE_KEY_PATH") if as_ci
+        else ("SNOWFLAKE_BI_USER", "SNOWFLAKE_BI_PRIVATE_KEY_PATH") if as_bi
         else ("SNOWFLAKE_USER", "SNOWFLAKE_PRIVATE_KEY_PATH")
     )
     required = ("SNOWFLAKE_ACCOUNT", user_var, key_var)
@@ -49,8 +52,8 @@ def connect(role: str | None = None, as_ci: bool = False):
         user=os.environ[user_var],
         authenticator="SNOWFLAKE_JWT",
         private_key_file=os.path.expanduser(os.environ[key_var]),
-        role=role or os.environ.get("SNOWFLAKE_ROLE") or None,
-        warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE") or None,
+        role=role or (None if as_bi else os.environ.get("SNOWFLAKE_ROLE")) or None,
+        warehouse=(None if as_bi else os.environ.get("SNOWFLAKE_WAREHOUSE")) or None,
         database=os.environ.get("SNOWFLAKE_DATABASE") or None,
         session_parameters={"QUERY_TAG": "ledgerline:scripts/sf.py"},
     )
@@ -74,13 +77,13 @@ def show(cursor, statement: str) -> None:
     print(f"({len(rows)} row{'s' if len(rows) != 1 else ''}{', more not shown' if more else ''})")
 
 
-def run(sql: str, role: str | None = None) -> int:
+def run(sql: str, role: str | None = None, as_bi: bool = False) -> int:
     import io
 
     from snowflake.connector.errors import ProgrammingError
     from snowflake.connector.util_text import split_statements
 
-    conn = connect(role)
+    conn = connect(role, as_bi=as_bi)
     try:
         cur = conn.cursor()
         for statement, _ in split_statements(io.StringIO(sql), remove_comments=True):
@@ -103,12 +106,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("sql", nargs="?", help="SQL text (one or more statements)")
     parser.add_argument("--file", type=Path, help="a .sql file to run top to bottom")
     parser.add_argument("--role", help="role to run as (default: SNOWFLAKE_ROLE, else the user's default)")
+    parser.add_argument("--as-bi", action="store_true", help="sign in as the Power BI reader user (S23)")
     args = parser.parse_args(argv)
     if bool(args.sql) == bool(args.file):
         parser.error("give SQL text or --file, not both")
     load_local_env()
     sql = args.file.read_text(encoding="utf-8") if args.file else args.sql
-    return run(sql, args.role)
+    return run(sql, args.role, as_bi=args.as_bi)
 
 
 if __name__ == "__main__":

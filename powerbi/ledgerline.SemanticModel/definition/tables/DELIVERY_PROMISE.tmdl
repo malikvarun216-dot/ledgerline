@@ -1,0 +1,220 @@
+table DELIVERY_PROMISE
+	lineageTag: 23114b8e-900d-4861-a403-66410a35dda1
+
+	measure 'Delivered orders' = COUNTROWS(DELIVERY_PROMISE)
+		formatString: #,0
+		lineageTag: b5e2805e-a67f-4769-b17c-441868010791
+
+	measure 'Late orders' = CALCULATE(COUNTROWS(DELIVERY_PROMISE), DELIVERY_PROMISE[IS_LATE] = TRUE())
+		formatString: #,0
+		lineageTag: fb973e99-5cb9-4dda-b7d1-bf4f07585ce3
+
+	measure 'Late share' = DIVIDE([Late orders], [Delivered orders])
+		formatString: 0.00%
+		lineageTag: 08637417-c38d-48af-afca-ae376cc7d3be
+
+	measure 'Avg promised days' = AVERAGE(DELIVERY_PROMISE[PROMISED_DAYS])
+		formatString: 0.00
+		lineageTag: 79e15fb8-d5b2-4110-8e2a-920fcd610fbc
+
+	measure 'Avg actual days' = AVERAGE(DELIVERY_PROMISE[ACTUAL_DAYS])
+		formatString: 0.00
+		lineageTag: 829a02c8-24bd-46bf-a300-0cce74421a60
+
+	measure 'Avg days late (late orders)' = CALCULATE(AVERAGE(DELIVERY_PROMISE[DAYS_LATE]), DELIVERY_PROMISE[IS_LATE] = TRUE())
+		formatString: 0.00
+		lineageTag: 8aae9792-07c1-46c8-8006-9e3c0e4be0ad
+
+	measure 'Distinct customers' = DISTINCTCOUNT(DELIVERY_PROMISE[CUSTOMER_UNIQUE_ID])
+		formatString: #,0
+		lineageTag: 2e13c937-6f5c-4dac-ac8b-8c3cbc66a34b
+
+	column ORDER_ID
+		dataType: string
+		lineageTag: 240a90bf-fbbc-45cc-9618-34aafeae4a04
+		summarizeBy: none
+		sourceColumn: ORDER_ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column CUSTOMER_UNIQUE_ID
+		dataType: string
+		lineageTag: bdf314e7-3237-48cb-8f9a-3ecc693ea257
+		summarizeBy: none
+		sourceColumn: CUSTOMER_UNIQUE_ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column CUSTOMER_STATE
+		dataType: string
+		lineageTag: eca1c030-b9bc-429e-8375-179b0c4b2e5b
+		summarizeBy: none
+		sourceColumn: CUSTOMER_STATE
+
+		annotation SummarizationSetBy = Automatic
+
+	column SELLER_COUNT
+		dataType: double
+		lineageTag: 3eb3f867-914a-4772-a88b-7c36290c325b
+		summarizeBy: sum
+		sourceColumn: SELLER_COUNT
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column ITEMS
+		dataType: double
+		lineageTag: d3c46814-3149-4974-b714-d02e20170464
+		summarizeBy: sum
+		sourceColumn: ITEMS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column ORDER_STATUS
+		dataType: string
+		lineageTag: bf213384-8fcb-48b7-a445-f63343060d29
+		summarizeBy: none
+		sourceColumn: ORDER_STATUS
+
+		annotation SummarizationSetBy = Automatic
+
+	column PURCHASED_AT
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: e9f45d24-9614-4ae6-b2ef-217053059f06
+		summarizeBy: none
+		sourceColumn: PURCHASED_AT
+
+		annotation SummarizationSetBy = Automatic
+
+	column PURCHASE_MONTH
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 29be951d-183c-4e3a-9f8f-76d6db7ade5c
+		summarizeBy: none
+		sourceColumn: PURCHASE_MONTH
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column PROMISED_AT
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 849f66e8-0c9e-44f9-9414-b19173db48fb
+		summarizeBy: none
+		sourceColumn: PROMISED_AT
+
+		annotation SummarizationSetBy = Automatic
+
+	column DELIVERED_AT
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: ee82b370-2e22-4c12-8021-f7587f20e5e0
+		summarizeBy: none
+		sourceColumn: DELIVERED_AT
+
+		annotation SummarizationSetBy = Automatic
+
+	column PROMISED_DAYS
+		dataType: double
+		lineageTag: 1b702075-7bce-4dfe-90f3-eb2795d439c4
+		summarizeBy: sum
+		sourceColumn: PROMISED_DAYS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column ACTUAL_DAYS
+		dataType: double
+		lineageTag: b99acee0-2b63-4137-ab27-e4ffd8672436
+		summarizeBy: sum
+		sourceColumn: ACTUAL_DAYS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column DAYS_LATE
+		dataType: double
+		lineageTag: 311cb3e0-0302-4263-aa40-fe8c5866c8b1
+		summarizeBy: sum
+		sourceColumn: DAYS_LATE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column IS_LATE
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 6c9b50a5-c931-4f8c-97c5-1297a9571965
+		summarizeBy: none
+		sourceColumn: IS_LATE
+
+		annotation SummarizationSetBy = Automatic
+
+	column LATENESS_BUCKET
+		dataType: string
+		lineageTag: 7296c328-50a3-42fb-b0b8-5716a13394a9
+		summarizeBy: none
+		sourceColumn: LATENESS_BUCKET
+		sortByColumn: LATENESS_BUCKET_ORDER
+
+		annotation SummarizationSetBy = Automatic
+
+	column LATENESS_BUCKET_ORDER
+		dataType: double
+		lineageTag: b204ee4e-acc3-4bc7-bf30-dfdaee2d86f6
+		summarizeBy: sum
+		sourceColumn: LATENESS_BUCKET_ORDER
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column REVIEW_SCORE
+		dataType: double
+		lineageTag: d1139e69-568d-4010-8402-d87e3ebae832
+		summarizeBy: sum
+		sourceColumn: REVIEW_SCORE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column REVIEWED_AT
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: dac7339c-a9c4-4da0-a262-5bb80924f288
+		summarizeBy: none
+		sourceColumn: REVIEWED_AT
+
+		annotation SummarizationSetBy = Automatic
+
+	column REVIEWED_BEFORE_DELIVERY
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: bde7b80b-a783-4b61-bc47-fea1c3f0a501
+		summarizeBy: none
+		sourceColumn: REVIEWED_BEFORE_DELIVERY
+
+		annotation SummarizationSetBy = Automatic
+
+	partition DELIVERY_PROMISE = m
+		mode: import
+		source =
+				let
+				    Source = Snowflake.Databases("zanvoyn-ig57260.snowflakecomputing.com","LEDGERLINE_BI_WH",[Role=ReaderRole, Implementation="2.0"]),
+				    LEDGERLINE_Database = Source{[Name="LEDGERLINE",Kind="Database"]}[Data],
+				    GOLD_Schema = LEDGERLINE_Database{[Name="GOLD",Kind="Schema"]}[Data],
+				    DELIVERY_PROMISE_Table = GOLD_Schema{[Name="DELIVERY_PROMISE",Kind="Table"]}[Data]
+				in
+				    DELIVERY_PROMISE_Table
+
+	annotation PBI_ResultType = Table
+

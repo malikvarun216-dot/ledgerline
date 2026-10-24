@@ -1,0 +1,116 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "69cdb289ff859b191437",
+  "position": {
+    "x": 560,
+    "y": 150,
+    "z": 5,
+    "height": 550,
+    "width": 700,
+    "tabOrder": 5
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "SELLER_ID"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.SELLER_ID",
+              "nativeQueryRef": "SELLER_ID"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "Seller-months"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.Seller-months",
+              "nativeQueryRef": "Seller-months"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "Seller late rate"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.Seller late rate",
+              "nativeQueryRef": "Seller late rate"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "Seller avg score"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.Seller avg score",
+              "nativeQueryRef": "Seller avg score"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "Seller revenue"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.Seller revenue",
+              "nativeQueryRef": "Seller revenue"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Sellers (filter with the tier slicer)'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

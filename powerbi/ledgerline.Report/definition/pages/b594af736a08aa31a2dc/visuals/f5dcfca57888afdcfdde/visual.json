@@ -1,0 +1,79 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "f5dcfca57888afdcfdde",
+  "position": {
+    "x": 660,
+    "y": 150,
+    "z": 7,
+    "height": 550,
+    "width": 600,
+    "tabOrder": 7
+  },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "DELIVERY_PROMISE"
+                    }
+                  },
+                  "Property": "CUSTOMER_STATE"
+                }
+              },
+              "queryRef": "DELIVERY_PROMISE.CUSTOMER_STATE",
+              "nativeQueryRef": "CUSTOMER_STATE",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "DELIVERY_PROMISE"
+                    }
+                  },
+                  "Property": "Late share"
+                }
+              },
+              "queryRef": "DELIVERY_PROMISE.Late share",
+              "nativeQueryRef": "Late share"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Late share by customer state'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

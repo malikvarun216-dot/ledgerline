@@ -1,0 +1,4 @@
+relationship AutoDetected_7b9c2c47-d76e-451c-b9b1-c2b6e9d85c05
+	fromColumn: DELIVERY_PROMISE.CUSTOMER_UNIQUE_ID
+	toColumn: CUSTOMER_CURRENT.CUSTOMER_UNIQUE_ID
+

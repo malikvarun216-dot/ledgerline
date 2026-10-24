@@ -1,0 +1,116 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "831d3990fa00b429278c",
+  "position": {
+    "x": 540,
+    "y": 370,
+    "z": 2,
+    "height": 330,
+    "width": 720,
+    "tabOrder": 2
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "COMPLAINT_TRENDS"
+                    }
+                  },
+                  "Property": "TOPIC"
+                }
+              },
+              "queryRef": "COMPLAINT_TRENDS.TOPIC",
+              "nativeQueryRef": "TOPIC"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "COMPLAINT_TRENDS"
+                    }
+                  },
+                  "Property": "Review count"
+                }
+              },
+              "queryRef": "COMPLAINT_TRENDS.Review count",
+              "nativeQueryRef": "Review count"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "COMPLAINT_TRENDS"
+                    }
+                  },
+                  "Property": "Negative reviews"
+                }
+              },
+              "queryRef": "COMPLAINT_TRENDS.Negative reviews",
+              "nativeQueryRef": "Negative reviews"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "COMPLAINT_TRENDS"
+                    }
+                  },
+                  "Property": "Negative share"
+                }
+              },
+              "queryRef": "COMPLAINT_TRENDS.Negative share",
+              "nativeQueryRef": "Negative share"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "COMPLAINT_TRENDS"
+                    }
+                  },
+                  "Property": "Review avg score"
+                }
+              },
+              "queryRef": "COMPLAINT_TRENDS.Review avg score",
+              "nativeQueryRef": "Review avg score"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Topics'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

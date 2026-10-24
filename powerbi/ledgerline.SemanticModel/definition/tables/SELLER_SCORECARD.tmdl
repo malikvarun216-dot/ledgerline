@@ -1,0 +1,195 @@
+table SELLER_SCORECARD
+	lineageTag: 0a13294a-c6e9-440d-8315-d11a9badc4d2
+
+	measure Seller-months = COUNTROWS(SELLER_SCORECARD)
+		formatString: #,0
+		lineageTag: 72160cf0-f10d-439d-8cd6-c9d84f4a3e81
+
+	measure Sellers = DISTINCTCOUNT(SELLER_SCORECARD[SELLER_ID])
+		formatString: #,0
+		lineageTag: 4a152965-6b67-4e5e-8a9c-9d2ba0d0ae5d
+
+	measure 'Seller late rate' = DIVIDE(SUM(SELLER_SCORECARD[LATE_ORDERS]), SUM(SELLER_SCORECARD[DELIVERED_ORDERS]))
+		formatString: 0.00%
+		lineageTag: 2f74260d-778c-4a74-8982-6bfc3e781665
+
+	measure 'Seller avg score' = DIVIDE(SUM(SELLER_SCORECARD[SCORE_SUM]), SUM(SELLER_SCORECARD[REVIEWED_ORDERS]))
+		formatString: 0.00
+		lineageTag: aab4e0bc-2767-4939-8aa1-352ae2da7ef9
+
+	measure 'Seller revenue' = SUM(SELLER_SCORECARD[REVENUE])
+		formatString: #,0.00
+		lineageTag: c3f3eca4-83c8-45e5-a512-0a588fb34aec
+
+	column SELLER_ID
+		dataType: string
+		lineageTag: 600f0fed-6be4-4d3f-90f2-2a993680e936
+		summarizeBy: none
+		sourceColumn: SELLER_ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column PURCHASE_MONTH
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 532a2945-3f6e-45fb-bad0-1866c41de301
+		summarizeBy: none
+		sourceColumn: PURCHASE_MONTH
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column ORDERS
+		dataType: double
+		lineageTag: 609e100a-7731-420a-9e30-c45ce5cbf40e
+		summarizeBy: sum
+		sourceColumn: ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column ITEMS
+		dataType: double
+		lineageTag: 9b8a3cda-3813-49f1-9bf1-f923ffe1a45c
+		summarizeBy: sum
+		sourceColumn: ITEMS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column REVENUE
+		dataType: double
+		lineageTag: d5f77bef-e71f-4efb-91b7-8925cd863a97
+		summarizeBy: sum
+		sourceColumn: REVENUE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column FREIGHT
+		dataType: double
+		lineageTag: 14f0c448-9908-44fd-bdf7-370ff3d35689
+		summarizeBy: sum
+		sourceColumn: FREIGHT
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column CANCELED_ORDERS
+		dataType: double
+		lineageTag: 48046168-d54f-4713-848a-fc172e84bc78
+		summarizeBy: sum
+		sourceColumn: CANCELED_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column DELIVERED_ORDERS
+		dataType: double
+		lineageTag: 18d3ab64-030f-4940-b8cd-0799002354d0
+		summarizeBy: sum
+		sourceColumn: DELIVERED_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column LATE_ORDERS
+		dataType: double
+		lineageTag: a541286b-1907-44a1-a459-dfd505ff9d79
+		summarizeBy: sum
+		sourceColumn: LATE_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column REVIEWED_ORDERS
+		dataType: double
+		lineageTag: ec2d9df0-3c50-4959-be73-81527b4bcf95
+		summarizeBy: sum
+		sourceColumn: REVIEWED_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column SCORE_SUM
+		dataType: double
+		lineageTag: d8fc3f9a-06ee-441a-b197-c7f71590594f
+		summarizeBy: sum
+		sourceColumn: SCORE_SUM
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column LOW_SCORE_ORDERS
+		dataType: double
+		lineageTag: 8ee485d1-3fb5-41ba-8cfc-739f1fc89863
+		summarizeBy: sum
+		sourceColumn: LOW_SCORE_ORDERS
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column SHARED_REVIEWS_NOT_CREDITED
+		dataType: double
+		lineageTag: 585c0070-90ba-470b-a120-fab18728c7f2
+		summarizeBy: sum
+		sourceColumn: SHARED_REVIEWS_NOT_CREDITED
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column LATE_RATE
+		dataType: double
+		isHidden
+		lineageTag: 1d238c97-2b49-4ea8-a029-2f62f1a3afd2
+		summarizeBy: none
+		sourceColumn: LATE_RATE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column AVG_SCORE
+		dataType: double
+		isHidden
+		lineageTag: df177806-d1ea-49a1-89a0-4dc09c5467f3
+		summarizeBy: none
+		sourceColumn: AVG_SCORE
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column TIER
+		dataType: string
+		lineageTag: dbc22038-6f80-4972-8e82-579551417f85
+		summarizeBy: none
+		sourceColumn: TIER
+
+		annotation SummarizationSetBy = Automatic
+
+	partition SELLER_SCORECARD = m
+		mode: import
+		source =
+				let
+				    Source = Snowflake.Databases("zanvoyn-ig57260.snowflakecomputing.com","LEDGERLINE_BI_WH",[Role=ReaderRole, Implementation="2.0"]),
+				    LEDGERLINE_Database = Source{[Name="LEDGERLINE",Kind="Database"]}[Data],
+				    GOLD_Schema = LEDGERLINE_Database{[Name="GOLD",Kind="Schema"]}[Data],
+				    SELLER_SCORECARD_Table = GOLD_Schema{[Name="SELLER_SCORECARD",Kind="Table"]}[Data]
+				in
+				    SELLER_SCORECARD_Table
+
+	annotation PBI_ResultType = Table
+

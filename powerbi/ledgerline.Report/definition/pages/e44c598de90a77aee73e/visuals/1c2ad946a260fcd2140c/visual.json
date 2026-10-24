@@ -1,0 +1,79 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "1c2ad946a260fcd2140c",
+  "position": {
+    "x": 20,
+    "y": 390,
+    "z": 4,
+    "height": 310,
+    "width": 520,
+    "tabOrder": 4
+  },
+  "visual": {
+    "visualType": "clusteredColumnChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "TIER"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.TIER",
+              "nativeQueryRef": "TIER",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "SELLER_SCORECARD"
+                    }
+                  },
+                  "Property": "Seller-months"
+                }
+              },
+              "queryRef": "SELLER_SCORECARD.Seller-months",
+              "nativeQueryRef": "Seller-months"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Seller-months by tier'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

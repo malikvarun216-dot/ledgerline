@@ -1,0 +1,116 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "9f99d522ab9006c39e5d",
+  "position": {
+    "x": 20,
+    "y": 340,
+    "z": 4,
+    "height": 360,
+    "width": 1240,
+    "tabOrder": 4
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "LATE_VS_RATING"
+                    }
+                  },
+                  "Property": "LATENESS_BUCKET"
+                }
+              },
+              "queryRef": "LATE_VS_RATING.LATENESS_BUCKET",
+              "nativeQueryRef": "LATENESS_BUCKET"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "LATE_VS_RATING"
+                    }
+                  },
+                  "Property": "Reviewed orders"
+                }
+              },
+              "queryRef": "LATE_VS_RATING.Reviewed orders",
+              "nativeQueryRef": "Reviewed orders"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "LATE_VS_RATING"
+                    }
+                  },
+                  "Property": "Avg score"
+                }
+              },
+              "queryRef": "LATE_VS_RATING.Avg score",
+              "nativeQueryRef": "Avg score"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "LATE_VS_RATING"
+                    }
+                  },
+                  "Property": "Low score share"
+                }
+              },
+              "queryRef": "LATE_VS_RATING.Low score share",
+              "nativeQueryRef": "Low score share"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "LATE_VS_RATING"
+                    }
+                  },
+                  "Property": "Avg score WRONG (average of averages)"
+                }
+              },
+              "queryRef": "LATE_VS_RATING.Avg score WRONG (average of averages)",
+              "nativeQueryRef": "Avg score WRONG (average of averages)"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'By lateness bucket (right: sum / count; WRONG: average of the stored averages)'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

@@ -72,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Expected fingerprint (DESC USER {args.user} -> RSA_PUBLIC_KEY_FP): {fingerprint}")
     print()
     print("Then add to .env:")
-    var = "SNOWFLAKE_PRIVATE_KEY_PATH" if args.user == USER else "SNOWFLAKE_CI_PRIVATE_KEY_PATH"
+    var = {USER: "SNOWFLAKE_PRIVATE_KEY_PATH", "LEDGERLINE_BI_SVC": "SNOWFLAKE_BI_PRIVATE_KEY_PATH"}.get(
+        args.user, "SNOWFLAKE_CI_PRIVATE_KEY_PATH"
+    )
     print(f"{var}={args.out}")
     return 0
 

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "c6accb6c978e0d3e4a86",
+  "position": {
+    "x": 20,
+    "y": 180,
+    "z": 2,
+    "height": 520,
+    "width": 820,
+    "tabOrder": 2
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "CUSTOMER_CURRENT"
+                    }
+                  },
+                  "Property": "CUSTOMER_STATE"
+                }
+              },
+              "queryRef": "CUSTOMER_CURRENT.CUSTOMER_STATE",
+              "nativeQueryRef": "CUSTOMER_STATE"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "CUSTOMER_CURRENT"
+                    }
+                  },
+                  "Property": "Customers"
+                }
+              },
+              "queryRef": "CUSTOMER_CURRENT.Customers",
+              "nativeQueryRef": "Customers"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Customers by state (the row policy decides which states appear)'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

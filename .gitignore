@@ -65,3 +65,9 @@ Thumbs.db
 docs/learning.md
 docs/learning_archive_*.md
 docs/background.md
+
+# --- Power BI project (Session 23) ---
+# cache.abf is the imported DATA (what the reader saw); localSettings is per machine.
+# powerbi/.gitignore says the same; this line holds even if that file is lost.
+powerbi/**/.pbi/cache.abf
+powerbi/**/.pbi/localSettings.json

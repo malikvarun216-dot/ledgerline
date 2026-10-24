@@ -1,0 +1,7 @@
+/// Which Snowflake reader role the report signs in as (Session 23). LEDGERLINE_ANALYST = every state;
+/// LEDGERLINE_ANALYST_SP = Sao Paulo only (the row policy). The key-pair user holds only these two.
+expression ReaderRole = "LEDGERLINE_ANALYST" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: a6e8854a-cc7c-4bfb-a7c9-32751581fe04
+
+	annotation PBI_ResultType = Text
+

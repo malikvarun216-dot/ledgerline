@@ -1,0 +1,63 @@
+/// DirectQuery probe (Session 23): the same Gold table left in Snowflake. Every visual on it sends SQL
+/// to Snowflake as ReaderRole; compared with the Import copy and with answer_key.sql.
+table DQ_DELIVERY_PROMISE
+	lineageTag: c089db11-d819-41f3-ad7a-14923aeb16d7
+
+	measure 'DQ delivered orders' = COUNTROWS(DQ_DELIVERY_PROMISE)
+		formatString: #,0
+		lineageTag: 46f4ad30-088d-4712-b4f0-aac7bd58d49a
+
+	measure 'DQ distinct customers' = DISTINCTCOUNT(DQ_DELIVERY_PROMISE[CUSTOMER_UNIQUE_ID])
+		formatString: #,0
+		lineageTag: c0fdc093-f3e2-49b7-9630-ae2390bea698
+
+	measure 'DQ late orders' = CALCULATE(COUNTROWS(DQ_DELIVERY_PROMISE), DQ_DELIVERY_PROMISE[IS_LATE] = TRUE())
+		formatString: #,0
+		lineageTag: 70f5ef35-360a-42bc-97fe-b7fa940a70c8
+
+	column ORDER_ID
+		dataType: string
+		lineageTag: ceaf028a-373e-4e86-acec-aa6df1ecaa6b
+		summarizeBy: none
+		sourceColumn: ORDER_ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column CUSTOMER_UNIQUE_ID
+		dataType: string
+		lineageTag: b49846bf-dafe-44ad-8b51-fd918b088699
+		summarizeBy: none
+		sourceColumn: CUSTOMER_UNIQUE_ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column CUSTOMER_STATE
+		dataType: string
+		lineageTag: 20ccdb2f-1ccf-412d-9c51-46ebebdbaeb9
+		summarizeBy: none
+		sourceColumn: CUSTOMER_STATE
+
+		annotation SummarizationSetBy = Automatic
+
+	column IS_LATE
+		dataType: boolean
+		lineageTag: 8fa1cb33-0120-48e4-b5ad-2abaf68bec6c
+		summarizeBy: none
+		sourceColumn: IS_LATE
+
+		annotation SummarizationSetBy = Automatic
+
+	partition DQ_DELIVERY_PROMISE = m
+		mode: directQuery
+		source =
+				let
+				    Source = Snowflake.Databases("zanvoyn-ig57260.snowflakecomputing.com","LEDGERLINE_BI_WH",[Role=ReaderRole, Implementation="2.0"]),
+				    LEDGERLINE_Database = Source{[Name="LEDGERLINE",Kind="Database"]}[Data],
+				    GOLD_Schema = LEDGERLINE_Database{[Name="GOLD",Kind="Schema"]}[Data],
+				    Gold_Table = GOLD_Schema{[Name="DELIVERY_PROMISE",Kind="Table"]}[Data],
+				    Kept = Table.SelectColumns(Gold_Table, {"ORDER_ID", "CUSTOMER_UNIQUE_ID", "CUSTOMER_STATE", "IS_LATE"})
+				in
+				    Kept
+
+	annotation PBI_ResultType = Table
+

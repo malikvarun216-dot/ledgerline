@@ -1,0 +1,79 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.14.0/schema.json",
+  "name": "5be9b4ee5ee57763c563",
+  "position": {
+    "x": 440,
+    "y": 20,
+    "z": 1,
+    "height": 300,
+    "width": 400,
+    "tabOrder": 1
+  },
+  "visual": {
+    "visualType": "clusteredColumnChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "LATE_VS_RATING"
+                    }
+                  },
+                  "Property": "IS_LATE"
+                }
+              },
+              "queryRef": "LATE_VS_RATING.IS_LATE",
+              "nativeQueryRef": "IS_LATE",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "LATE_VS_RATING"
+                    }
+                  },
+                  "Property": "Low score share"
+                }
+              },
+              "queryRef": "LATE_VS_RATING.Low score share",
+              "nativeQueryRef": "Low score share"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Share of 1-2 star reviews: on time vs late'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}
