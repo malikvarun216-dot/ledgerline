@@ -3045,3 +3045,26 @@ again under the right hash (101 calls, $0).
 content hash from another source, check the keys exist here (`left_semi` against the live texts) and
 count the misses; two sources of "the same" text are compared by key overlap, never by count. And
 Gold's `review_labels_join_back` test fails a build if a pinned label matches no review.
+
+## [2026-10-24] — CI was red on the last two Session 22 commits: a new notebook was committed with a final newline, after the local test run that called the suite green (found S23)
+
+**In plain words:** GitHub's `ci` workflow failed on `fb63eab` and `e11fd76` — **1 failed, 201 passed,
+6 skipped**. The one failure was `test_no_notebook_ends_with_a_newline`: `databricks/ops/reapply_night.py`
+(new in `fb63eab`) ended with a line break. Databricks saves notebooks without one, so a committed one
+would show as "modified" in the Git folder after every run (the 2026-09-28 incident). Because tests
+failed, the `deploy` job was skipped on both pushes.
+
+- **Damage: none to running code.** The two commits changed `_merge_dims.py`, the new notebook, dbt
+  files, docs and a repair SQL. The bundle `deploy` ships only `ledgerline-pii` and `ledgerline-bridge`,
+  which use none of those; the Silver job runs from the Git folder, not the bundle. Gold and RAW were
+  not touched by CI.
+- **Why nothing caught it before the push.** Session 22's progress entry reports "`pytest` (208)
+  green" — 208 is exactly CI's count (201 + 6 + 1), so the guard ran locally and passed. The notebook
+  was therefore last written *after* that run: a file created by an editor or a tool ends with a line
+  break by default, so a new notebook is born failing this test, and the last run was not the last
+  edit. The CI emails arrived (5:15 and 5:29) and were the first signal, a session later.
+- **Same failure as `ci #85`** (a notebook kept its final newline) — the second time.
+- **Fix:** the final newline stripped (2,953 → 2,952 bytes); suite re-run green locally (S23).
+- **Prevention rule:** **the commit message is handed over only with a `ruff` + `pytest` run whose
+  output is newer than the last file edit** — a green run before the last edit proves nothing about
+  the commit. Any new notebook is checked by `tests/test_notebooks.py` before it is reported done.
