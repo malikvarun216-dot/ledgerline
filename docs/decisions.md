@@ -4381,3 +4381,57 @@ down, so the risk is known rather than hidden.
   tutorials may rely on, for a risk that holds no data today.
 - Trade-off, accepted: Drill 3 attacks Gold before the trial ends; a password-only ACCOUNTADMIN is the
   one identity Drill 3 cannot harden around. Re-decide before Drill 3.
+
+## The analyst copilot signs in as a service user of its own, writes SQL with Claude Sonnet, and Cortex Analyst is asked the same questions through its REST API as that same user (Session 24)
+
+**In plain words:** the copilot gets its own Snowflake login, `LEDGERLINE_COPILOT_SVC`, which can
+only be one of the two reader roles (all states / São Paulo only). Every query it runs goes through
+that login, so Snowflake's masks and row policy decide what it may see, not the agent's prompt. The
+model that writes the SQL is `claude-sonnet-5-5`. Cortex Analyst, the tool it is compared with, gets
+the same questions through a program call made by the same login, and both tools' SQL goes through
+the same run step and the same grader.
+
+- Chosen: **a new key-pair service user** (`TYPE = SERVICE`, ANALYST + ANALYST_SP only, secondary roles
+  off) **on the existing reader warehouse `LEDGERLINE_BI_WH`**. Its queries are told apart by user in
+  `QUERY_HISTORY`; its key can be revoked without touching Power BI.
+  - Rejected: **reuse `LEDGERLINE_BI_SVC`.** No new objects, but the agent's queries and the
+    report's would be one user, and rotating one key would break both.
+  - Rejected: **a warehouse of its own.** The copilot runs ~20 questions by hand, not a refresh
+    burst; a third warehouse would add a monitor to watch for no measured need. Its credits are read
+    by user instead.
+- Chosen: **`claude-sonnet-5-5`** writes the SQL (the human's choice). Cortex Analyst answered S19b
+  with `claude-sonnet-4-6`, so the two tools use models of the same size class.
+  - Rejected: `claude-opus-5-5` — about 5x the price per token, and a bigger model on one side would
+    measure the model, not the design.
+- Chosen: **Cortex Analyst through its REST API** (`/api/v2/cortex/analyst/message`), signed in as
+  `LEDGERLINE_COPILOT_SVC` under the reader role, on a semantic view in scratch schema `S24` that
+  holds the same written facts as the copilot's prompt. Cortex returns SQL; our run step executes it
+  through the same read-only guard and the same role, and the same grader scores it.
+  - Rejected: **the Snowsight playground as ACCOUNTADMIN** (the S19b method). It worked for 7
+    questions; for ~20 it is slow by hand, and ACCOUNTADMIN is not the role the copilot runs as, so
+    the two tools would not face the same masks.
+  - This reverses one line of S19b ("Cortex is not granted to TRANSFORMER: … a service role holding
+    Cortex would sit unused"): now a service user *does* use it. The grant is the narrow database
+    role for Analyst only, to the two reader roles — **verified on the trial first (B?)**; if
+    refused, the playground method is used and recorded.
+- Unchanged: LangGraph (decided 2026-10-24), execution accuracy against an answer key computed **as
+  the copilot's own role**, the way `powerbi/answer_key.sql` is.
+
+## Cortex Analyst's SQL may read the one semantic view it was given; the copilot's may not; and a grader fix re-grades saved answers, never re-asks (Session 24)
+
+**In plain words:** the read-only check let only `LEDGERLINE.GOLD` tables through, so it refused
+Cortex's first correct answer, which read `SEMANTIC_VIEW(LEDGERLINE.S24.GOLD_SV …)`. The check now
+takes a list of semantic views it may also read; the Cortex path passes exactly that one, and the
+copilot passes none. Separately, when the grader turned out wrong, the saved answers were graded
+again by a `regrade` command instead of asking the tools a second time.
+
+- Chosen: **allow the semantic view by its full name, per path.** Cortex's answers are graded under
+  the same check and role as the copilot's, and still nothing outside Gold + that view runs.
+  - Rejected: **skip the check for Cortex** (it never writes): then the two tools would not face the
+    same rule, and "Cortex declined the DELETE" could not be told apart from "nothing checked it".
+  - Rejected: **allow schema `S24` wholesale**: the S18 lesson is that a scratch schema a reader can
+    enter is where clear data turns up; one named view is all Cortex needs.
+- Chosen: **re-grade the saved answers** (`python scripts/copilot.py regrade <file>`), keeping the
+  first grade in the file as `first_grade`, so a grader fix is visible next to what it changed.
+  - Rejected: **run the eval again**: a second run is a second sample (the model may answer
+    differently), so "better after the fix" could be the tool's variance, not the grader's correction.

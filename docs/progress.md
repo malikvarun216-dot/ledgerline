@@ -4566,3 +4566,69 @@ anything loaded), and CI had been red since S22 (a notebook's final newline).
   the first bridge file; drop `workspace.s19b`; S21's list (S19c after Drill 3; `up -d` before Drill 3;
   drop `workspace.s16`, `LEDGERLINE.S21` / `workspace.s21`; ~2026-10-27 Bronze replaced-files deadline;
   ~2026-10-30 rebuild baseline; ~2026-11-05 drop `workspace.s12`; **Snowflake trial ends ~2026-11-10**).
+
+---
+
+## Session 24 — The analyst copilot: plain English over Gold, as a reader, 20/20 — and so was Cortex Analyst
+Date: 2026-10-24 → 10-29
+
+**In plain words:** an analyst can now ask Gold a question in English — *"how many sellers have been
+rated at risk?"* — and get **175**, with the SQL that produced it and the reading it chose. The
+copilot is a LangGraph graph (write SQL → check it is one read of Gold → run it → answer, with up to
+2 repairs when Snowflake rejects a query), signed in as a login that can only be a reader, so masks
+and the row policy apply to whatever SQL the model writes. On 20 questions, each hiding a trap where
+the obvious SQL gives a plausible wrong number, it scored **20/20 as the all-states reader and 20/20
+as the São Paulo reader**, for **$0.21** of Claude. Cortex Analyst, asked the same questions as the
+same login, also scored **20/20 twice** — after two bugs in our grader were found and fixed.
+
+### Built
+- `snowflake/16_copilot_reader.sql`: service user **`LEDGERLINE_COPILOT_SVC`** (key pair, ANALYST +
+  ANALYST_SP only, secondary roles off) on `LEDGERLINE_BI_WH`; `SNOWFLAKE.CORTEX_ANALYST_USER` to both
+  reader roles; schema `S24` (one semantic view, readers may enter, no table); `S21` dropped.
+- `copilot/`: `graph.py` (LangGraph), `sql_guard.py` (sqlglot: one query, Gold only, refusals not
+  repaired), `claude.py` (`claude-sonnet-5-5`, strict tools, adaptive thinking, cached schema),
+  `facts.py` (the written facts, = the semantic view's comments), `snowflake_runner.py`,
+  `cortex.py` (REST), `grade.py` (execution accuracy on result rows + a prose-number check),
+  `questions.yml` (Q1–Q7 from S19b + 13 on the marts), `semantic_view.sql` (`S24.GOLD_SV`).
+- `scripts/copilot.py` (`keys` / `ask` / `eval` / `regrade`); `sf.py --as-copilot`; 29 offline tests
+  (`tests/test_copilot.py`); `langgraph`, `sqlglot`, `pyyaml` in CI.
+- Decisions ×2, incident ×1 (closed), constraints +5 (210).
+
+### Verified
+- **The login:** `LEDGERLINE_COPILOT_SVC / LEDGERLINE_ANALYST / LEDGERLINE_BI_WH`, secondary roles
+  empty; `LEDGERLINE.RAW` refused (`002003`); TRANSFORMER refused at sign-in (`390186`).
+- **The key, as the copilot's own role, = Session 23's Power BI numbers**: ANALYST 6.77% late, 10.62
+  days, 2.2709 vs 4.2901, 4,967 rated before arrival; SP 4.50%, 8.33, 2.5496 vs 4.3244, 1,246.
+- **Copilot:** ANALYST **20/20** ($0.1017), SP **20/20** ($0.0999), 0 repairs needed; Q19 (delete)
+  declined by the model; Q18 / Q20 (masked text) answered "masked" instead of a number.
+- **Cortex Analyst (B? → verified):** REST as the same user and role works; ANALYST **20/20** after
+  re-grading (first grade 18/20, both misses were grader bugs — incident 2026-10-29), SP **20/20**.
+- **Evidence:** `QUERY_HISTORY_BY_USER` as the copilot — every query as ANALYST / ANALYST_SP on
+  `LEDGERLINE_BI_WH`; Cortex ran **55 queries of its own** (`cortex-analyst-*` tags) in 25 requests.
+- Findings: a mask turns NULL into `***` (99,224 vs 40,950 reviews "with text" as a reader); the
+  SP reader's Q1–Q7 equal the all-states reader's (no row policy on `FCT_ORDERS` / `FCT_ORDER_ITEMS`).
+
+### Not verified / not done
+- **The repair loop live:** 0 repairs in 40 live questions; it is proven by the offline tests only.
+- **Cortex credits:** not read yet (`07_spend.sql` as ACCOUNTADMIN; Cortex usage lags).
+- **The prose check** has false alarms (digits inside a seller id hash; "1,000" from the question) and
+  two true ones (95.5%, 1.8 points — correct sums done in prose, not in SQL). Reported, not scored.
+- `tests/test_line_endings.py` fails **locally**: Power BI Desktop re-saved 58 `powerbi/` files with
+  CRLF after S23 (CI checks out LF, so CI is unaffected). Not touched.
+
+### Learning check
+**Skipped by choice** ("skip test", 2026-10-30). The five planned questions are in the bank as
+`parked` (B131–B135, learning.md).
+
+### Next
+**Drill 3** — attacks on Gold, inside the trial (ends **~2026-11-10**). **First, two dates:**
+- **~2026-10-27 has passed** (Bronze replaced-files deadline) and **~2026-10-30 is tomorrow** (a
+  rebuild from the change feed's start needs a baseline). Drill 3's "replay from empty" depends on
+  both: check what Bronze history still holds and take the baseline, or redesign that attack — before
+  anything else.
+- `docker compose … up -d` once before Drill 3 (the triage inbox); S19c's live run after it.
+**Carried, by name:** decide the row policy's meaning (now with the copilot as the example: the SP
+reader sees all-states order facts); admin-login prevention (incident 2026-10-24, OPEN); `label_reviews`
+nightly; the 7 original review titles + first bridge file; drop `workspace.s19b`, `workspace.s16`,
+`workspace.s21`, `LEDGERLINE.S24` (after Drill 3); ~2026-11-05 drop `workspace.s12`; Cortex credits
+for S24; the Power BI CRLF files.

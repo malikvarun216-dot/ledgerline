@@ -3114,3 +3114,24 @@ the KeyPair tab; the Navigator then listed `LEDGERLINE`, `SNOWFLAKE`, `SNOWFLAKE
 Preventions 2 and 3 are in force (the Navigator check is in constraints.md; CLAUDE.md corrected).
 **Prevention 1 is parked by the human** (decisions.md 2026-10-24, "The admin-login prevention is
 parked"); the incident stays OPEN until it is decided before Drill 3.
+
+## [2026-10-29] — The copilot's grader marked two of Cortex Analyst's right answers wrong (Session 24) — CLOSED
+
+**In plain words:** the program that scores the AI answers was itself wrong twice. Cortex answered
+"what share of São Paulo's 2018 revenue came from repeat customers" with **0.0560732**; the key holds
+the same number as a percent, **5.607**, and the grader only knew how to turn a share into a percent,
+not the reverse. Cortex also answered "how many reviews mention *atraso*" by declining — *the comment
+text is masked* — which is the honest answer, but the grader only accepted masking it could see in
+returned rows. First score: **18/20**; the true score: **20/20**.
+
+- **Why nothing caught it.** The 26 offline tests were written with the copilot's habits in mind:
+  percent answers and answered queries. Neither test had a fraction against a percent key, or a
+  decline that explains a mask. A third slip hid behind the first: after the JSON round-trip, saved
+  numbers are text (`"0.05607320"`), and the grader compared them as words.
+- **Found by** reading every wrong answer's SQL and text before believing the score.
+- **Fix forward:** `close()` matches a share against a percent key both ways; a `masked` question
+  accepts a decline that names the mask; numeric text is read as a number. Re-graded from the saved
+  file (decisions.md, same session): 20/20, first grade kept as `first_grade`.
+- **Prevention:** (1) two tests for exactly these shapes (`tests/test_copilot.py`); (2) **a wrong
+  answer is read before it is counted** — a score is reported only after every miss has been looked
+  at, because a grader bug and a tool's mistake look the same in a total.
