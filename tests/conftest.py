@@ -50,6 +50,10 @@ _LIVE_CREDENTIALS = (
     "SNOWFLAKE_PRIVATE_KEY_PATH",
     "SNOWFLAKE_CI_USER",  # Session 16: the CI user
     "SNOWFLAKE_CI_PRIVATE_KEY_PATH",
+    "SNOWFLAKE_BI_USER",  # Session 23: the Power BI reader
+    "SNOWFLAKE_BI_PRIVATE_KEY_PATH",
+    "SNOWFLAKE_COPILOT_USER",  # Session 24: the copilot's reader
+    "SNOWFLAKE_COPILOT_PRIVATE_KEY_PATH",
     "ANTHROPIC_API_KEY",  # Session 19c: the triage agent's key
     "AWS_PROFILE",
     "AWS_SESSION_TOKEN",

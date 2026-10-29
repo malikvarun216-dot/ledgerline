@@ -20,3 +20,7 @@ dbt-databricks>=1.8                          # secondary target, survives trial 
 # --- Snowflake from the laptop (Session 13) ---
 snowflake-connector-python>=3.12             # scripts/sf.py; key-pair sign-in (also pulled in by dbt-snowflake)
 cryptography>=42                             # scripts/sf_keypair.py
+langgraph>=1.2                               # copilot/graph.py: the analyst copilot (S24)
+sqlglot>=30                                  # copilot/sql_guard.py: one read of Gold, nothing else
+anthropic>=0.96                              # copilot/claude.py, triage/agent.py
+requests>=2.31                               # copilot/cortex.py: Cortex Analyst REST

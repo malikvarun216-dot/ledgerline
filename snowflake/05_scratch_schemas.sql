@@ -201,3 +201,8 @@ USE ROLE ACCOUNTADMIN;
 DROP RESOURCE MONITOR IF EXISTS LEDGERLINE_S21_RM;
 SHOW WAREHOUSES;          -- LEDGERLINE_WH, SNOWFLAKE_LEARNING_WH, SYSTEM$STREAMLIT_NOTEBOOK_WH; no S21
 SHOW RESOURCE MONITORS;   -- LEDGERLINE_ACCOUNT_RM, LEDGERLINE_WH_DAILY_RM; no S21
+
+
+-- Session 24: schema S24 (one semantic view for Cortex Analyst, readers allowed in) is made in
+-- 16_copilot_reader.sql beside the copilot's user, so one Ctrl+A runs the session's setup. S21 is
+-- dropped there.
