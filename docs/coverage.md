@@ -203,7 +203,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S22** ✓ (2026-10-24) | **reviews as a source** (Bronze, Silver, bridge, Gold); marts `delivery_promise`, `seller_scorecard`, `late_vs_rating`; AI labels into the production path | — |
 | **S23** ✓ (2026-10-24) | **Power BI on Gold as the analyst role** (B?: sign-in first): promise accuracy, seller scorecard, rating cohorts, complaint trends | — |
 | **S24** ✓ (2026-10-29) | **analyst copilot, LangGraph**: SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 questions, beside Cortex Analyst | — |
-| **Drill 3** | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) | — |
+| **Drill 3** ✓ 2026-10-30 | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) — Gold replayed from RAW (16/19 identical; deletes re-dated), B1–B6, incident regression; Silver from empty and part D carried (progress.md) | — |
 | After the trial | Gold on Databricks via dbt's second target; delivery-days model; hand-labelled review eval set; optional ETA endpoint / demand forecast / stock-out board | — |
 
 **Cost of the additions:** about 10–12 hours spread over existing sessions, two

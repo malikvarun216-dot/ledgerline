@@ -4435,3 +4435,92 @@ again by a `regrade` command instead of asking the tools a second time.
   first grade in the file as `first_grade`, so a grader fix is visible next to what it changed.
   - Rejected: **run the eval again**: a second run is a second sample (the model may answer
     differently), so "better after the fix" could be the tool's variance, not the grader's correction.
+
+## Drill 3 replays Gold from what Snowflake already holds, not from Silver's change feed; the attacks run in CI schemas; the housekeeping and the admin login wait (Drill 3, 2026-10-30)
+
+**In plain words:** "rebuild Gold from nothing" can start from two places. One is Silver's change
+history inside Databricks, whose oldest days are expiring today (30-day retention from 2026-09-30).
+The other is the copy Snowflake already has: every bridge file since version 0 is still in S3, and
+`RAW.SILVER_CHANGES` holds all 794,427 of their rows. Drill 3 rebuilds Gold from the second, into a
+throwaway schema of `LEDGERLINE_CI`, and compares every table with live GOLD.
+
+- Chosen: **replay Gold only, from RAW, into a CI schema**; compare by row count and `HASH_AGG` per
+  table. Live GOLD and SNAPSHOTS are never dropped or rebuilt for the drill (treat live as production).
+  - Rejected: **take a baseline export of every Silver table now, as insurance** for the expiring
+    feed. It would only be needed if both the bridge bucket and RAW were lost; the bucket is the
+    record. Re-decide if a Silver column is ever renamed (the feed cannot span it, S11 E5).
+  - Rejected: **Silver + Gold from empty** (Silver rebuilt from Bronze as one big batch, the
+    documented answer since S10, never tried). About a day of Databricks work, inside the last 11
+    trial days; it stays carried by name.
+- Chosen: **parts A (replay), B (Gold guarantees attacked), C (Gold-era incident regression)** now.
+  Part D, the drill-bound housekeeping (the 11 notebooks to their own schemas, exp_01 out of
+  `bronze.stream_progress`, a real `mergeSchema` field), is carried by name: the human's call,
+  "finish the project first".
+- Kept parked: **MFA for the admin user** (incident 2026-10-24 stays OPEN), re-decided as the S23
+  entry asked: the human's call. Drill 3 does not attack that identity.
+
+### Drill 3 — choices made during the drill (2026-10-30)
+
+- **A snapshot refuses a night older than the newest it holds** (`macros/refuse_old_night.sql`, in all
+  three snapshots). In plain words: the history table checks its own newest night before accepting
+  a dump, so a person re-running an old night by hand gets an error instead of a mass "delete" (B3).
+  - Rejected: **the check in `snapshot_nights.py` only.** That script already never sends an old night;
+    B3's path is a person calling `dbt snapshot --vars` directly, which the script never sees.
+  - Rejected: **refuse the newest night too.** B4 measured it changes nothing, and allowing it keeps
+    a retry after a crash safe.
+- **A replay may read a clone of RAW, on the `ci` target only** (`_sources.yml`: `DBT_RAW_DATABASE` /
+  `DBT_RAW_SCHEMA` read only when `target.name == 'ci'`). Verified: with both variables set, the
+  production target still compiles to `LEDGERLINE.RAW.SILVER_CHANGES`.
+  - Rejected: **a dbt var on any target**, the simpler version. One forgotten environment variable would
+    build production Gold from a clone, and nothing would say so.
+- **`scripts/replay_gold.py` stays as a tool, not a drill file.** It is the project's only proof
+  that Gold can be rebuilt, and how far. Rejected: keep it under `snowflake/experiments/`, where a
+  real rebuild would never look for it.
+- **Open, the human's call (asked at the end of Drill 3):**
+  1. *When was a dimension deleted?* The SCD2 history stamps the snapshot's run time, so it is not
+     rebuildable (1,050 rows). Options: **(a)** keep it as is: the live table is the only copy, guarded
+     by the rule "clone, never replace" (cost: none; the dates stay wrong, only consistently so); **(b)**
+     pass deletes into the snapshot as rows dated by the delete's `_commit_timestamp` (soft delete),
+     so a replay reproduces them (cost: a snapshot and `DIM_*` change, and a one-time migration of
+     live history inside the last trial days).
+  2. *Write-audit-publish?* B5 met the S15 condition: a failing night leaves facts rebuilt with the
+     gap and marts from the day before, both readable. Options: **(a)** build WAP by clone (audit in a
+     schema, `dbt clone` into GOLD only when green; views re-created); **(b)** record the exposure and
+     the manual response, and take WAP into the after-trial Databricks target.
+
+### Correction (same day) — open choice 1 had a hidden third option, and its option (b) was not business time
+
+**In plain words:** "date deletes by Silver's commit time" would make a rebuild reproduce the dates,
+but Silver's commit time is *also* pipeline time: the moment Databricks merged the dump. Example:
+customer `00af5c2c…` (acopiara) has `dbt_valid_from` 2018-01-09 (business time) and `dbt_valid_to`
+2026-10-11 19:45 (the snapshot's run). Silver's delete commit is 2026-10-11 18:43. Night 8, the dump that
+dropped them, carries business changes up to 2018-10-17. An as-of query for 2018-12-01 counts this
+customer as alive under (a) and (b), and only the business date fixes it.
+- (a) run time: free; not reproducible; wrong for every as-of date 2018-10 → 2026-10 on 1,050 rows.
+- (b) Silver commit time: reproducible; still wrong in the same window.
+- **(c) the night's business date**: deletes kept as rows (`is_deleted`, `dim_updated_at` = the night's
+  date) by `current_state`, snapshot `hard_deletes` off, `DIM_*` filters deleted rows; live history
+  migrated by clone → replay → compare (only those 1,050 dates may change) → swap. About one session.
+- Still the human's call. Recommended: (c).
+
+## A deleted dimension row ends on the business date of the dump that no longer has it — not on the snapshot's run time (Drill 3 outcome, 2026-10-30, the human's choice: (c))
+
+**In plain words:** when a customer, product or seller disappears from a nightly dump, the history
+table closes their row on **that dump's date** (night 8 → 2018-12-23), not on the day our pipeline
+happened to run (2026-10-11 19:45). The history then answers "who existed on 2018-12-01?" correctly
+for the 1,050 deleted rows, and a rebuild reproduces it exactly, because the date comes from the data.
+
+- Chosen: **(c)** deletes reach the snapshot as rows: `current_state` keeps a key whose newest change is
+  a delete, flagged `is_deleted`, with `dim_updated_at` = that night's dump date (from Silver's
+  `_last_changed_dump_date` of the night, checked against the fixed calendar 2016-09-04 + 120 days × n);
+  the snapshot's `hard_deletes` is turned off, so the timestamp strategy closes the old row at that date
+  and opens a deleted row; `DIM_*` and `*_CURRENT` filter deleted rows, so readers see what they see now.
+  Live history moves by **clone → replay → compare → swap**: the only allowed difference is those 1,050
+  `dbt_valid_to` values plus the new deleted rows; anything else stops the swap.
+- Rejected: **(a) keep run time** — no work, but 1,050 rows answer every as-of question between
+  2018-10 and 2026-10 wrongly, and the live table is the only copy.
+- Rejected: **(b) Silver's commit time** — reproducible, still pipeline time: the same wrong answers.
+- Rejected: **dbt's `hard_deletes='new_record'`** — it records the delete as a row, but dated by run
+  time as well (constraints.md, dbt): the date is the problem, not the missing row.
+- Cost, accepted: about one session inside the last ~11 trial days; a contract change on `DIM_*`
+  (new column `is_deleted` only if kept visible — decided at build).

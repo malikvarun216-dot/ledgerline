@@ -17,8 +17,8 @@ changes it.
 | exp_02 | partition overwrite: append doubles, predicate-less overwrite wipes | Bronze dims (`replaceWhere`) | **S6 — missed**; S8 | **done** S8 (two sessions late); re-run Drill 2 |
 | exp_03 | MERGE gap: a deleted row survives a plain MERGE | Silver dims | S8 | **done** S8; G rewritten + H added S9 (hold the bad row); re-run Drill 2 |
 | exp_04 | CDC correctness: dedup, `seq` guard, deliberate contamination; + late update after a delete (S9) | Silver CDC (built S9) | **S10** | **done** S10 (on time); its part C changed production (`newest_from="log"`); re-run Drill 2 |
-| exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | **done** S14 (on time; 35/35 predictions; chose `timestamp` + `invalidate`, one night per run) |
-| exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | **done** S17 (on time; 17/17: bug present on a version mark, version lookback k=3 misses / k=4 catches, arrival mark catches + `>=` guard holds 2,868, microbatch lookback 1 day) |
+| exp_05 | SCD2 point-in-time: run time vs business time | Gold dims (dbt snapshot) | the session that builds the snapshot (Gold, S13+) | **done** S14 (on time; 35/35 predictions; chose `timestamp` + `invalidate`, one night per run); re-run Drill 3 (replay + B3/B4: an old night re-fed closed 73,298 — now refused) |
+| exp_06 | late arrival dropped by a high-water mark; lookback fixes it | Gold facts (dbt incremental) | S17 (deferred D3) | **done** S17 (on time; 17/17: bug present on a version mark, version lookback k=3 misses / k=4 catches, arrival mark catches + `>=` guard holds 2,868, microbatch lookback 1 day); re-run Drill 3 on production facts (B2: 500 late orders + 300 items applied, 300 late older changes lost) |
 
 **The rest of the plan is bound the same way** — since Session 9, every
 Databricks / Snowflake / dbt topic has a row, a weight and a session in
@@ -4632,3 +4632,126 @@ reader sees all-states order facts); admin-login prevention (incident 2026-10-24
 nightly; the 7 original review titles + first bridge file; drop `workspace.s19b`, `workspace.s16`,
 `workspace.s21`, `LEDGERLINE.S24` (after Drill 3); ~2026-11-05 drop `workspace.s12`; Cortex credits
 for S24; the Power BI CRLF files.
+
+---
+
+## Drill 3 — attacking Gold on purpose: rebuilt from empty, fed twice, fed late, fed the wrong night
+Date: 2026-10-30 (named, like Drills 1–2). Scope (decisions.md, Drill 3): parts A, B, C; part D
+(housekeeping) carried, the human's call.
+
+**In plain words:** we rebuilt all of Gold from nothing, out of what Snowflake already holds, and
+compared it with live, column by column. Everything matched except one thing the pipeline makes up
+itself: the date a deleted customer, product or seller "ended" in the history tables (1,050 rows).
+Then we broke Gold's inputs on purpose. A range loaded twice: no effect. Changes arriving late: all
+applied, and the late *older* ones correctly ignored. An old night fed back into the history: 73,298
+living customers silently marked as ended. That one had no guard; now it has one, seen firing. An
+incomplete night: Gold's tests caught it, but the facts had already been replaced, so an analyst would
+have read it. That is the condition the project set for building write-audit-publish.
+
+### Start-of-drill re-check
+- **Databricks: a scheduled run never started, again.** `watch_jobs.py`: `ledgerline-silver` 42.3 h,
+  `ledgerline-pii` 41.9 h without a success. Last run 10-28 00:30 UTC, no 10-29 run at all (incident
+  2026-10-18's pattern; the outside watcher saw it). **The SQL warehouse refused every statement from
+  `ledgerline-ci`** (`HTTP 400 … could not be processed by the warehouse`, state STOPPED), so Bronze
+  history could not be read. Neither was resolved in the drill.
+- The two dates: the change feed's oldest files expire ~today. Not needed: every bridge file is in S3
+  and RAW holds all 794,427 rows (decisions.md, Drill 3). `12_check_raw.sql`: empty (pass).
+- Live baseline: `FCT_ORDERS` 99,441 · `FCT_ORDER_ITEMS` 112,650 · `CUSTOMER_CURRENT` 95,696 ·
+  `INVENTORY_CURRENT` 34,348 · `FCT_REVIEWS` 99,224 · snapshots 96,108 / 33,276 / 3,415.
+
+### Built
+- `scripts/replay_gold.py`: staging → snapshots night by night → Gold → unit tests → per-column
+  `HASH_AGG` against every `LEDGERLINE.GOLD` / `SNAPSHOTS` object; `--raw` reads a clone of RAW
+  (ci only), `--build-only`, `--keep`.
+- `scripts/snapshot_nights.py --target ci` (the CI run's own schema, as the CI user).
+- `dbt_project/macros/refuse_old_night.sql`, called by all three snapshots.
+- `_sources.yml`: the RAW source may be a clone on the `ci` target only.
+- `snowflake/experiments/drill3_raw_clones.py` (`setup` / `late` / `drop`).
+
+### Verified
+- **A, replay from empty** (`LEDGERLINE_CI.DRILL3_REPLAY`): 16 of 19 objects SAME. DIFF only in
+  `DBT_VALID_TO` / `VALID_TO`: exactly the 1,050 deleted keys (250 / 400 / 400), live 2026-10-11 vs
+  replay 2026-10-29; 0 `dbt_scd_id` unmatched. All tests passed, including `fct_equals_rebuild`,
+  `gold_governed`, `gold_tables_permanent`, `review_labels_join_back`, `reconcile_sold_vs_decrements`.
+- **B1, a range loaded twice** (170,615 rows): the same 16 SAME / known DIFF as the clean replay.
+- **B2, late arrival** (1,100 held changes): first build 99,241 / 112,350 (predicted). After the late
+  load, equal to live except `RAW_LOADED_AT` on 500 orders + 300 items. The 300 late older changes:
+  0 moved.
+- **B3, an old night re-fed:** closed 412 → 73,710 (73,298, predicted), `rc 0`; the 99 deleted were not
+  re-opened (predicted wrong: same `dbt_scd_id`). **Guard:** night 4 → refused, `rc 1`, history
+  untouched; night 8 → runs; a fresh schema's nights 1, 2 run, then 1 is refused.
+- **B4, the same night twice:** no change.
+- **B5, a failing night:** 3 tests fail (285 SKUs / 226 / 199), 11 nodes skipped. Readable with the gap:
+  4 tables. The 4 marts kept the old version.
+- **B6, clear copies in CI:** 4 reader logins refused at the database; the CI role has no grant option.
+- **C, incident regression** (each guard seen failing on a real break, in CI schemas):
+
+  | Incident | Guard | Fired |
+  |---|---|---|
+  | 2026-10-11 table name `silver` | `12_check_raw` A + B | ✓ 1 injected row, both |
+  | 2026-10-11 already-loaded / duplicates | check C; key (key, version) | ✓ 170,615 pairs; B1 |
+  | 2026-10-11 both roles in one session | `DEFAULT_SECONDARY_ROLES = ()` | ✓ 4 logins `""`; loader refused GOLD |
+  | 2026-10-11 exp_05 run time | business time + one night per run | ✓ replay; **new gap B3, guarded** |
+  | 2026-10-12 anti-join on a change batch | `merge_changes`, `fct_equals_rebuild` | ✓ passed in 3 replays |
+  | 2026-10-12 CRLF slim CI | `test_line_endings.py` | ✓ fired on a CRLF runbook; **also fires on 59 Power BI files (carried)** |
+  | 2026-10-12 transient Gold | `gold_tables_permanent` query | ✓ lists a transient table |
+  | 2026-10-18 jobs not started | `watch_jobs.py` / `job_watch.yml` | ✓ **live: 2 jobs stale** |
+  | 2026-10-18 RAW check false fail | passes on clean data | ✓ clean RAW empty |
+  | 2026-10-18 governed build | `gold_governed` | ✓ `FAIL 1` with a row policy removed |
+  | 2026-10-19 mask escape | database wall | ✓ B6 |
+  | 2026-10-21 tag on lookup table | read through the row policy | ✓ SP 40,434 / 1 state; ANALYST 96,476 / 27 |
+  | 2026-10-24 hash bytes | `review_labels_join_back` | ✓ passed in replay (Databricks side not re-run) |
+
+  Not re-triggered: the slim-CI workflow (no `gh` on this machine), the Databricks-side incidents (the
+  warehouse refused), the admin login (parked). `ruff` clean; `pytest` 236 passed, 1 deselected (the
+  Power BI line endings).
+
+### Incidents (4 entries, three deliberate)
+The replay's delete dates; the `--exclude` recipe selecting snapshots; B3/B4; B1/B2/B5/B6.
+
+### Not done
+Part D (carried). WAP and the delete-date choice: the human's call (decisions.md). All five
+`LEDGERLINE_CI` drill schemas dropped (none left).
+
+### Next
+**First:** read Databricks: why the 10-29 run never started and why the warehouse refuses
+`ledgerline-ci`; run the job once by hand if still stale. Then the two open choices (delete dates,
+WAP), then the S19c triage live run (`docker compose … up -d` first) graded on Drill 3's breaks, then
+`docs/data_journey.md`.
+**Carried, by name:** Drill 3 part D (11 notebooks to their own schemas + one regression-Job run;
+exp_01 out of `bronze.stream_progress`; a real `mergeSchema` field); Silver from empty as one big
+batch (never tried); COPY on the external stage with re-delivered new content (coverage row, open); the
+Power BI CRLF files (59, the line-ending test fails on them); row-policy meaning; admin MFA (OPEN);
+`label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`, `LEDGERLINE.S24`; ~2026-11-05 drop
+`workspace.s12`; Cortex credits for S24; D3 slim-CI module before ~2026-11-10. **Snowflake trial ends
+~2026-11-10.**
+
+### Addendum (same day) — the warehouse, the push, the check
+- The SQL warehouse answers again: `SELECT current_user(), 1` as `ledgerline-ci` → `1`; Bronze → 
+  `INSUFFICIENT_PERMISSIONS` (that identity holds no Bronze grant, by design). The earlier `HTTP 400`
+  was a passing fault of the warehouse (state Stopped, config unchanged: 2X-Small, auto-stop 10 min);
+  cause unknown. Bronze history is still to be read in the human's own session.
+- `origin/dev` was 2 commits behind (Session 24 unpushed); the human pushed `fa39690..25d23d0`.
+- Learning check: **skipped by choice** ("skip test"); five questions parked in the bank (learning.md).
+
+### Addendum (same day) — deletes dated by business time, built and migrated (decisions.md, (c))
+- **Built:** `macros/dims_state.sql` (a deleted key stays in the snapshot's source as an `is_deleted` row
+  dated by its night's dump date); the three snapshots use it, `hard_deletes` removed; `DIM_*` leave
+  out `is_deleted` rows; repair `snowflake/repairs/2026-10-30_delete_business_dates.py` (plan / apply).
+- **Verified, CI first:** a from-empty replay with the new code vs the old live: history +250 / +400 / +400
+  rows, `DIM_*` only `VALID_TO`, everything else SAME except `ORDER_ITEMS_AT_SALE` (below).
+- **Verified, live:** repair applied as the transformer, backups `SNAPSHOTS.*_PRE_DELETE_DATES` (zero-copy
+  clones) first; 250 / 400 / 400 versions re-dated and rows added, each in one transaction. Live history
+  vs the replay: **SAME in every column** (96,358 / 33,676 / 3,815). Production `run_dbt.py build`:
+  PASS 102, WARN 1 (the known 149), ERROR 0. Then **every live Gold object equals the from-empty replay**:
+  Gold, history included, is rebuildable for the first time.
+- **As a reader** (`--as-bi`): customer `00af5c2c…` ends 2018-12-23, not current; customers existing on
+  2018-12-01: **95,946 → 95,796** (150 dropped by dumps up to 2018-08-25); open versions 95,696 =
+  `CUSTOMER_CURRENT`.
+- **A contradiction made visible:** 2,728 order items (219 products, 2,522 sellers) were ordered
+  2017-12-28 .. 2018-09-03, *after* a dump had dropped their product or seller. The 2026 run-time end
+  date had hidden it; now `ORDER_ITEMS_AT_SALE` says `product_found` / `seller_found` = false for them,
+  which is what the dumps say. Cause: the synthetic delete set (incidents 2026-09-19) picked keys without
+  looking at later sales. No mart or reader number changed (`DELIVERY_PROMISE` reads only the customer
+  side, SAME; Power BI and the copilot do not read the join).
+- **Carried:** drop the three `_PRE_DELETE_DATES` backups after one more nightly run reads clean.

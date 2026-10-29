@@ -3135,3 +3135,152 @@ returned rows. First score: **18/20**; the true score: **20/20**.
 - **Prevention:** (1) two tests for exactly these shapes (`tests/test_copilot.py`); (2) **a wrong
   answer is read before it is counted** — a score is reported only after every miss has been looked
   at, because a grader bug and a tool's mistake look the same in a total.
+
+## [2026-10-30] — DELIBERATE (Drill 3, `scripts/replay_gold.py`): Gold rebuilt from empty equals live in 16 of 19 objects; the SCD2 history differs in exactly the 1,050 deleted keys, re-dated to the day of the rebuild
+
+**In plain words:** we rebuilt every Gold table and the three history (SCD2) tables from nothing,
+out of what Snowflake had already loaded (`RAW.SILVER_CHANGES`, 794,427 rows), into a throwaway CI
+schema. Then we compared them with live, column by column. The facts, the marts and the current-state
+tables came out identical to the row, even though live grew them night by night and the replay built
+them in one pass. The history tables did not. Every one of their 133,000 rows matched by id, but the
+"valid until" date of every **deleted** customer, product and seller differed: 250 + 400 + 400 =
+**1,050 rows**. Live says they were deleted on 2026-10-11, the day the history was first built.
+The replay says 2026-10-29, the day of the replay. Neither date is when the business deleted them.
+
+- What happened: `replay_gold.py --schema DRILL3_REPLAY`: SAME for 16 objects (`FCT_ORDERS` 99,441,
+  `FCT_ORDER_ITEMS` 112,650, `CUSTOMER_CURRENT` 95,696, …); DIFF only in `DBT_VALID_TO` of the three
+  snapshots and `VALID_TO` of the three `DIM_*` views built on them. The differing rows are exactly
+  the keys whose newest Silver change is a delete (1,050 of 1,050), and 0 `dbt_scd_id`s are unmatched.
+- What I thought was wrong: nothing; this was predicted from exp_05 C (a snapshot closes a hard-deleted
+  key at `current_timestamp()`). The drill measured how far it reaches: **only** those rows, all of them.
+- Root cause: `hard_deletes='invalidate'` finds a delete by its absence from the source (an anti-join)
+  and stamps the run time. The source's own delete time, the delete change's `_commit_timestamp`
+  in the bridge file, is never shown to the snapshot, because `current_state` drops delete rows.
+- Why nothing caught it before: no test compares the history with a rebuild of itself. Facts have
+  `fct_equals_rebuild`; snapshots had nothing like it, and a rebuild had never been run.
+- Fix: none applied in the drill. The choice (keep live history as the only copy, or date deletes by
+  business time) is recorded in decisions.md under Drill 3.
+- Prevention rule: **the SCD2 history is the one Gold object that cannot be rebuilt from its source
+  as it stands.** Never drop or `CREATE OR REPLACE` a snapshot table to "rebuild" it (S16 already
+  said copy, never replay). A planned rebuild clones it first, and a replay is compared with
+  `replay_gold.py`, which names every column that moved.
+- Lesson: "rebuildable from source" is a claim per column. Here every value was reproducible except
+  the dates the pipeline itself made up.
+
+## [2026-10-30] — Drill 3: the documented "build `--exclude test_type:unit` first" also selects the snapshots, which refuse to run and skip every model after them
+
+**In plain words:** dbt has a default selection rule here that leaves the snapshots out of a plain
+`dbt build`. Passing any `--exclude` on the command line replaces that rule. So the recipe in our own
+docs, "build with `--exclude test_type:unit` first", selects the three snapshots again. They refuse
+to compile without a night (their guard, working), and dbt skips everything that depends on them.
+In the replay, that was 3 errors and **20 models skipped**, the `DIM_*` views and the marts among them.
+
+- What happened: the first replay stopped at "gold, without unit tests": `PASS=81 ERROR=3 SKIP=20`.
+- Root cause: `selectors.yml`'s `default: true` applies only when no `--select` / `--exclude` is given.
+- Why nothing caught it: the recipe was used once in production (S17), on a selection of two facts
+  (`--select`), which never reaches the default selector.
+- Fix: `replay_gold.py` excludes `resource_type:snapshot` alongside the unit tests. Second run: clean.
+- Prevention rule: any command with its own `--exclude` also excludes `resource_type:snapshot`. The
+  recipe is corrected where it lives (CLAUDE.md, the dbt line; constraints.md dbt row).
+- Lesson: a default that protects you only when you pass no options does not protect the people
+  who read your runbook.
+
+## [2026-10-30] — DELIBERATE (Drill 3, B3/B4): an old night fed back into a snapshot closed 73,298 living customers, with no error; the same night fed twice changed nothing
+
+**In plain words:** the customer history (SCD2 snapshot) is fed one nightly dump at a time, oldest
+first. We fed it night 4 again after it already held night 8. The snapshot compares the dump with
+the customers it has open: anyone missing from the dump counts as deleted. Night 4 had only 22,497
+customers, so **73,298 customers who exist today were marked as ended**, dated the day of the run.
+dbt said success. And our nightly script only asks "what is the newest night held?" (still 8), so it
+would never have noticed or repaired it. Feeding night 8 a second time changed nothing.
+
+- What happened (on the replay's copy, `LEDGERLINE_CI.DRILL3_REPLAY.CUSTOMER_HISTORY`, never live):
+  B4, night 8 again: 96,108 rows / 412 closed → unchanged. B3, night 4: rows 96,108, closed **412 →
+  73,710**, `rc 0`.
+- Predicted (computed from `STG_CUSTOMER` before the run): 73,298 closed, **right**; 99 deleted
+  customers re-opened, **wrong**: 0 were re-opened. All 99 already had a history row with the same key
+  and the same business time, so the same `dbt_scd_id`. dbt's snapshot MERGE matches on that id,
+  finds the old (closed) row, and inserts nothing. The damage is one-sided.
+- Why nothing caught it: the snapshot's only guard refused a run *without* a night. Any night was
+  accepted, and `snapshot_nights.py` never sends an old one, so the gap was only reachable by hand,
+  for example a person re-running a night to "fix" something.
+- Fix: macro `refuse_old_night` in all three snapshots: if the table exists and holds a newer night,
+  compilation fails with the reason. Seen firing: night 4 → `rc 1`, history untouched; night 8 → runs;
+  fresh schema nights 1, 2 → run, then 1 → refused.
+- Prevention rule: **a stateful load that compares against "what I hold" must refuse input older
+  than what it holds**. The same rule as Silver's `seq` guard, one layer up.
+- Lesson: an SCD2 snapshot treats "not in today's file" as "deleted", so feeding it the wrong day is
+  a mass delete, and it reports success.
+
+## [2026-10-30] — DELIBERATE (Drill 3, B1/B2/B5/B6, `snowflake/experiments/drill3_raw_clones.py`): Gold from a RAW with a range loaded twice, and from a RAW whose changes arrive late; an incomplete night caught by Gold's tests, and how much of it an analyst would have read
+
+**In plain words:** we made two zero-copy clones of RAW in the CI database and broke each on purpose.
+In one, 170,615 rows (the whole orders file and the newest customer file) were loaded **twice**. In
+the other, 1,100 changes were **held back**, then delivered late with today's arrival time. Gold
+built from the doubled RAW came out identical to the clean replay. Gold built without the held rows
+failed three of its own tests. Once they arrived late, it matched live, with every late change
+applied and every late *older* change correctly ignored. The failed night also measured something
+the project had been waiting for: while it was failing, the facts were already rebuilt with the gap
+and the marts were not, so an analyst would have read facts and marts that disagree.
+
+- **B1, doubled range:** 965,042 RAW rows (170,615 twice). Replay vs live: the same 16 SAME / 6 known
+  `VALID_TO` DIFF as the clean replay. Gold's key is (key, version), so a copy changes nothing; RAW's
+  check C is what sees it (it would list 170,615 `(SOURCE_FILE, SOURCE_ROW)` pairs). Held.
+- **B2, late arrival on today's code** (exp_06 ran on experiment models in S17; this is production's
+  `fct_orders` / `fct_order_items`): first build 99,241 orders / 112,350 items (**predicted, right**).
+  After the late load: facts equal live except `RAW_LOADED_AT`, which moved for exactly g1 200 + g2 300
+  orders and 300 items. **g3, 300 late older changes: 0 moved**, the `>=` guard. Held.
+- **B5, a night that fails a Gold test** (carried since S15): the incomplete night failed
+  `reconcile_sold_vs_decrements` (**285 SKUs**), `relationships fct_order_items → fct_orders` (226)
+  and `fct_reviews → fct_orders` (199); 11 nodes skipped. **Built with the gap, readable:**
+  `FCT_ORDERS`, `FCT_ORDER_ITEMS`, `FCT_REVIEWS`, `COMPLAINT_TRENDS`. **Skipped, so yesterday's
+  version in production:** `DELIVERY_PROMISE`, `LATE_VS_RATING`, `SELLER_SCORECARD`,
+  `ORDER_ITEMS_AT_SALE`. A failing test in `dbt build` stops what comes *after* a model, never
+  the model it tests, which has already replaced its live table.
+- **B6, the replay's copies are clear text** (the S18 mask-escape incident, re-triggered): the CI
+  role sees through the mask, and `LEDGERLINE_CI` has no `restricted` tag, so `DRILL3_REPLAY.
+  CUSTOMER_CURRENT` holds real cities and states. ANALYST, ANALYST_SP, the Power BI user and the
+  copilot user were each refused: `Database 'LEDGERLINE_CI' does not exist or not authorized`. The
+  CI role holds `USAGE` on that database **without grant option**, so it cannot open the door. Only
+  SYSADMIN can. Held, one wall deep. (A probe GRANT was not run: it was stopped by the session's permission check.)
+- Why nothing caught B5's exposure before: the tests did fire. What no test or alarm measures is
+  **who read Gold between the failure and the fix**: the failure is visible to the person running dbt,
+  not to the analyst.
+- Fix: none in the drill. B5 meets the S15 condition for write-audit-publish ("worth it once a bad
+  night has actually reached analysts": here it would have). The choice is in decisions.md, Drill 3.
+- Prevention rule: **in `dbt build`, a test protects the models after it, not the one it tests.**
+  A guarantee that analysts never see a failed night needs the audit to run before anything is
+  published (write-audit-publish), not only before the next model.
+- Lesson: a red build is not a contained build. Count what was already replaced when it went red.
+
+## [2026-10-30] — Recurrence of 2026-10-18: Free Edition did not start the 2026-10-29 06:00 IST run of either scheduled job (found at Drill 3's start)
+
+**In plain words:** both daily Databricks jobs ran on 10-28 and then simply did not run on 10-29: no
+failure, no "skipped", schedule still active. The outside watcher (`scripts/watch_jobs.py`) reported
+both stale (42 h) when Drill 3 opened; the job's Runs page (human, screenshot) shows 10-28 06:00 AM as
+the newest run, succeeded, 9m 23s.
+- Why nothing inside Databricks caught it: a run that never starts emits no failure email or alert.
+  The guard from 2026-10-18 (an absence check from outside) is what saw it, so the guard works.
+- Response: one manual "Run now" (every task is idempotent; the next scheduled run would also
+  catch up), then `watch_jobs.py` must read fresh. Cause still not visible to us; no new prevention
+  beyond the existing outside check. Still open in the same drill: the SQL warehouse refused every
+  statement from `ledgerline-ci` (`HTTP 400`); not yet explained.
+- Prevention rule: unchanged, the outside absence check. The new count matters for the after-trial
+  plan: 5 missed days (10-11, 16, 17, 18, 29) in 28 scheduled ones (10-02 to 10-29), so the Databricks dbt target cannot assume the
+  nightly Silver has run.
+- **Update (same day), the alarm's timeline:** the missed run was due 10-29 00:30 UTC. GitHub's
+  `job-watch` (cron 03:30 UTC) started **~6 h 45 min late** and failed at 10:14 UTC (3:44 PM IST), emailing
+  the human "All jobs have failed" (10 s, 1 annotation). The miss was acted on at Drill 3's start,
+  ~18½ h after it. The guard fired; the response time is GitHub's cron delay (5½ h in the 2026-10-19 incident,
+  6¾ h now) plus the inbox. Accepted for a project; in production this alarm would page, not email.
+- **Also found from the email:** the run used `fa39690` because `origin/dev` is 2 commits behind local
+  `dev` (Session 24's two commits were never pushed). Scheduled workflows run what is pushed.
+
+### Update (2026-10-30, same day) — the replay incident's open fix, applied
+The "Gold rebuilt from empty … 1,050 deleted keys re-dated" entry above said "Fix: none applied in the
+drill". The human chose (c) (decisions.md): deletes now reach the snapshot as rows dated by their dump's
+business date (`macros/dims_state.sql`), and the live history was re-dated by
+`snowflake/repairs/2026-10-30_delete_business_dates.py` after zero-copy backups. Proof: every live Gold
+object, history included, now equals a from-empty replay (`replay_gold.py`, all SAME). The prevention rule
+stands, and is now enforceable: a planned rebuild is compared with `replay_gold.py` before it replaces
+anything.
