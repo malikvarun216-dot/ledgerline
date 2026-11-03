@@ -137,13 +137,19 @@ assert totals.chain_breaks == 1_423, "per-batch counts do not add up to the whol
 
 # COMMAND ----------
 
-feed = change_counts(STOCK)
+start = readable_from(STOCK)  # the feed only reaches back FEED_WINDOW; older versions are not checked
+feed = change_counts(STOCK, start) if start is not None else {}
+unread = 0
 for r in spark.table(CDC_LOG).orderBy("batch_id").collect():
+    if start is None or r.stock_version is None or r.stock_version < start:
+        unread += 1
+        continue
     got = feed.get(r.stock_version, {})
     seen = (got.get("insert", 0), got.get("update_postimage", 0), got.get("delete", 0))
     print(f"batch {r.batch_id} v{r.stock_version}: log {(r.inserted, r.updated, r.deleted)}  feed {seen}")
     assert seen == (r.inserted, r.updated, r.deleted)
     assert got.get("update_preimage", 0) == r.updated
+print(f"feed from v{start}: {unread} older batch(es) not checked")
 
 # COMMAND ----------
 

@@ -4524,3 +4524,24 @@ for the 1,050 deleted rows, and a rebuild reproduces it exactly, because the dat
   time as well (constraints.md, dbt): the date is the problem, not the missing row.
 - Cost, accepted: about one session inside the last ~11 trial days; a contract change on `DIM_*`
   (new column `is_deleted` only if kept visible — decided at build).
+
+## Silver's change-feed self-checks cover the last 29 days, not all of history; the tables keep their 30-day file retention (Session 25, 2026-11-03)
+
+**In plain words:** the nightly Silver checks compared the whole change history with our merge log, and
+Delta stopped serving history older than 30 days, so the checks broke (incidents.md 2026-11-03). We
+chose to check only the history Delta can still serve, and to say out loud how much older history went
+unchecked, rather than make Delta keep old files longer.
+
+- Chosen: **check a moving window.** `readable_from(table)` = the oldest version committed in the last 29
+  days; the verify cells compare every logged version from there and print the count left unchecked.
+  Every older version was already checked green on the nights it was new (the job was green through
+  10-28), so what the window gives up is a re-check of settled history, not a first check.
+- Rejected: **raise `delta.deletedFileRetentionDuration`** (say to 3,650 days). It makes the policy
+  check pass, but VACUUM (run by Predictive Optimization) has already deleted the old change files, so
+  the same read would then fail on a missing file instead. And from then on every file any MERGE replaced
+  is stored forever: storage grows with every night, to protect a check, not a reader.
+- Rejected: **drop the change-feed checks from the scheduled run** (keep them for manual runs). That
+  leaves the nightly MERGE with no proof that it changed only what the log says, and that check is the one
+  that caught a MERGE rewriting unchanged rows (S8).
+- Consequence, recorded: the window makes a **deadline** for anything that reads the feed from a stored
+  position. The bridge (`export_silver`) must run within 29 days of its last export while Silver changes.

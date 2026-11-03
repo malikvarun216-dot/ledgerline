@@ -150,9 +150,14 @@ for dim in DIMS:
 
 for dim in DIMS:
     table = f"{SILVER}.{dim}"
-    feed = change_counts(table)
+    start = readable_from(table)  # the feed only reaches back FEED_WINDOW; older versions are not checked
+    feed = change_counts(table, start) if start is not None else {}
+    unread = 0
     for r in spark.table(MERGE_LOG).where(F.col("dimension") == dim).orderBy("applied_at").collect():
         if r.silver_version is None:
+            continue
+        if start is None or r.silver_version < start:
+            unread += 1
             continue
         got = feed.get(r.silver_version, {})
         seen = (got.get("insert", 0), got.get("update_postimage", 0), got.get("delete", 0))
@@ -160,6 +165,7 @@ for dim in DIMS:
         print(f"{dim:9} {r.dump_date} v{r.silver_version}: log {logged}  feed {seen}")
         assert seen == logged, f"{dim} v{r.silver_version}: feed disagrees"
         assert got.get("update_preimage", 0) == r.updated, f"{dim} v{r.silver_version}: unpaired update"
+    print(f"{dim:9} feed from v{start}: {unread} older logged version(s) not checked")
 
 # COMMAND ----------
 

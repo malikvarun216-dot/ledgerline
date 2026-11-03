@@ -161,15 +161,22 @@ else:
 
 # COMMAND ----------
 
-order_feed = change_counts(ORDERS)
-item_feed = change_counts(ITEMS)
+start = {t: readable_from(t) for t in (ORDERS, ITEMS)}  # the feed only reaches back FEED_WINDOW
+order_feed = change_counts(ORDERS, start[ORDERS]) if start[ORDERS] is not None else {}
+item_feed = change_counts(ITEMS, start[ITEMS]) if start[ITEMS] is not None else {}
+unread = 0
 for r in lines:
+    pairs = ((r.orders_version, start[ORDERS]), (r.items_version, start[ITEMS]))
+    if any(s is None or v is None or v < s for v, s in pairs):
+        unread += 1
+        continue
     o = order_feed.get(r.orders_version, {})
     i = item_feed.get(r.items_version, {})
     seen = (o.get("insert", 0), o.get("update_postimage", 0), i.get("insert", 0))
     print(f"batch {r.batch_id}: log {(r.inserted, r.updated, r.items_inserted)}  feed {seen}")
     assert seen == (r.inserted, r.updated, r.items_inserted)
     assert o.get("update_preimage", 0) == r.updated
+print(f"feed from orders v{start[ORDERS]}, items v{start[ITEMS]}: {unread} older batch(es) not checked")
 deletes = sum(v.get("delete", 0) for feed in (order_feed, item_feed) for v in feed.values())
 assert deletes == 0, "an order or item was deleted; nothing in this pipeline deletes"
 

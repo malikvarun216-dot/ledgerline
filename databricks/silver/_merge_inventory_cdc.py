@@ -559,6 +559,22 @@ def chain_report(events_table=EVENTS):
     ).first()
 
 
+# Delta refuses `table_changes` from a version older than `deletedFileRetentionDuration` (30 days on
+# every Silver table) before reading a file; one day less leaves the run itself a margin (S25: the
+# full-history feed checks failed every night from 2026-10-30, when version 0 turned 30 days old).
+FEED_WINDOW = "29 days"
+
+
+def readable_from(table):
+    """Oldest version the change feed may still be read from; None if no commit is that recent."""
+    return (
+        spark.sql(f"DESCRIBE HISTORY {table}")
+        .where(f"timestamp > current_timestamp() - INTERVAL {FEED_WINDOW}")
+        .agg(F.min("version"))
+        .first()[0]
+    )
+
+
 def change_counts(table, start_version=0):
     """{version: {change type: rows}} from the Change Data Feed."""
     counts = {}

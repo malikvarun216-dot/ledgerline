@@ -3284,3 +3284,38 @@ business date (`macros/dims_state.sql`), and the live history was re-dated by
 object, history included, now equals a from-empty replay (`replay_gold.py`, all SAME). The prevention rule
 stands, and is now enforceable: a planned rebuild is compared with `replay_gold.py` before it replaces
 anything.
+
+## [2026-11-03] — The nightly Silver job failed four nights running (10-30 → 11-02): its own self-checks asked the change feed for history older than 30 days, which Delta refuses (Session 25) — FIXED in code, live run pending
+
+**In plain words:** each Silver notebook ends with a check that reads the table's whole change history
+back to the very first version and compares it with our merge log. Delta keeps a table's old files for
+30 days and refuses, by policy, to read any version older than that. Once the first versions turned 30
+days old, the check could never pass again, and the job went red every night.
+
+- **What failed:** `ledgerline-silver` runs `416438256536373` (10-30), `966857099595781` (10-31),
+  `882278079286248` (11-01), `500333659992405` (11-02): `merge_dims` from 10-30, then `merge_orders` and
+  `merge_inventory_cdc` from 11-01 (their tables are younger). All with
+  `[DELTA_UNSUPPORTED_TIME_TRAVEL_BEYOND_DELETED_FILE_RETENTION_DURATION] … (720 HOURS)`. The failing call:
+  `change_counts(table)` = `table_changes(table, 0)` in "Verify 3/4". The Bronze tasks succeeded every night.
+- **What it did not do:** the MERGEs run before the checks, and no task depends on the three that failed,
+  so no data was refused or half-written. But the checks after the failing one (the "plain re-run writes
+  nothing" proof) did not run either, so four nights went unproven.
+- **Why nothing caught it before it fired:** the rule was already known. constraints.md (Delta, S17)
+  records "Delta refuses time travel to a point older than `deletedFileRetentionDuration`", and the S8
+  row on `startingVersion = 0` even names the date ("until ~2026-10-27"). Both were read as facts about
+  one-off reads (an erasure proof, a first build). Nobody asked which *recurring* code reads from version
+  0. A check that reads all of history passes every day until the day history is too old, so it gave
+  30 green days.
+- **How it was seen:** failure emails each night (Databricks), and `watch_jobs.py` (outside): silver
+  107.4 h stale at the session start. Acted on 4 days late, because the session started then.
+- **Separately, the same morning:** neither scheduled job started on **11-03** at all (pii 30.6 h stale,
+  no 11-03 run in either list): the 2026-10-18 silent skip again, the sixth missed day.
+- **Fix (forward, code):** `readable_from(table)` in the three `_merge_*` modules = the oldest version
+  committed within `FEED_WINDOW` (29 days: the 30-day retention less a day of margin). The verify cells read
+  the feed from there, compare every logged version at or after it, and print how many older ones they did
+  not check. Rejected: lengthening the retention (decisions.md, S25).
+- **Prevention rule:** no scheduled code reads a Delta table's change feed or time travel from a fixed
+  version (0) or a fixed date. It starts from `readable_from` (verify) or from its own stored position
+  (the bridge, the merges' checkpoints), and that position must stay inside the retention window.
+  Corollary for the bridge: `export_silver` reads from its last exported version, so **the bridge must
+  run at least once every 29 days** while a Silver table changes, or its next run hits this same error.
