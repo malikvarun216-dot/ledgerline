@@ -3319,3 +3319,16 @@ days old, the check could never pass again, and the job went red every night.
   (the bridge, the merges' checkpoints), and that position must stay inside the retention window.
   Corollary for the bridge: `export_silver` reads from its last exported version, so **the bridge must
   run at least once every 29 days** while a Silver table changes, or its next run hits this same error.
+
+### Update (2026-11-04, 20:43 UTC) — the fix verified live; two more silent skips
+- **Verified:** after the Git folder was pulled to `3109d7c`, `ledgerline-silver` run `808165232395735`
+  (started by hand as `ledgerline-ci`): all 6 tasks SUCCESS on the first attempt. Its check lines: customer
+  feed from v8, product v7, seller v9, each with 3 nights compared (log = feed on every count, e.g. customer
+  2018-08-25 v9: (25,210, 66, 81) both) and 5 older nights not checked; `review` and `customer_order_link`
+  from v0, every version compared. Orders, items and stock: `vNone`, 9 + 3 batches not checked: neither
+  table has a commit in 29 days (the streams ended), so the window holds nothing to check. That is an honest
+  zero, and the print says so.
+- **Also found:** neither job started on **11-03 or 11-04** (no run in either list; schedules UNPAUSED).
+  Seventh and eighth missed days, the 2026-10-18 pattern; it overlapped a Databricks sign-in outage
+  (`Workspaces Prefetch error: 500`, private window too, 11-03; the workspace API answered throughout).
+  `ledgerline-pii` run `469039448151050` by hand: SUCCESS. `watch_jobs.py`: both `ok`.
