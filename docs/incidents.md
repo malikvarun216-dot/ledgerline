@@ -3464,3 +3464,29 @@ diagnosed it on its own, with high confidence, and proposed the one-line fix we 
 - Prevention rule: **a script that a DAG task runs is run under the DAG before it is called done**, and
   every path it writes comes from the same setting the other tasks use (`DBT_TARGET_PATH`), never from
   the repository root.
+
+## [2026-11-06] — The Gold governance test could not run under slim CI: it looked for 15 tables CI never builds (Session 27) — FIXED
+
+**In plain words:** slim CI builds only what a pull request changed and reads everything else from
+production. Our test that proves Gold's masking and row policy are in place walked every Gold model and
+looked for each one *in the CI schema*. Fifteen of the sixteen were never built there, so the test
+crashed and the PR went red, although nothing about governance was wrong.
+
+- What failed: PR #2 (one comment line in `customer_current.sql`), `dbt-ci / slim-ci`, run on `297b987`:
+  model built (`PR_2_1.customer_current`, 95,696 rows), unit test and both column tests PASS,
+  `gold_governed` **ERROR** `002003`: "Column 'LEDGERLINE_CI.PR_2_1.FCT_ORDERS.ORDER_ID' does not exist or
+  not authorized". PASS 5 / ERROR 1. The schema was dropped afterwards, as designed.
+- Mechanism: `--defer` makes `ref('fct_orders')` point at production `GOLD`, but the test does not use
+  `ref()`: it reads `graph.nodes[…].relation_name`, which dbt computes for the run's own target, so on
+  target `ci` every node's address is the PR schema.
+- Why nothing caught it: the test was written in S18, two sessions after the only other slim CI run
+  (PR #1, S16). Every run since was a full build (production, `GOLD_AUDIT`, the CI replays), where all 16
+  objects exist at the graph's addresses. progress.md had carried "slim CI with the governance hook:
+  built, not verified" since S18; this PR was its first run.
+- Fix (`f64a231`): on target `ci`, the test checks only `selected_resources`; every other target still
+  checks all 16. Local slim CI 6/6 PASS; the compiled test held 5 checks, all on the CI-built
+  `customer_current` (4 column tags + the row policy), none on production. GitHub `slim-ci` green in
+  39 s; `LEDGERLINE_CI` left with no schema but `INFORMATION_SCHEMA`. PR #2 merged (`2bf953e`).
+- Prevention rule: **a test that walks dbt's graph is run once under slim CI (`--defer`) before it is
+  called done**; it addresses objects through `ref()` or filters by `selected_resources`, never by every
+  node's `relation_name`. constraints.md, dbt.

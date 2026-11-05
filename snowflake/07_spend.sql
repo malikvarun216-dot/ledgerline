@@ -37,3 +37,13 @@ GROUP BY 1;
 
 -- 4. The resource monitors' own count (credits this month / today, against their quotas).
 SHOW RESOURCE MONITORS;
+
+-- 5. Cortex Analyst (Session 24's comparison; read Session 27): billed per request, serverless, so
+--    no resource monitor sees it either. Query 1's SERVICE_TYPE = 'AI_SERVICES' line is the cross-check.
+SELECT USERNAME,
+       TO_DATE(START_TIME)         AS day,
+       SUM(REQUEST_COUNT)          AS requests,
+       ROUND(SUM(CREDITS), 4)      AS credits
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_ANALYST_USAGE_HISTORY
+GROUP BY 1, 2
+ORDER BY 2, 1;

@@ -4866,3 +4866,52 @@ the external stage with re-delivered new content; the Power BI CRLF files (59); 
 MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`, `workspace.s12` (due 11-05); the
 agent's tool-call log (so a leak would be provable); the bridge must export within 29 days of its last
 export (last: 11-05, night 8).
+
+---
+
+## Session 27 — Trial housekeeping, and slim CI's first run with governance: red for a real reason, then green
+Date: 2026-11-05 → 2026-11-06 (UTC). Scope: Session 26's `### Next` (the Snowflake work that cannot wait
+for the trial's end, then D3's slim CI live).
+
+**In plain words:** we removed the scratch objects and backups that had done their job, after checking
+the tables they protected, and read what Cortex Analyst cost. Then a real pull request changed a governed
+Gold model. Slim CI went red: the governance test looked for fifteen tables CI never builds. One fix, and
+the PR went green, proving for the first time that the CI role puts the masks and the row policy back on
+what it builds.
+
+### Built
+- `tests/gold_governed.sql`: on target `ci`, checks only `selected_resources` (incidents.md 2026-11-06).
+- `dbt_project/models/gold/customer_current.sql`: one comment line (the PR's change).
+- `snowflake/07_spend.sql` query 5: Cortex Analyst requests and credits per user per day.
+
+### Verified
+- **Before the drops** (as TRANSFORMER; LOADER's listing had shown 0 rows for objects that existed):
+  `SNAPSHOTS.*_PRE_DELETE_DATES` 96,108 / 33,276 / 3,415 rows; `S24` held only `GOLD_SV`. The live
+  customer snapshot: 95,946 current rows (`9999-12-31`), one per key, 95,696 live = `CUSTOMER_CURRENT`,
+  250 current deleted rows.
+- **Dropped by the human** (Snowsight, SYSADMIN): the three backups and schema `S24`; as TRANSFORMER
+  afterwards: 0 backups, no `S24`.
+- **Cortex Analyst spend** (query 5): ZUBA11 1 + 7 requests (10-19, 10-21), `LEDGERLINE_COPILOT_SVC`
+  42 requests on 10-29 = 2.814 credits; 50 requests, **3.35 credits** in all, ~0.067 per request.
+- **Slim CI on PR #2** (`d3/customer-current-note` → `dev`): local `--list-only` 6 nodes (model, 2 column
+  tests, `gold_governed`, `gold_tables_permanent`, 1 unit test). GitHub run 1 on `297b987`: PASS 5 /
+  ERROR 1 (`gold_governed`, `002003` on `PR_2_1.FCT_ORDERS`). Fixed; local slim CI 6/6 PASS, compiled test
+  = 5 checks on the CI-built `customer_current`. GitHub run on `f64a231`: parse, slim-ci (39 s),
+  lint-and-test green. `LEDGERLINE_CI` afterwards: only `INFORMATION_SCHEMA`. Merged with a merge commit
+  (`2bf953e`); local `dev` fast-forwarded; branch deleted with `-d`.
+- **The S18 claim is closed:** `apply_governance` as `LEDGERLINE_CI_RUNNER` tags columns and attaches
+  `STATE_ROWS` on a table it built.
+
+### Not verified / not done
+- `docs/data_journey.md` full text: not started (carried again).
+- `ruff` / `pytest` not run locally this session; the PR's `lint-and-test` passed on `f64a231`.
+
+### Next
+**First (trial ends ~2026-11-10, 4 days):** anything else that needs Snowflake — decide what of Drill 3
+part D or the carried Snowflake items still runs before the trial ends; then `docs/data_journey.md`.
+**Carried, by name:** Drill 3 part D (11 notebooks to their own schemas + one regression-Job run; exp_01
+out of `bronze.stream_progress`; a real `mergeSchema` field); Silver from empty as one big batch; COPY on
+the external stage with re-delivered new content; the Power BI CRLF files (59); row-policy meaning; admin
+MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`, `workspace.s12` (due 11-05); the
+agent's tool-call log; the triage agent's code path as a draft PR through slim CI (now proven to run on a
+governed model); the bridge must export within 29 days of its last export (last: 11-05, night 8).

@@ -4620,3 +4620,28 @@ it, one turn before the cap, to answer with what it has.
   on (not probed here: the documented rule; recorded as such, not in constraints.md).
 - Rejected: **raise `MAX_TURNS`.** r2 read for 8 turns; 12 would cost more on every case and still end
   without an answer on a harder one.
+
+## Under slim CI, `gold_governed` checks only the models the run built (Session 27, 2026-11-06)
+
+**In plain words:** in a pull request's CI run, the governance test now checks the Gold objects that run
+built and nothing else. Production's own nightly build still checks all sixteen.
+
+- Chosen: `selected_resources` filter when `target.name == 'ci'` (`tests/gold_governed.sql`).
+- Rejected: **resolve every model through `ref()`**, so deferred ones are checked in production `GOLD`.
+  A PR's CI would then go red over production's state, which the PR did not touch, and CI_RUNNER would
+  need to read production's tag and policy references; the nightly WAP audit already checks production.
+- Rejected: **filter by `selected_resources` on every target.** A production `dbt test --select
+  gold_governed` on its own would select no model and check nothing, silently.
+- Rejected: **exclude `gold_governed` from slim CI.** The PR that changes a governed model is exactly
+  where a dropped tag would appear first.
+
+## Pull requests into `dev` are merged with a merge commit (Session 27)
+
+**In plain words:** a PR's commits land on `dev` unchanged, under the hashes CI tested, plus one commit
+recording the merge.
+
+- Chosen: **Create a merge commit** (PR #2: `297b987` red, `f64a231` green, merge `2bf953e`).
+- Rejected: **squash and merge** — one new commit; the red-then-green pair that shows what CI caught is
+  gone from `dev`.
+- Rejected: **rebase and merge** — the commits are re-made with new hashes, so `dev` holds commits CI never
+  ran, and `git branch -d` no longer sees the branch as merged (it needs `-D`).
