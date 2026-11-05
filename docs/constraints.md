@@ -279,6 +279,8 @@ they were found within each section.
 | **A paused DAG's backfill runs stay `queued`** (the scheduler logs nothing) | Unpause, backfill, pause again. With `catchup=False` and no future date (`next_dagrun None`) unpausing starts nothing else |
 | **`airflow tasks test` runs each task in its own temporary DAG run**: XCom from an upstream `tasks test` is not there | A templated `xcom_pull` renders `None`. Test such a task with the upstream's value by hand; the real DAG run is the XCom proof |
 | **The container's dbt writes its own `target/`** (`DBT_TARGET_PATH=/tmp/dbt/target`); the repo is bind-mounted read-only | A dbt run on the laptop beside a DAG run does not clobber it. A code edit is live in the next task: never edit models during a backfill |
+| **A re-run of the same DAG run keeps counting tries** (S26: night 8 ran try 1 on 10-18; today's cancels were tries 2 and 3, the approved re-run try 4) | Evidence files are named `…__try<n>` with Airflow's number, not 1-based per day; the triage policy counts its own re-runs in `receipts`, never from `try_number` |
+| **`airflow tasks clear -t … -s <date> -e <date>` matched nothing for a backfill run**; REST `POST /api/v2/dags/{id}/clearTaskInstances` with `dag_run_id` + `include_downstream` cleared 6 tasks (S26) | Clear a task by run id over REST (`triage.airflow_api.Airflow.clear_task`, token from `/auth/token`), not by date on the CLI |
 
 ## Our own data and sources
 
@@ -298,6 +300,7 @@ they were found within each section.
 | **Tests that call a CLI `main()` inherit `.env` and installed clients** | Session 6: the suite published to live `inventory.cdc` from the laptop. `tests/conftest.py::no_live_services` (autouse) now blocks every live credential. Never weaken it; after touching it, re-count the live topic |
 | **Databricks re-saves a notebook on open/run**: adds a `[tool.databricks.environment]` header, drops the final newline | Uncommitted "M" files → a Pull conflicts. Notebooks are committed in that exact form with `environment_version = "6"`; `tests/test_notebooks.py` enforces it |
 | Git-folder conflict → **never merge**: Abort, read one diff, Discard changes, Pull | The workspace is a consumer of git; its side is never kept |
+| **Windows Python prints to the console in cp1252**: a model's `→` raised `UnicodeEncodeError` and stopped a replay after 3 of 4 paid cases (S26) | A script that prints model text calls `sys.stdout.reconfigure(encoding="utf-8")` and saves each result before printing the next |
 | **Working-tree files can be CRLF while git holds LF** (an editor re-saves after checkout; `.gitattributes` acts only when git writes) — dbt checksums the disk | Local slim CI saw 18 phantom changes. `tests/test_line_endings.py` fails on any `w/crlf` (S16) |
 | **GitHub rejects a workflow using `${{ runner.* }}` at job level** — no job runs, the PR stays green, Actions names the run by its path | `actionlint` runs in `ci` (it flags exactly this). Verify a new check by its name on a PR (S16) |
 | **A test that pops a module from `sys.modules`, re-imports it and restores only `sys.modules` leaves two copies**: the package attribute points at the new one | conftest's module flag guarded one copy; a script imported earlier read the real `.env` in a test (S17). The guard is now also an environment variable, `LEDGERLINE_NO_DOTENV` |

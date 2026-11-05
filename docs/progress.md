@@ -4807,3 +4807,62 @@ the external stage with re-delivered new content; the Power BI CRLF files (59); 
 MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`, `LEDGERLINE.S24`, `workspace.s12`
 (due ~11-05), the three `SNAPSHOTS.*_PRE_DELETE_DATES`; Cortex credits for S24; D3 slim-CI module; the
 bridge must export within 29 days of its last export. **Snowflake trial ends ~2026-11-10.**
+
+---
+
+## Session 26 — The triage agent's live run: one escalation, one real bug found and fixed, four replays graded
+Date: 2026-11-05 (UTC). Scope: Session 25's `### Next` (watch the jobs, the S19c live run, then the replays).
+
+**In plain words:** the triage agent answered real failures for the first time. A Silver run we stopped by
+hand: it said "re-run" but not with enough certainty, so the policy asked the human, who said yes. Then a
+real bug none of us had planned: Session 25's publish script could not write inside the read-only
+container. The agent named it with high confidence and wrote the one-line fix, which we applied; night 8
+then published Gold exactly as audited. Four older failures replayed to it scored 4/4 on a key written
+first, after one fix to its loop. Its file tool could read our keys and our drill plan: it now reads only
+files git tracks, minus the plans.
+
+### Built
+- `triage/tools.py`: reads only git-tracked files; `HIDDEN` planning/grading files refused by read, search,
+  `git show`, `git diff`. `triage/agent.py`: `LAST_TURN` announced on turn 7. `triage/replay.py`: 4 cases
+  with their key; classification + policy only, scratch store `data/triage_replay/`.
+- `scripts/publish_gold.py`: `STATE` under `DBT_TARGET_PATH` (the agent's patch).
+- Tests: +5 in `test_triage.py` (refused keys and plans, tracked-only, search, last turn), +1 in
+  `test_publish_gold.py`. `.env.triage` (the copilot's key, $4.81 prepaid, auto-reload off).
+
+### Verified
+- `watch_jobs.py` at 08:27 UTC: both `ok` (silver 7.8 h, pii 7.4 h): **the first scheduled run on S25's
+  feed-window code succeeded.**
+- **Live case 1** (deliberate, incidents.md): night 8, `silver` cancelled twice (Databricks runs
+  `338780033758611`, `456564448666977`) → hook wrote `…silver__try3.json` in the container → agent
+  `runbook:rerun_task` **medium**, $0.147 → policy escalate → human yes → `Airflow.clear_task` over REST
+  cleared 6 tasks → `silver` try 4 SUCCESS (8.5 min), bridge, RAW wait and check, snapshots SUCCESS.
+- **Live case 2** (real): `dbt_build` = `publish_gold.py` failed in 14 s, `Read-only file system` on
+  `…/wap_state/published/partial_parse.msgpack`, "published schema untouched" → agent `code_change`
+  **high**, ~$0.45, patch proposed (not applied by it) → reviewed and applied → `dbt_build` try 3 SUCCESS:
+  PASS 102 / WARN 1 / ERROR 0, publish 12 + 4, governance PASS 2.
+- Gold after: `GOLD` = `GOLD_AUDIT` in rows and `HASH_AGG(*)` for **12/12** tables (`FCT_ORDERS` 99,441,
+  `FCT_ORDER_ITEMS` 112,650, `CUSTOMER_CURRENT` 95,696). As `LEDGERLINE_BI_SVC`: ANALYST 95,696 / cities
+  `***` / 27 states; ANALYST_SP 40,143 / 1; `GOLD_AUDIT` refused. DAG paused again.
+- **Replay** (`python -m triage.replay`): r1 old night pass, r2 audit stop **fail** (8 turns, no answer) →
+  fix → pass, r3 retention pass (found fix `3109d7c`), r4 doubled RAW pass (caught our fake path). 0 re-runs
+  and 0 patches proposed for a data finding. $1.244.
+- Agent spend in all: **$1.84** (live $0.599 + replay $1.244). `ruff` clean; `pytest` green with the known
+  Power BI line-endings test deselected (59 files, unchanged).
+
+### Not verified / not done
+- The code-change path ends in a `.patch` file, not a draft PR through slim CI (coverage row: short of it).
+- No case reached `high` + re-run, so the agent's own "re-run → verify → close" has not run end to end
+  live; its REST clear and the verify-by-checks did, separately (the clear by hand, the checks in the DAG).
+- Did a key leave in live case 1? Its tool calls are not stored; its quoted evidence names no `.env*` file.
+- `docs/data_journey.md` full text: not started.
+
+### Next
+**First (trial ends ~2026-11-10, 5 days):** the Snowflake housekeeping that cannot wait: drop
+`LEDGERLINE.S24` and the three `SNAPSHOTS.*_PRE_DELETE_DATES`; read Cortex credits for S24; the D3 slim-CI
+module is due before the trial ends. Then `docs/data_journey.md`.
+**Carried, by name:** Drill 3 part D (11 notebooks to their own schemas + one regression-Job run; exp_01
+out of `bronze.stream_progress`; a real `mergeSchema` field); Silver from empty as one big batch; COPY on
+the external stage with re-delivered new content; the Power BI CRLF files (59); row-policy meaning; admin
+MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`, `workspace.s12` (due 11-05); the
+agent's tool-call log (so a leak would be provable); the bridge must export within 29 days of its last
+export (last: 11-05, night 8).

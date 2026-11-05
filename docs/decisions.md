@@ -4576,3 +4576,47 @@ metadata only, about a second a table.
 - Cost, accepted: the publish is **not atomic** across tables. For the seconds the clones take, a reader
   can see a new fact table next to an old mart. A whole failed night can no longer be seen; a half-second
   mix of two green nights can.
+
+## The triage agent reads only files git tracks, and never the files that plan or grade its tests (Session 26, 2026-11-05)
+
+**In plain words:** the agent's file tool now opens a file only if git tracks it, which shuts out every
+key file and local note in one rule. It also refuses the handful of tracked files that describe the
+tests we run on it. The team's failure knowledge (incidents, constraints, runbook, decisions) stays open.
+
+- Why now: on its first live case it quoted our drill plan from `docs/progress.md`, and its guard would
+  have let it open `.env.triage` (incidents.md, 2026-11-05).
+- Chosen: **allowlist by `git ls-files`** + `HIDDEN` = `docs/progress.md`, `docs/coverage.md`,
+  `docs/sessions/`, `triage/replay.py`, applied to read, search, `git show`, `git diff`.
+- Rejected: **a longer blocklist** (`.env*`, `CLAUDE.md`, …). It fails the same way the old one did: the
+  next file nobody thought of is readable.
+- Rejected: **hide all of `docs/`.** `incidents.md` is the agent's best evidence (all five cases named the
+  right incident from it); an on-call engineer is expected to read it. Cost, accepted: a replay of a known
+  incident tests "can it find and apply the known failure", not reasoning from nothing. Hidden from it is
+  only what tells it *what we are testing*.
+- Rejected: **leave the docs and accept the contamination.** Every later score would be unreadable.
+
+## Replays of real failures grade the agent through classification and policy only; nothing acts (Session 26)
+
+**In plain words:** to grade the agent on Drill 3's breaks we rebuilt each as an evidence file, wrote the
+right answer first, and ran only the part that thinks (Claude + the policy), never the part that clears
+Airflow tasks. The answer key sits in a file the agent cannot open.
+
+- Chosen: `triage/replay.py` — `agent.triage` + `policy.decide`, scratch store `data/triage_replay/`.
+- Rejected: **re-trigger each break under Airflow** so the hook writes real evidence. Three of the four
+  need production broken on purpose (an old night into the live snapshots, a bad night into live RAW).
+  Drill 3 did those breaks in CI clones for exactly that reason.
+- Rejected: **`agent.handle` with a fake Airflow.** It would score the actions, which the policy decides
+  and the S19c tests already cover; what is unknown is the model's judgment.
+- Cost, accepted: the evidence is reconstructed. r4 shows the price: one path typed from memory, and the
+  agent noticed. Prevention: copy replay evidence from a real artifact.
+
+## The agent's last turn is announced in the tool results, not forced with `tool_choice` (Session 26)
+
+**In plain words:** an agent that keeps reading until it hits its turn cap gives no answer. We now tell
+it, one turn before the cap, to answer with what it has.
+
+- Chosen: one text block, `LAST_TURN`, appended to the turn-7 tool results.
+- Rejected: **`tool_choice` forcing `submit_triage`.** The API does not allow a forced tool with thinking
+  on (not probed here: the documented rule; recorded as such, not in constraints.md).
+- Rejected: **raise `MAX_TURNS`.** r2 read for 8 turns; 12 would cost more on every case and still end
+  without an answer on a harder one.

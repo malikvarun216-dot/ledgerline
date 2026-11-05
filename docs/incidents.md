@@ -3355,3 +3355,112 @@ every hash.
 - Prevention rule: Gold is written only by `publish_gold.py`; `run_dbt.py build` against the production
   target is no longer how a night is published (the DAG calls `publish_gold.py`). A failed audit leaves
   `GOLD_AUDIT` as evidence; it is never published by hand.
+
+## [2026-11-05] — DELIBERATE (Session 26): night 8's `silver` cancelled twice under Airflow; the triage agent's first live case, escalated by policy, re-run on the human's yes
+
+**In plain words:** we started night 8 under Airflow and stopped its Databricks Silver job by hand, twice,
+so the task failed for good. The failure hook wrote one evidence file and the triage agent read it. Claude
+said "re-run it", but only with medium confidence, because nothing in the evidence said who stopped the
+job or why. The written policy lets only high confidence act alone, so the case went to a human. The human
+said yes, the agent's own repair call cleared the task, and the night was re-run.
+
+- Where: backfill run `backfill__2018-12-23T00:00:00+00:00` (night 8, already succeeded 10-18). Cancelled
+  Databricks runs `338780033758611` (try 2) and `456564448666977` (try 3), as `ledgerline-ci`.
+- Evidence: `data/triage/inbox/…silver__try3.json`: log tail ending `ledgerline-silver: run 456564448666977
+  CANCELED`, git sha `67a9840`. **Try 3, not 2:** Airflow keeps counting tries across a re-run of the same
+  DAG run (try 1 was 10-18).
+- Agent: 5 calls, 29,125 in / 1,543 out tokens, **$0.147**. `runbook:rerun_task`, **medium**: "CANCELED is
+  not FAILED", 28 s after start (far from the 60-min timeout), `git_diff_since` empty. Policy: escalate.
+  Report in `data/triage/escalations/`.
+- Human: re-run approved. `triage.airflow_api.Airflow.clear_task` (the agent's repair path) cleared 6
+  tasks with `include_downstream`, `land_night` untouched; `airflow tasks clear` on the CLI matched nothing
+  for the backfill run. Try 4 of `silver`: SUCCESS in 8.5 min.
+- Why nothing caught it: nothing should have. This is the designed path, and the first time each piece
+  ran for real: the hook inside the container, the `/auth/token` + `clearTaskInstances` REST calls, a
+  Claude call, the CI_RUNNER reads.
+- Prevention rule: **a run stopped from outside is a person's decision; the agent never re-runs it
+  alone.** Kept as is: the policy's "high confidence only" rule is what turned a plausible re-run into a
+  question. No change.
+
+## [2026-11-05] — The triage agent could read every secret in the repository folder, and it read our drill plan (Session 26)
+
+**In plain words:** the agent's file-reading tool refused only a file named exactly `.env`. So it could
+have opened `.env.triage` (its own Claude key) or `.env.copilot`, and anything it opens is sent to Claude
+as part of the prompt. It did not do that. What it did do, on its first live case, was search our docs and
+quote `docs/progress.md`, the line where we wrote down the very drill we were running on it. A test the
+subject can read the answers to is not a test.
+
+- What: `triage/tools.py::inside_repo` checked `".env" != p.name`. Readable: `.env.triage`, `.env.copilot`,
+  `CLAUDE.md`, the local-only docs, `data/`. `search_repo` was safe (`git grep` = tracked files only, and
+  every one of those is ignored). The evidence it quoted: `docs/progress.md:4315` ("night 8 re-run, `silver`
+  cancelled twice → re-run → verify → close").
+- Why nothing caught it: the S19c test checked `.env` and `../outside.txt`, the two cases the guard was
+  written for. Nobody listed what else is in the folder. A blocklist is only as good as the list.
+- Fix: `read_repo_file` reads **only files git tracks** (`git ls-files --error-unmatch`): every ignored or
+  excluded file is out at once, whatever its name. On top, `HIDDEN` (planning and grading files:
+  `docs/progress.md`, `docs/coverage.md`, `docs/sessions/`, `triage/replay.py`) is refused by all four
+  file and git tools (`git show` / `git diff` with `:(exclude)` pathspecs). `incidents.md`,
+  `constraints.md`, `runbook.md`, `decisions.md` stay readable: that is what an on-call engineer reads.
+  Tests: 6 refused paths (incl. `docs\progress.md`), `CLAUDE.md` refused, `policy.py` / `incidents.md`
+  read, search skips the planning docs.
+- Did a key leave? The live case's tool calls are not stored, only its quoted evidence, which names no
+  `.env*` file; the four replays ran after the fix. Not provable from our records, so: the key it used is
+  the copilot's, prepaid $4.81, auto-reload off — the worst case is bounded by that balance.
+- Prevention rule: **a tool that reads files for a model is an allowlist (what git tracks), never a
+  blocklist of names.** And any file that grades or plans a test of the agent is hidden from the agent.
+
+## [2026-11-05] — DELIBERATE (Session 26, `triage/replay.py`): four real failures replayed to the triage agent; one ran out of turns without an answer
+
+**In plain words:** we took four failures this project really had (Drill 3, Session 25), rebuilt each as
+the evidence file the hook would have written, wrote down the right answer first, and asked the agent.
+Nothing could act: only the classification and the policy ran. Three answers were right the first time.
+The fourth case got no answer at all: the agent kept reading for all 8 of its turns and never submitted.
+
+- r1 snapshots refused an old night → unknown (medium) → escalate. Named the Drill 3 B3/B4 incident and
+  noticed `snapshot_nights.py` cannot ask for that night, so something else did. **Pass.** $0.256.
+- r2 WAP stopped at the audit (50 items without orders) → **no submission within 8 turns** (8 × tool_use)
+  → escalate. **Fail** (safe). $0.268.
+- r3 Silver retention error on code `18979c3` → re-run (medium) → escalate. Named the 11-03 incident **and**
+  found the fix `3109d7c` on HEAD. **Pass.** $0.188.
+- r4 RAW "row loaded twice" → unknown (medium) → escalate. **Pass**, and it caught a flaw in our replay:
+  the file path we wrote (`silver/orders/v0-6/part-00000…`) is not the bridge's format and is not in RAW.
+- Why nothing caught r2 before: the S19c tests' fake model always submitted on turn 1. A model that only
+  reads was never simulated, so the loop's cap was a silent "no answer".
+- Fix: on turn 7 the tool results carry one more line, `LAST_TURN` ("call submit_triage now … say what is
+  missing"). A forced `tool_choice` was the obvious fix, but the API does not allow it with thinking on.
+  Test: a fake that reads until told, then submits on turn 8. **r2 re-run: unknown (medium), submitted on
+  turn 8, "50 order items have no matching order … not a rerun"; named the S25 WAP incident. Pass.** $0.570.
+- Score: **4 / 4 on the key** (r2 after the fix). 0 re-runs and 0 patches proposed for a data finding.
+  Every one of the 5 cases ended at medium confidence, so the policy acted alone on none. Spend: replay
+  $1.244, live $0.147.
+- Prevention rule: **a bounded agent loop must announce its last turn; an answer cut off by the cap
+  is a test case, not an edge case.** And replay evidence is copied from a real artifact (a log, a RAW
+  row), never typed from memory.
+
+## [2026-11-05] — Write-audit-publish failed on its first run under Airflow: it kept its working files inside the repository, which the container mounts read-only (Session 26) — FIXED, found and patched by the triage agent
+
+**In plain words:** Session 25 tested `publish_gold.py` by hand on this laptop, where the repository is
+writable. Under Airflow the repository is mounted read-only, and the script's first dbt call tried to save
+a file inside it. It stopped in 14 seconds, before touching anything analysts read. The triage agent
+diagnosed it on its own, with high confidence, and proposed the one-line fix we applied.
+
+- What failed: `dbt_build` try 2 of night 8: `[Errno 30] Read-only file system:
+  '/opt/ledgerline/dbt_project/target/wap_state/published/partial_parse.msgpack'`, then `WAP STOPPED at:
+  manifest of what is published. The published schema is untouched.`
+- Why nothing caught it: S25's `### Next` said it plainly: "the DAG change was not run under Airflow".
+  The 6 `test_publish_gold.py` tests check the order of the steps, not where they write. And the fact was
+  already in constraints.md (S17: the container's dbt writes to `DBT_TARGET_PATH=/tmp/dbt/target`):
+  `run_dbt.py` honours it; the new script built its own path beside it.
+- Agent: 7 calls, ~$0.45, `code_change`, **high**: "hardcodes its dbt state directory under the repository
+  … will fail the same way on every run until the script writes under DBT_TARGET_PATH". Policy:
+  `propose_pr`; the patch in `data/triage/proposals/`. The first case of this agent with no answer key
+  anywhere, and the first at high confidence.
+- Fix (the agent's patch, reviewed, applied unchanged): `STATE = Path(os.environ.get("DBT_TARGET_PATH") or
+  ROOT / "dbt_project" / "target") / "wap_state"`. Test: `test_state_follows_dbt_target_path`.
+- Verified: `dbt_build` cleared over REST, try 3 SUCCESS: audit PASS 102 / WARN 1 / ERROR 0, publish 12
+  tables + 4 views, governance PASS 2. `GOLD` = `GOLD_AUDIT` in rows and `HASH_AGG(*)` for **12/12**
+  tables (`FCT_ORDERS` 99,441). As `LEDGERLINE_BI_SVC`: ANALYST 95,696 / `***` / 27 states, ANALYST_SP
+  40,143 / 1 (the S25 baseline); `GOLD_AUDIT` refused.
+- Prevention rule: **a script that a DAG task runs is run under the DAG before it is called done**, and
+  every path it writes comes from the same setting the other tasks use (`DBT_TARGET_PATH`), never from
+  the repository root.
