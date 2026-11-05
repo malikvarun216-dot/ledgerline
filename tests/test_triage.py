@@ -24,7 +24,7 @@ import failure_evidence as fe  # noqa: E402
 
 from triage import agent, policy  # noqa: E402
 from triage.store import AlreadyClaimed, Store  # noqa: E402
-from triage.tools import inside_repo, is_single_read  # noqa: E402
+from triage.tools import inside_repo, is_single_read, read_repo_file, search_repo  # noqa: E402
 
 RUN = "manual__2026-10-22T10:00:00+00:00"
 
@@ -141,6 +141,26 @@ def test_repo_paths_only():
     assert inside_repo(".env") is None
 
 
+# Session 26 (incidents.md 2026-11-05): the live run read docs/progress.md, where the drill was written
+# down, and the old guard would have let it read .env.triage (its own key).
+@pytest.mark.parametrize("path", [".env.triage", ".env.copilot", "docs/progress.md", "docs/coverage.md",
+                                  "docs/sessions/x.md", "docs\\progress.md", "triage/replay.py"])
+def test_keys_and_answer_keys_are_refused(path):
+    assert inside_repo(path) is None
+    assert read_repo_file(path).startswith("refused")
+
+
+def test_only_tracked_files_are_read():
+    assert read_repo_file("CLAUDE.md").startswith("refused")  # git-ignored, exists on this machine
+    assert not read_repo_file("triage/policy.py").startswith("refused")
+    assert not read_repo_file("docs/incidents.md").startswith("refused")
+
+
+def test_search_skips_the_answer_keys():
+    out = search_repo("Session 25")
+    assert "docs/progress.md" not in out and "docs/coverage.md" not in out
+
+
 # --- the agent, end to end with fakes ------------------------------------------------------------
 
 
@@ -165,6 +185,28 @@ def submit(cls, conf="high"):
     )
     resp = SimpleNamespace(content=[block], usage=usage, model="claude-opus-5-5", stop_reason="tool_use")
     return SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(create=lambda **_: resp)))
+
+
+def test_last_turn_is_announced_and_a_reader_submits(tmp_path):
+    """Session 26, replay r2: a model that only reads gets told, one turn before the cap, to submit."""
+    usage = SimpleNamespace(
+        input_tokens=10, output_tokens=5, cache_read_input_tokens=0, cache_creation_input_tokens=0
+    )
+    read = SimpleNamespace(type="tool_use", name="git_log", id="r", input={"n": 1})
+    turns = []
+
+    def create(**kw):
+        last = kw["messages"][-1]["content"]
+        told = isinstance(last, list) and any(b.get("text") == agent.LAST_TURN for b in last)
+        turns.append(told)
+        if told:
+            return submit("unknown", "low").beta.messages.create()
+        return SimpleNamespace(content=[read], usage=usage, model="claude-opus-5-5", stop_reason="tool_use")
+
+    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(create=create)))
+    t = agent.triage(client, Store(tmp_path / "s.db"), "b", bundle())
+    assert t.result["triage_class"] == "unknown"
+    assert turns == [False] * (agent.MAX_TURNS - 1) + [True]
 
 
 class FakeAirflow:

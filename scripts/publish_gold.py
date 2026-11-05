@@ -36,7 +36,9 @@ from run_dbt import main as dbt  # noqa: E402
 
 from generators._common import load_local_env  # noqa: E402
 
-STATE = ROOT / "dbt_project" / "target" / "wap_state"
+# The container mounts the repo read-only and points dbt at DBT_TARGET_PATH (constraints.md);
+# the WAP manifests live beside dbt's own target, never inside the repository there.
+STATE = Path(os.environ.get("DBT_TARGET_PATH") or ROOT / "dbt_project" / "target") / "wap_state"
 WAP = ["--vars", "{wap: true}"]
 INCREMENTALS = ["path:models/gold,config.materialized:incremental"]
 GOLD_TABLES = ["path:models/gold,config.materialized:table", *INCREMENTALS]

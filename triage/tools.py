@@ -34,9 +34,35 @@ def is_single_read(sql: str) -> bool:
     return bool(_ONE_READ.match(body)) and ";" not in body
 
 
+# Session 26 (incidents.md 2026-11-05): tracked files that plan or grade the drills run ON this agent.
+# A triager that reads the answer key is not being tested. Failure knowledge (incidents, constraints,
+# runbook, decisions) stays readable: a real on-call engineer reads those too.
+HIDDEN = ("docs/progress.md", "docs/coverage.md", "docs/sessions", "triage/replay.py")
+
+
+def hidden(rel: str) -> bool:
+    rel = rel.replace("\\", "/")
+    return any(rel == h or rel.startswith(h + "/") for h in HIDDEN)
+
+
+def tracked(p: Path) -> bool:
+    """Only files git tracks. Every ignored or excluded file is out at once: all .env* keys,
+    CLAUDE.md, the local-only docs, data/ (Session 26: the old check refused only a file named .env)."""
+    rel = p.relative_to(ROOT).as_posix()
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", "--", rel],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return out.returncode == 0
+
+
 def inside_repo(path: str) -> Path | None:
     p = (ROOT / path).resolve()
-    return p if p.is_relative_to(ROOT) and ".git" not in p.parts and ".env" != p.name else None
+    if not p.is_relative_to(ROOT) or ".git" in p.parts or p.name.startswith(".env"):
+        return None
+    return None if hidden(p.relative_to(ROOT).as_posix()) else p
 
 
 def git(*args: str) -> str:
@@ -61,19 +87,19 @@ def git_log(n: int = 15) -> str:
 def git_show(sha: str) -> str:
     if not _SHA.match(sha or ""):
         return "refused: give a commit sha (7-40 hex characters)"
-    return git("show", "--stat", "--patch", sha)
+    return git("show", "--stat", "--patch", sha, "--", ".", *(f":(exclude){h}" for h in HIDDEN))
 
 
 def git_diff_since(sha: str) -> str:
     """What changed in the repository since the commit the failed task ran with."""
     if not _SHA.match(sha or ""):
         return "refused: give a commit sha (7-40 hex characters)"
-    return git("diff", "--stat", "--patch", f"{sha}..HEAD")
+    return git("diff", "--stat", "--patch", f"{sha}..HEAD", "--", ".", *(f":(exclude){h}" for h in HIDDEN))
 
 
 def read_repo_file(path: str, start: int = 1, lines: int = 200) -> str:
     p = inside_repo(path)
-    if p is None or not p.is_file():
+    if p is None or not p.is_file() or not tracked(p):
         return f"refused or not found: {path}"
     text = p.read_text(encoding="utf-8", errors="replace").splitlines()
     s = max(1, int(start))
@@ -86,8 +112,10 @@ def search_repo(pattern: str, path: str = ".") -> str:
     p = inside_repo(path)
     if p is None:
         return f"refused: {path}"
+    # git grep searches tracked files only; the pathspecs drop the hidden planning docs.
     return git(
-        "grep", "-n", "-I", "-F", "--max-count=20", "-e", pattern, "--", str(p.relative_to(ROOT)) or "."
+        "grep", "-n", "-I", "-F", "--max-count=20", "-e", pattern, "--",
+        p.relative_to(ROOT).as_posix() or ".", *(f":(exclude){h}" for h in HIDDEN),
     )
 
 

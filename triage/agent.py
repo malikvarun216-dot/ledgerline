@@ -32,6 +32,7 @@ from triage.tools import ROOT, run_tool, tool_specs
 HOME = Path(os.environ.get("TRIAGE_HOME", ROOT / "data" / "triage"))
 MODEL = os.environ.get("TRIAGE_MODEL", "claude-opus-5-5")
 MAX_TURNS = 8
+LAST_TURN = "This is your last turn: call submit_triage now with what you have read. Say what is missing."
 DAILY_CAP_USD = float(os.environ.get("TRIAGE_DAILY_USD", "5"))
 # $ per million tokens: input, output, cache read, cache write (5-minute). Read 2026-10-22.
 PRICES = {
@@ -165,6 +166,10 @@ def triage(client, store: Store, bundle_name: str, bundle: dict) -> Triage:
             results.append(
                 {"type": "tool_result", "tool_use_id": b.id, "content": text, "is_error": is_error}
             )
+        if turn == MAX_TURNS - 1:
+            # Session 26 (replay r2): the model read for all 8 turns and never submitted. A forced
+            # tool_choice is not allowed with thinking on, so the last turn is announced instead.
+            results.append({"type": "text", "text": LAST_TURN})
         messages.append({"role": "user", "content": results})
     return Triage(None, f"no submission within {MAX_TURNS} turns")
 

@@ -55,3 +55,18 @@ def test_audit_only_never_publishes():
 def test_ci_needs_a_schema():
     with pytest.raises(SystemExit):
         publish_gold.main(["--target", "ci"])
+
+
+def test_state_follows_dbt_target_path(monkeypatch, tmp_path):
+    """Session 26: under Airflow the repo is read-only; the WAP manifests go where dbt's target goes."""
+    import importlib
+
+    monkeypatch.setenv("DBT_TARGET_PATH", str(tmp_path / "target"))
+    try:
+        assert importlib.reload(publish_gold).STATE == tmp_path / "target" / "wap_state"
+        monkeypatch.delenv("DBT_TARGET_PATH")
+        default = publish_gold.ROOT / "dbt_project" / "target" / "wap_state"
+        assert importlib.reload(publish_gold).STATE == default
+    finally:
+        monkeypatch.delenv("DBT_TARGET_PATH", raising=False)
+        importlib.reload(publish_gold)
