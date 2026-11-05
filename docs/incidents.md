@@ -3332,3 +3332,26 @@ days old, the check could never pass again, and the job went red every night.
   Seventh and eighth missed days, the 2026-10-18 pattern; it overlapped a Databricks sign-in outage
   (`Workspaces Prefetch error: 500`, private window too, 11-03; the workspace API answered throughout).
   `ledgerline-pii` run `469039448151050` by hand: SUCCESS. `watch_jobs.py`: both `ok`.
+
+## [2026-11-04] — DELIBERATE (Session 25, `snowflake/experiments/s25_wap.py`): Drill 3's B5 re-run against write-audit-publish: a bad night stopped at the audit, and analysts' Gold did not move
+
+**In plain words:** we fed Gold a night with 50 order items whose orders never arrived (the kind of
+night that, in Drill 3, was readable in 4 Gold tables before its tests went red). This time the night
+was built in an audit copy, two tests failed there, and the tables analysts read kept every row and
+every hash.
+
+- Where: `LEDGERLINE_CI.S25_WAP` (a full Gold replayed from a clone of RAW, standing in for GOLD), its
+  audit schema `S25_WAP_AUDIT`, RAW clone `S25_RAW`; `publish_gold.py --target ci`.
+- What happened (W1): `rc 1`, stopped at "write + audit": `reconcile_sold_vs_decrements` FAIL 50,
+  `relationships fct_order_items → fct_orders` FAIL 50, 11 skipped. Published: 12 tables, rows and
+  `HASH_AGG(*)` identical before and after. Audit: `FCT_ORDER_ITEMS` 112,700 (+50).
+- W2: the bad rows removed, 300 late order changes delivered, `publish_gold.py` again: the audit was
+  seeded from the published facts, so the 50 bad items appeared in neither schema (0 / 0).
+- W3: `rc 0`; compared with live GOLD column by column: SAME in 15 objects + 3 snapshots; `FCT_ORDERS`
+  differs only in `RAW_LOADED_AT`, on exactly 300 orders (they truly arrived later).
+- Why nothing caught B5's exposure before (Drill 3): tests ran after the table they tested was replaced.
+- Fix: write-audit-publish (decisions.md, S25), run live the same day: `rc 0`, every live Gold object
+  re-created with the same rows and hashes; readers kept their grants, masks and row policy.
+- Prevention rule: Gold is written only by `publish_gold.py`; `run_dbt.py build` against the production
+  target is no longer how a night is published (the DAG calls `publish_gold.py`). A failed audit leaves
+  `GOLD_AUDIT` as evidence; it is never published by hand.

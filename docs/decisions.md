@@ -4545,3 +4545,34 @@ unchecked, rather than make Delta keep old files longer.
   that caught a MERGE rewriting unchanged rows (S8).
 - Consequence, recorded: the window makes a **deadline** for anything that reads the feed from a stored
   position. The bridge (`export_silver`) must run within 29 days of its last export while Silver changes.
+
+## Gold is published by write-audit-publish: each night is built and tested in `GOLD_AUDIT`, and only a green night is cloned into `GOLD` (Session 25, 2026-11-05, the human's choice: (a))
+
+**In plain words:** until now the nightly build wrote straight into the tables analysts read, and the
+tests ran after. Drill 3 (B5) showed a bad night stays readable: 4 Gold tables replaced with the gap
+before their tests went red. Now the night is built in a schema nobody reads (`GOLD_AUDIT`), every Gold
+test runs there, and only if all pass are the tables copied into `GOLD`. A copy here is a zero-copy clone:
+metadata only, about a second a table.
+
+- Chosen: **WAP by table clone**, one script, `scripts/publish_gold.py`:
+  1. *seed* — `dbt clone --full-refresh` of the three incremental facts from `GOLD` into `GOLD_AUDIT`, so
+     each night starts from what is published (never from yesterday's audit, which may hold a failed night);
+  2. *write + audit* — `dbt build` of `models/gold` with `--vars {wap: true}` (generate_schema_name sends
+     `gold` to `gold_audit`; staging and snapshots are read where they are), every test included;
+  3. *stop* on any failure: `GOLD` is not touched;
+  4. *publish* — `dbt clone --full-refresh` of every Gold table from `GOLD_AUDIT` into `GOLD` (owned by
+     the transformer; a clone keeps column tags and the row policy, constraints.md S18b), then the views
+     re-created in `GOLD` and the governance tests run there.
+  Snapshots stay published in place, one night per run (guarded by `refuse_old_night`): their history is
+  the input of Gold, not something analysts read directly, and a snapshot cannot be rebuilt by a clone.
+- Rejected: **schema swap** (`ALTER SCHEMA GOLD SWAP WITH GOLD_AUDIT`), the only atomic publish. The
+  transformer would have to own `GOLD`, and a swapped-in schema loses `MANAGED ACCESS` and the readers'
+  future grants (S16 B1). Same reasons as S16; nothing changed them.
+- Rejected: **(b) record the exposure and take WAP to the Databricks target after the trial.** It leaves
+  the B5 exposure open on the platform analysts read today, and the last week of the trial is the last
+  chance to build it on Snowflake.
+- Corrected from S16: "a second Gold-sized step every night" is wrong. The publish is clones, not a
+  rebuild; the build itself is the same build as today, only in another schema.
+- Cost, accepted: the publish is **not atomic** across tables. For the seconds the clones take, a reader
+  can see a new fact table next to an old mart. A whole failed night can no longer be seen; a half-second
+  mix of two green nights can.

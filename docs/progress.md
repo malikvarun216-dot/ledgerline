@@ -4755,3 +4755,55 @@ Power BI CRLF files (59, the line-ending test fails on them); row-policy meaning
   looking at later sales. No mart or reader number changed (`DELIVERY_PROMISE` reads only the customer
   side, SAME; Power BI and the copilot do not read the join).
 - **Carried:** drop the three `_PRE_DELETE_DATES` backups after one more nightly run reads clean.
+
+---
+
+## Session 25 — Silver's nightly checks outlived their history; Gold is now published only after its audit passes
+Date: 2026-11-03 → 2026-11-04 (UTC). Scope: Drill 3's `### Next` (Databricks first, then the WAP choice).
+
+**In plain words:** the nightly Silver job had been red for four nights. Its own self-checks asked
+Delta for history older than 30 days, which Delta refuses. They now check the last 29 days and say how
+much older history they skipped. Then Gold got write-audit-publish: each night is built and tested in
+`GOLD_AUDIT`, and analysts' `GOLD` changes only when every test passes. Proven on a copy (a bad night
+stopped, analysts' tables unmoved), then run live (same rows, readers unaffected).
+
+### Built
+- `readable_from` + `FEED_WINDOW` (29 days) in `databricks/silver/_merge_{dims,orders,inventory_cdc}.py`;
+  the three notebooks' change-feed checks use it (incidents.md 2026-11-03).
+- `scripts/publish_gold.py` (seed → write + audit → stop → publish → governance check);
+  `generate_schema_name` sends Gold to `gold_audit` under `--vars {wap: true}`; `gold_tables_permanent`
+  covers `GOLD_AUDIT`; the DAG's `dbt_build` task calls it; `tests/test_publish_gold.py` (6).
+- `snowflake/17_gold_audit.sql` (run by the human: `GOLD_AUDIT`, managed access, transformer only,
+  tag `restricted`); `snowflake/experiments/s25_wap.py`.
+
+### Verified
+- **Silver, live:** run `808165232395735` (after the Git folder pulled `3109d7c`): 6/6 tasks SUCCESS.
+  Dims: customer from v8, product v7, seller v9, 3 nights each with log = feed, 5 older not checked;
+  review, customer_order_link from v0, all checked; orders / items / stock `vNone` (no commit in 29 days).
+  `ledgerline-pii` run by hand: SUCCESS. `watch_jobs.py`: both `ok`.
+- **WAP in CI** (`LEDGERLINE_CI.S25_WAP` = Gold replayed from a RAW clone, PASS 100 / WARN 1):
+  W1 bad night (50 items without orders): `rc 1` at the audit, 2 tests FAIL 50, 11 skipped; 12 published
+  tables identical in rows and `HASH_AGG(*)`; audit `FCT_ORDER_ITEMS` 112,700. W2: bad items in neither
+  schema afterwards (0 / 0). W3 green night: `rc 0`, publish 12 tables in 25 s + 4 views; vs live GOLD:
+  SAME in 15 objects + 3 snapshots, `FCT_ORDERS` differs only in `RAW_LOADED_AT` on exactly 300 orders.
+- **WAP live:** `publish_gold.py` `rc 0` (PASS 102, WARN 1 known, ERROR 0; governance PASS 2). All 16
+  GOLD objects re-created at 21:14 UTC with the same rows and hashes as before. As `LEDGERLINE_BI_SVC`:
+  ANALYST 95,696 customers / 27 states / cities `***`, `GOLD_AUDIT` refused; ANALYST_SP 40,143 / 1 state
+  (baseline). Future grants reached the clones.
+- `ruff` clean; `pytest` passed with the known Power BI line-endings test deselected. CI schemas dropped.
+
+### Not verified / not done
+- Scheduled runs skipped 11-03 and 11-04 (cause not visible). The 11-05 06:00 IST run is the first
+  scheduled one on the new code: `watch_jobs.py` next session.
+- The DAG change was not run under Airflow (stack down, DAG paused). The S19c triage live run, the
+  `docs/data_journey.md` full text, and the `_PRE_DELETE_DATES` backups drop: carried.
+
+### Next
+**First:** `watch_jobs.py`; then the S19c triage live run (`docker compose … up -d` first) graded on Drill
+3's breaks, with the DAG's `dbt_build` now `publish_gold.py`; then `docs/data_journey.md`.
+**Carried, by name:** Drill 3 part D (11 notebooks to their own schemas + one regression-Job run; exp_01
+out of `bronze.stream_progress`; a real `mergeSchema` field); Silver from empty as one big batch; COPY on
+the external stage with re-delivered new content; the Power BI CRLF files (59); row-policy meaning; admin
+MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`, `LEDGERLINE.S24`, `workspace.s12`
+(due ~11-05), the three `SNAPSHOTS.*_PRE_DELETE_DATES`; Cortex credits for S24; D3 slim-CI module; the
+bridge must export within 29 days of its last export. **Snowflake trial ends ~2026-11-10.**

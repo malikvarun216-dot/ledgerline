@@ -235,6 +235,7 @@ they were found within each section.
 | **Cortex Analyst runs queries of its own** under the asking role, on the session's warehouse, tagged `cortex-analyst-<uuid>` in `QUERY_HISTORY`: **55 queries in 25 of 42 requests** (47 as ANALYST, 8 as ANALYST_SP; 14.5 s in total) — why the second reader needed fewer is not known | S24. Its warehouse time is ours and its reads obey the role's masks; count it in spend by warehouse, not only by Cortex credits |
 | **A masking policy turns NULL into `***`**: as a reader, `review_comment_message IS NOT NULL` counts **99,224** reviews, while **40,950** have text (`has_message`). `LIKE '%atraso%'` on the masked column returns **0** with no error | S24. Never count or filter on a masked column; give readers a public flag (`has_message`). An AI answering "how many mention X" from masked text says "none" — both tools here said "masked" instead (Q20) |
 | **A user can read its own query history** with `INFORMATION_SCHEMA.QUERY_HISTORY_BY_USER(USER_NAME => …)` under a reader role, no ACCOUNTADMIN | S24. The copilot's evidence (role, warehouse, tag per query) is checked as the copilot itself |
+| **A table cloned into a managed-access schema gets that schema's FUTURE grants** (the readers kept SELECT on 12 Gold tables re-created by `dbt clone`), and keeps its column tags and row policy (SP analyst 40,143 / 1 state, cities `***`) | S25 live WAP publish. Readers need no re-grant after a publish; the audit schema gets no reader grants at all |
 
 ## Power BI Desktop (2.159.883.0, October 2026, Store app) on Snowflake Gold
 
@@ -266,6 +267,8 @@ they were found within each section.
 | **Any `--select` / `--exclude` on the command line replaces the `default: true` selector** — `build --exclude test_type:unit` selects the snapshots again; they refuse without a night and skip 20 downstream models | Drill 3. Every command with its own `--exclude` adds `resource_type:snapshot` |
 | **A replay of Gold from RAW equals live in every fact, mart and current-state table; the snapshots differ only in `dbt_valid_to` of hard-deleted keys** (1,050 of 1,050, re-dated to the replay's day; 0 `dbt_scd_id` unmatched) | Drill 3 `replay_gold.py`. The SCD2 history is not rebuildable as it stands: never replace it, clone before any planned rebuild |
 | **A snapshot can date a delete by business time if the delete reaches it as a row**: `dims_state` keeps the key flagged `is_deleted` with `dim_updated_at` = its night's dump date; no `hard_deletes`; the timestamp strategy closes the last version there | Drill 3. Live history re-dated (1,050) and equal to a from-empty replay in every column; `DIM_*` filter `is_deleted` |
+| **`dbt clone` skips a target that already exists unless `--full-refresh`**; with it, `CREATE OR REPLACE TABLE … CLONE` from the `--state` manifest's relation | S25 WAP: seed and publish both pass `--full-refresh`, guarded by `tests/test_publish_gold.py` |
+| **`dbt parse --target-path X` already resolves `relation_name`** (with `--vars`), so a parse is a cheap `--state` manifest for `dbt clone` | S25: `GOLD_AUDIT` manifest = parse with `{wap: true}` |
 
 ## Airflow (3.1, LocalExecutor in Docker)
 
