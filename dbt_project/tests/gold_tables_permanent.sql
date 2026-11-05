@@ -21,6 +21,6 @@ from {{ target.database }}.information_schema.tables
 where table_type = 'BASE TABLE'
   and is_transient = 'YES'
   and table_schema in (
-    {%- if target.name == 'ci' %} '{{ target.schema | upper }}'
-    {%- else %} 'STAGING', 'SNAPSHOTS', 'GOLD'
+    {%- if target.name == 'ci' %} '{{ target.schema | upper }}', '{{ target.schema | upper }}_AUDIT'
+    {%- else %} 'STAGING', 'SNAPSHOTS', 'GOLD', 'GOLD_AUDIT'
     {%- endif %})

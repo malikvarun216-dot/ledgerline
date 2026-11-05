@@ -9,11 +9,17 @@
   Target `ci` (Session 16): EVERY node goes into the run's own schema (target.schema, named by the
   slim CI script), in database LEDGERLINE_CI. One throwaway schema per run, dropped after; model
   names are unique across the project, so one schema holds staging and Gold side by side.
+
+  `--vars "{wap: true}"` (Session 25, write-audit-publish; scripts/publish_gold.py): Gold is built in
+  its audit schema instead, GOLD_AUDIT (made by SYSADMIN, 17_gold_audit.sql), or <run schema>_AUDIT
+  on `ci`. Everything else is still read where it lives, so the audit build reads the published
+  staging views and snapshots.
 -#}
 {% macro generate_schema_name(custom_schema_name, node) -%}
+    {%- set audit = var('wap', false) and (custom_schema_name or '') | trim | lower == 'gold' -%}
     {%- if target.name == 'ci' or custom_schema_name is none -%}
-        {{ target.schema }}
+        {{ target.schema }}{{ '_AUDIT' if audit else '' }}
     {%- else -%}
-        {{ custom_schema_name | trim }}
+        {{ 'gold_audit' if audit else custom_schema_name | trim }}
     {%- endif -%}
 {%- endmacro %}

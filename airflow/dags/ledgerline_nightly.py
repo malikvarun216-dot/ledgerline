@@ -91,9 +91,11 @@ with DAG(
         task_id="snapshots",
         bash_command="$PIPELINE_PYTHON $LEDGERLINE_ROOT/scripts/snapshot_nights.py --apply",
     )
+    # Write-audit-publish (Session 25): the night is built and tested in GOLD_AUDIT and cloned into GOLD
+    # only if every test passes. The task id stays `dbt_build` (the triage policy names it).
     dbt_build = BashOperator(
         task_id="dbt_build",
-        bash_command="$PIPELINE_PYTHON $LEDGERLINE_ROOT/scripts/run_dbt.py build",
+        bash_command="$PIPELINE_PYTHON $LEDGERLINE_ROOT/scripts/publish_gold.py",
         retries=0,  # a failed test is a finding, not a flake
     )
 
