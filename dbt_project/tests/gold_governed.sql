@@ -28,8 +28,14 @@
 {%- set gov = var('governance_schema', 'LEDGERLINE.GOVERNANCE') %}
 {%- set checks = [] %}
 {%- if execute and target.type == 'snowflake' %}  {#- tags and policies are Snowflake's; the databricks target has neither #}
+  {#- On target `ci` (slim CI, Session 27) only the models THIS run built are checked: the rest are
+      deferred to production, but a graph node's relation_name still points into the CI schema
+      (defer rewrites ref(), not the graph), so checking them asked for 15 objects that were never
+      built (PR #2: `PR_2_1.FCT_ORDERS does not exist`). Production's own run checks all of them. -#}
+  {%- set only = selected_resources if target.name == 'ci' else none %}
   {%- for node in graph.nodes.values()
-        if node.resource_type == 'model' and node.package_name == 'ledgerline' and node.fqn[1] == 'gold' %}
+        if node.resource_type == 'model' and node.package_name == 'ledgerline' and node.fqn[1] == 'gold'
+        and (only is none or node.unique_id in only) %}
     {%- set rel = node.relation_name %}
     {%- set kind = 'view' if node.config.materialized == 'view' else 'table' %}
     {%- for col in node.columns.values() %}
