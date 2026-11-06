@@ -4680,3 +4680,45 @@ input. dbt signs in as the `ledgerline-ci` service principal, into four schemas 
   nothing about what dbt needs (the S12 lesson). Compromise recorded: one principal both loads raw
   and builds Gold (Snowflake splits LOADER / TRANSFORMER); the only other principal, `ledgerline-jobs`,
   has no secret by design.
+
+## The one bridge file that still holds unredacted review text is replaced by a redacted copy under `repaired/`, and the original is deleted (Session 29, 2026-11-06, the human's choice)
+
+**In plain words:** one Parquet file in the bridge bucket still holds the 8 review titles we redacted
+everywhere else in S22 / S28. We write a redacted copy of it to a part of the bucket Snowflake never
+reads, teach the two readers of the bucket's history (the bridge's own checks and `dbx_raw.py`) to
+read that copy in its place, check the copy against what the two raw tables already hold, and only
+then delete the original. The personal data is gone from its earliest copy; nothing is loaded twice.
+
+- The file: `silver/review/v0000000000-0000000007/part-00000-…-2278-1.c000.snappy.parquet` — 101,640
+  rows, 8 to redact (probe S29 on `workspace.raw`). The folder's other file, `v8-8` (7 rows), is the
+  S22 re-applied night and was written already redacted. The S28 incident said "2 files": it is one.
+- Chosen: **copy at `s3://ledgerline-bridge-8176114c/repaired/silver/review/v0000000000-0000000007/`**,
+  same folder name, one file, rows in the same order; only the two text columns change, by Silver's own
+  `REDACT` pattern. Outside the stage's URL (`silver/`) and outside the Snowflake role's read grant
+  (`silver/*`), so Snowpipe cannot load it however the S3 event is filtered.
+- Chosen: **a line per replaced file in `workspace.bridge.repair_log`** (original, copy, rows, rows
+  changed, reason) — the export log keeps saying what was exported, the repair log says what changed
+  since.
+- Chosen: **readers read the two trees as one**: `silver/<t>/` ∪ `repaired/silver/<t>/`, with "no folder
+  in both" checked — once the original is deleted, the union holds every exported row exactly once.
+  The bridge's Verify 1 accepts a logged folder found in either tree; Verify 2 (files rebuild Silver)
+  reads the union.
+- Chosen: **`dbx_raw.py` loads the repaired tree by `INSERT … WHERE NOT EXISTS`, keyed on the original
+  file name**, not by `COPY INTO`: COPY remembers paths, and the copy's path is new, so COPY would add
+  101,640 rows the live table already holds. A rebuild from empty gets them; the live table gets 0.
+- Snowflake: nothing changes. RAW was repaired in S22 and its pipe loads only `silver/`. A rebuild of
+  RAW from the files would need a second stage over `repaired/` — not built: the trial ends ~11-10, and
+  after it the Databricks raw is the one rebuilt.
+- Order: write copy (plan first) → compare the copy with `workspace.raw` row for row, by file and row
+  number → delete the original → bridge Verify 1 + 2 green. **Deleting is last**, after a check.
+- Rejected: **rewrite the file in place.** On an external stage a file with the same name and new
+  content is loaded again (S28 constraint, proven on COPY); the pipe would add its 101,640 rows to RAW
+  a second time.
+- Rejected: **accept, and guard the loader** (re-run the raw repair after every load, test that raw is
+  clean). Cheaper, but the numbers stay in S3 — exactly the "repaired the copy, not the data" gap the
+  S28 incident is about.
+- Rejected: **delete the original and drop its export_log line.** The log would then lie about what
+  was exported and loaded; a reader could not tell a repaired file from a range never exported.
+- Open: whether the bucket keeps old object versions. The laptop key cannot read the bucket's
+  versioning setting and the write role cannot delete a version; if versioning is on, the old version
+  must be removed by the human in the console.

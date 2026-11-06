@@ -52,6 +52,26 @@ COMMENT 'Databricks Silver change feed as delivered by the bridge; loaded only b
 """
 
 
+# Silver tables with a file replaced after export (decisions.md S29: the review file whose text S22
+# redacted). The copy sits at the same path under `repaired/`, with the original's file name, and the
+# original is deleted. COPY INTO keys on the path it read, so it would load the copy as a new file and
+# double rows the table already holds; an INSERT keyed on the original's name loads it exactly once —
+# into a raw rebuilt from empty — and does nothing to a raw that already holds that file.
+REPAIRED_TABLES = ["review"]
+
+
+def repaired_insert_sql(table: str) -> str:
+    source = f"replace(_metadata.file_path, '{BUCKET}repaired/', '')"
+    return f"""
+INSERT INTO {TABLE}
+SELECT '{table}', to_variant_object(struct(*)), {source}, _metadata.row_index + 1,
+       _metadata.file_modification_time, current_timestamp()
+FROM parquet.`{BUCKET}repaired/silver/{table}/`
+WHERE NOT EXISTS (SELECT 1 FROM {TABLE} held
+                  WHERE held.table_name = '{table}' AND held.source_file = {source})
+"""
+
+
 def copy_sql(table: str) -> str:
     # PATTERN is relative to the FROM path. The folder name ends with '/', so `customer/` never
     # matches `customer_order_link/`.
@@ -114,6 +134,9 @@ def main() -> int:
             continue
         out = wh.sql(copy_sql(table))
         print(f"  {table:<20} COPY: {out}")
+        if table in REPAIRED_TABLES:
+            out = wh.sql(repaired_insert_sql(table))
+            print(f"  {table:<20} repaired files, INSERT: {out}")
     if args.apply:
         print("\nafter:")
         for r in wh.sql(f"SELECT table_name, count(DISTINCT source_file) AS files, count(*) AS n "

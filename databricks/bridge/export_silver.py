@@ -63,8 +63,12 @@ log = spark.table(EXPORT_LOG)
 display(log.orderBy("table_name", "from_version"))
 for name in TABLES:
     logged = {r.path for r in log.where(F.col("table_name") == name).where("path IS NOT NULL").collect()}
-    found = set(existing_folders(name))
-    print(f"{name:<17} logged folders {len(logged)}, in bucket {len(found)}")
+    exported, repaired = set(existing_folders(name)), set(existing_folders(name, REPAIRED_ROOT))
+    found = exported | repaired
+    print(f"{name:<17} logged folders {len(logged)}, in bucket {len(found)}"
+          f"{f' ({len(repaired)} repaired)' if repaired else ''}")
+    both = exported & repaired
+    assert not both, f"{name}: a repair is half done, folder in both trees: {both}"
     assert logged == found, f"{name}: log and bucket disagree: {logged ^ found}"
 
 # COMMAND ----------

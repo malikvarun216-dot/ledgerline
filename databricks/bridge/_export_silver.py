@@ -41,6 +41,12 @@ SILVER = "workspace.silver"
 BRIDGE_SCHEMA = "workspace.bridge"
 EXPORT_LOG = f"{BRIDGE_SCHEMA}.export_log"
 BRIDGE_ROOT = "s3://ledgerline-bridge-8176114c/silver"
+# A file that had to be repaired after it was exported (S29: review text redacted, decisions.md S29) is
+# copied to the same path under `repaired/`, which Snowflake's stage and role never read, and the
+# original is deleted. Every reader of the bucket's history reads both trees as one; a folder in both
+# means a repair is half done.
+REPAIRED_ROOT = "s3://ledgerline-bridge-8176114c/repaired/silver"
+REPAIR_LOG = f"{BRIDGE_SCHEMA}.repair_log"
 
 # Every Silver data table with a change feed, and the columns that identify one row. PII is not here:
 # it lives in workspace.pii, and how it reaches Snowflake is decided in Session 18.
@@ -93,9 +99,12 @@ def folder(name, start, end):
     return f"{BRIDGE_ROOT}/{name}/v{start:010d}-{end:010d}"
 
 
-def existing_folders(name):
+def existing_folders(name, root=BRIDGE_ROOT):
+    """Folders under `root`, as full paths. With root=REPAIRED_ROOT the paths are rewritten to their
+    `silver/` spelling, so they compare with the export log's paths."""
     try:
-        return sorted(f.path.rstrip("/") for f in dbutils.fs.ls(f"{BRIDGE_ROOT}/{name}/") if f.isDir())
+        found = sorted(f.path.rstrip("/") for f in dbutils.fs.ls(f"{root}/{name}/") if f.isDir())
+        return [p.replace(REPAIRED_ROOT, BRIDGE_ROOT, 1) for p in found]
     except Exception as err:  # only "missing" is expected; anything else is re-raised
         if _missing_path(err):
             return []
@@ -176,7 +185,10 @@ def replay(name):
     """Silver's current rows, rebuilt from the bridge files alone: each key's newest change, kept
     unless that change is a delete. This is what Gold's MERGE will do in Snowflake."""
     keys = TABLES[name]
-    exported = spark.read.option("recursiveFileLookup", "true").parquet(f"{BRIDGE_ROOT}/{name}/")
+    roots = [f"{BRIDGE_ROOT}/{name}/"]
+    if existing_folders(name, REPAIRED_ROOT):  # the two trees as one (decisions.md S29)
+        roots.append(f"{REPAIRED_ROOT}/{name}/")
+    exported = spark.read.option("recursiveFileLookup", "true").parquet(*roots)
     newest = Window.partitionBy(*keys).orderBy(F.col("_commit_version").desc())
     return (
         exported.withColumn("_n", F.row_number().over(newest))
