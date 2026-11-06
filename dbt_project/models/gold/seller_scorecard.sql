@@ -30,7 +30,7 @@ with seller_orders as (
 joined as (
     select
         so.*,
-        date_trunc(month, o.created_at)::date as purchase_month,
+        date_trunc('month', o.created_at)::date as purchase_month,
         o.status,
         p.order_id is not null        as delivered,
         p.is_late,
@@ -47,8 +47,8 @@ monthly as (
         purchase_month,
         count(*)                                                    as orders,
         sum(items)                                                  as items,
-        sum(revenue)::number(14, 2)                                 as revenue,
-        sum(freight)::number(14, 2)                                 as freight,
+        sum(revenue)::{{ dec(14, 2) }}                                 as revenue,
+        sum(freight)::{{ dec(14, 2) }}                                 as freight,
         count_if(status = 'canceled')                               as canceled_orders,
         count_if(delivered)                                         as delivered_orders,
         count_if(delivered and is_late)                             as late_orders,
@@ -63,8 +63,8 @@ monthly as (
 rated as (
     select
         *,
-        round(late_orders / nullif(delivered_orders, 0), 4)  as late_rate,
-        round(score_sum / nullif(reviewed_orders, 0), 4)      as avg_score
+        {{ ratio('late_orders', 'delivered_orders') }}  as late_rate,
+        {{ ratio('score_sum', 'reviewed_orders') }}      as avg_score
     from monthly
 )
 

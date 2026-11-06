@@ -31,8 +31,8 @@ select
     o.product_id,
     o.seller_id,
     o.sku_key,
-    o.price::number(12, 2)          as price,
-    o.freight_value::number(12, 2)  as freight_value,
+    o.price::{{ dec(12, 2) }}          as price,
+    o.freight_value::{{ dec(12, 2) }}  as freight_value,
     o.commit_version as silver_version,
     o.change_type    as silver_change_type,
     o.loaded_at      as raw_loaded_at

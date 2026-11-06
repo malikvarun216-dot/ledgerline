@@ -12,13 +12,12 @@
 
 select 'gold' as layer, review_id, order_id
 from {{ ref('fct_reviews') }}
-where regexp_like(coalesce(review_comment_message, '') || ' ' || coalesce(review_comment_title, ''),
-                  '{{ pattern }}', 's')
+where {{ rlike_dotall("coalesce(review_comment_message, '') || ' ' || coalesce(review_comment_title, '')", pattern) }}
 
 union all
 
-select 'raw', record:review_id::string, record:order_id::string
+select 'raw', {{ vget('record', 'review_id') }}::string, {{ vget('record', 'order_id') }}::string
 from {{ source('raw', 'silver_changes') }}
 where table_name = 'review'
-  and regexp_like(coalesce(record:review_comment_message::string, '') || ' '
-                  || coalesce(record:review_comment_title::string, ''), '{{ pattern }}', 's')
+  and {{ rlike_dotall("coalesce(" ~ vget('record', 'review_comment_message') ~ "::string, '') || ' ' || coalesce("
+                      ~ vget('record', 'review_comment_title') ~ "::string, '')", pattern) }}

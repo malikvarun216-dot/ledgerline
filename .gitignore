@@ -37,6 +37,7 @@ derby.log
 
 # --- dbt ---
 dbt_project/target/
+dbt_project/target_dbx/
 dbt_project/dbt_packages/
 dbt_project/logs/
 .user.yml

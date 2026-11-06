@@ -21,5 +21,5 @@
         when {{ days_late }} <= 3  then 4
         when {{ days_late }} <= 7  then 5
         else 6
-    end
+    end{% if target.type == 'databricks' %}::bigint{% endif %}  {#- an INT literal there; the contract says BIGINT (S28) #}
 {%- endmacro %}

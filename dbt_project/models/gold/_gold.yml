@@ -5,6 +5,13 @@ version: 2
 # it builds, and refuses the build if they differ — a renamed or retyped column cannot reach an
 # analyst by accident. Staging has no contracts: it is ours, and changes with Silver.
 
+# Types (S28, dbt target `databricks`): Databricks has no VARCHAR without a length, no NUMBER, and
+# calls Snowflake's TIMESTAMP_LTZ just TIMESTAMP. Each such type is written once with its two
+# spellings (a YAML anchor, `&t_…`) and reused (`*t_…`); the Snowflake spelling is unchanged.
+# A ratio (round(a / b, 4)) is NUMBER(10,4) on Snowflake and a DOUBLE on Databricks: `t_ratio`.
+# Never a bare `number` for it: that IS NUMBER(38,0), and Snowflake rounded every stored ratio to a
+# whole number, silently, from S22 to S28 (incidents.md 2026-11-06; tests/ratios_match_their_counts.sql).
+
 models:
   - name: customer_current
     description: One row per person (customer_unique_id) as Silver holds them now.
@@ -13,13 +20,13 @@ models:
       contract: {enforced: true}
     columns:
       - name: customer_unique_id
-        data_type: varchar
+        data_type: &t_varchar "{{ 'string' if target.type == 'databricks' else 'varchar' }}"
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: customer_zip_code_prefix, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
-      - {name: customer_city, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
-      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: customer_zip_code_prefix, data_type: *t_varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_city, data_type: *t_varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_state, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - name: dim_updated_at
         data_type: timestamp_ntz
         description: Business time — when this version became true in Olist.
@@ -29,10 +36,10 @@ models:
       - name: _last_changed_dump_date
         data_type: date
       - name: silver_version
-        data_type: number
+        data_type: &t_number "{{ 'bigint' if target.type == 'databricks' else 'number' }}"
         description: The Silver change-feed version this row comes from.
       - name: silver_night
-        data_type: number
+        data_type: *t_number
         description: The n-th change-feed version of the table (for the dimensions, the n-th dump).
 
   - name: product_current
@@ -40,16 +47,16 @@ models:
       contract: {enforced: true}
     columns:
       - name: product_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: product_category_name, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: product_weight_g, data_type: number}
-      - {name: product_length_cm, data_type: number}
-      - {name: product_height_cm, data_type: number}
-      - {name: product_width_cm, data_type: number}
-      - {name: product_photos_qty, data_type: number}
+      - {name: product_category_name, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: product_weight_g, data_type: *t_number}
+      - {name: product_length_cm, data_type: *t_number}
+      - {name: product_height_cm, data_type: *t_number}
+      - {name: product_width_cm, data_type: *t_number}
+      - {name: product_photos_qty, data_type: *t_number}
       - name: dim_updated_at
         data_type: timestamp_ntz
         description: Business time — when this version became true in Olist.
@@ -59,10 +66,10 @@ models:
       - name: _last_changed_dump_date
         data_type: date
       - name: silver_version
-        data_type: number
+        data_type: *t_number
         description: The Silver change-feed version this row comes from.
       - name: silver_night
-        data_type: number
+        data_type: *t_number
         description: The n-th change-feed version of the table (for the dimensions, the n-th dump).
 
   - name: seller_current
@@ -70,13 +77,13 @@ models:
       contract: {enforced: true}
     columns:
       - name: seller_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: seller_zip_code_prefix, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_city, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_state, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_zip_code_prefix, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_city, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_state, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - name: dim_updated_at
         data_type: timestamp_ntz
         description: Business time — when this version became true in Olist.
@@ -86,10 +93,10 @@ models:
       - name: _last_changed_dump_date
         data_type: date
       - name: silver_version
-        data_type: number
+        data_type: *t_number
         description: The Silver change-feed version this row comes from.
       - name: silver_night
-        data_type: number
+        data_type: *t_number
         description: The n-th change-feed version of the table (for the dimensions, the n-th dump).
 
   - name: inventory_current
@@ -97,20 +104,20 @@ models:
       contract: {enforced: true}
     columns:
       - name: sku_key
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: product_id, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: product_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - name: stock_qty
-        data_type: number
+        data_type: *t_number
         data_tests:
           - not_null
-      - {name: seq, data_type: number}
+      - {name: seq, data_type: *t_number}
       - {name: _event_ts, data_type: timestamp_ntz}
-      - {name: silver_version, data_type: number}
-      - {name: silver_night, data_type: number}
+      - {name: silver_version, data_type: *t_number}
+      - {name: silver_night, data_type: *t_number}
 
   - name: dim_customer
     description: SCD2 customer from the customer_history snapshot. Point in time = valid_from <= T < valid_to.
@@ -121,16 +128,16 @@ models:
       - scd2_shape: {arguments: {key: customer_unique_id}}
     columns:
       - name: customer_unique_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         data_tests: [not_null]
-      - {name: customer_zip_code_prefix, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
-      - {name: customer_city, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
-      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: customer_zip_code_prefix, data_type: *t_varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_city, data_type: *t_varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_state, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - {name: valid_from, data_type: timestamp_ntz}
       - {name: valid_to, data_type: timestamp_ntz}
       - {name: is_current, data_type: boolean}
-      - {name: silver_night, data_type: number}
+      - {name: silver_night, data_type: *t_number}
 
   - name: dim_product
     description: SCD2 product from the product_history snapshot. Point in time = valid_from <= T < valid_to.
@@ -140,19 +147,19 @@ models:
       - scd2_shape: {arguments: {key: product_id}}
     columns:
       - name: product_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         data_tests: [not_null]
-      - {name: product_category_name, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: product_weight_g, data_type: number}
-      - {name: product_length_cm, data_type: number}
-      - {name: product_height_cm, data_type: number}
-      - {name: product_width_cm, data_type: number}
-      - {name: product_photos_qty, data_type: number}
+      - {name: product_category_name, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: product_weight_g, data_type: *t_number}
+      - {name: product_length_cm, data_type: *t_number}
+      - {name: product_height_cm, data_type: *t_number}
+      - {name: product_width_cm, data_type: *t_number}
+      - {name: product_photos_qty, data_type: *t_number}
       - {name: valid_from, data_type: timestamp_ntz}
       - {name: valid_to, data_type: timestamp_ntz}
       - {name: is_current, data_type: boolean}
-      - {name: silver_night, data_type: number}
+      - {name: silver_night, data_type: *t_number}
 
   - name: dim_seller
     description: SCD2 seller from the seller_history snapshot. Point in time = valid_from <= T < valid_to.
@@ -162,16 +169,16 @@ models:
       - scd2_shape: {arguments: {key: seller_id}}
     columns:
       - name: seller_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         data_tests: [not_null]
-      - {name: seller_zip_code_prefix, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_city, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_state, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_zip_code_prefix, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_city, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_state, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - {name: valid_from, data_type: timestamp_ntz}
       - {name: valid_to, data_type: timestamp_ntz}
       - {name: is_current, data_type: boolean}
-      - {name: silver_night, data_type: number}
+      - {name: silver_night, data_type: *t_number}
 
   # ---- Facts (Session 15) -------------------------------------------------------------------------
   - name: fct_orders
@@ -187,21 +194,21 @@ models:
           arguments: {staging: stg_orders, key: [order_id]}
     columns:
       - name: order_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: customer_id, data_type: varchar, description: "Per-ORDER id (Olist issues one per order). Not the person.", config: {meta: {pii_class: public}}}
+      - {name: customer_id, data_type: *t_varchar, description: "Per-ORDER id (Olist issues one per order). Not the person.", config: {meta: {pii_class: public}}}
       - name: customer_unique_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         description: The person, from customer_order_link. NULL until the link's night has landed.
         data_tests:
           - not_null:
               config:
                 severity: warn   # an order placed after the newest dims night waits for the next one
-      - {name: status, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: source_status, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: status, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: source_status, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - {name: created_at, data_type: timestamp_ntz, description: "Business time the order was placed — the point-in-time join's T."}
       - {name: approved_at, data_type: timestamp_ntz}
       - {name: shipped_at, data_type: timestamp_ntz}
@@ -209,10 +216,10 @@ models:
       - {name: canceled_at, data_type: timestamp_ntz}
       - {name: unavailable_at, data_type: timestamp_ntz}
       - {name: estimated_delivery_at, data_type: timestamp_ntz}
-      - {name: units, data_type: number}
-      - {name: silver_version, data_type: number, description: "Change-feed version of Silver orders this row comes from; decides which change wins (merge_changes >=)."}
-      - {name: silver_change_type, data_type: varchar, description: "insert or update_postimage (a delete removes the row).", config: {meta: {pii_class: public}}}
-      - {name: raw_loaded_at, data_type: timestamp_ltz, description: "When this row's change arrived in RAW; the high-water mark (minus one hour), S17."}
+      - {name: units, data_type: *t_number}
+      - {name: silver_version, data_type: *t_number, description: "Change-feed version of Silver orders this row comes from; decides which change wins (merge_changes >=)."}
+      - {name: silver_change_type, data_type: *t_varchar, description: "insert or update_postimage (a delete removes the row).", config: {meta: {pii_class: public}}}
+      - {name: raw_loaded_at, data_type: &t_ltz "{{ 'timestamp' if target.type == 'databricks' else 'timestamp_ltz' }}", description: "When this row's change arrived in RAW; the high-water mark (minus one hour), S17."}
 
   - name: fct_order_items
     description: One row per order item = one unit sold, as Silver holds it now. Incremental, merge_changes.
@@ -223,23 +230,23 @@ models:
           arguments: {staging: stg_order_items, key: [order_id, order_item_id]}
     columns:
       - name: order_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}]
         data_tests:
           - not_null
           - relationships: {arguments: {to: ref('fct_orders'), field: order_id}}
       - name: order_item_id
-        data_type: number
+        data_type: *t_number
         constraints: [{type: not_null}]
-      - {name: product_id, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: sku_key, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: price, data_type: "number(12,2)"}
-      - {name: freight_value, data_type: "number(12,2)"}
-      - {name: silver_version, data_type: number}
-      - {name: silver_change_type, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: raw_loaded_at, data_type: timestamp_ltz, description: "When the change arrived in RAW; the high-water mark (minus one hour), S17."}
+      - {name: product_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: sku_key, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: price, data_type: &t_money12 "{{ 'decimal(12,2)' if target.type == 'databricks' else 'number(12,2)' }}"}
+      - {name: freight_value, data_type: *t_money12}
+      - {name: silver_version, data_type: *t_number}
+      - {name: silver_change_type, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: raw_loaded_at, data_type: *t_ltz, description: "When the change arrived in RAW; the high-water mark (minus one hour), S17."}
 
   - name: order_items_at_sale
     description: >
@@ -249,20 +256,20 @@ models:
       meta: {row_policy: customer_state}
       contract: {enforced: true}
     columns:
-      - {name: order_id, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: order_item_id, data_type: number}
+      - {name: order_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: order_item_id, data_type: *t_number}
       - {name: ordered_at, data_type: timestamp_ntz}
-      - {name: order_status, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: customer_unique_id, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: customer_city, data_type: varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
-      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: product_id, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: product_category_name, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_city, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: seller_state, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: price, data_type: "number(12,2)"}
-      - {name: freight_value, data_type: "number(12,2)"}
+      - {name: order_status, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: customer_unique_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: customer_city, data_type: *t_varchar, description: "Masked ('***') for readers by tag PII_CLASS; a reader's filter on it matches nothing, not an error (S18).", config: {meta: {pii_class: restricted}}}
+      - {name: customer_state, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: product_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: product_category_name, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_city, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_state, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: price, data_type: *t_money12}
+      - {name: freight_value, data_type: *t_money12}
       - {name: customer_found, data_type: boolean, description: "A customer version covered the order time."}
       - {name: customer_inferred, data_type: boolean, description: "None did; the person's FIRST version is shown instead (97.4% right, Session 15)."}
       - {name: product_found, data_type: boolean}
@@ -280,30 +287,30 @@ models:
           arguments: {staging: stg_review, key: [review_id, order_id]}
     columns:
       - name: review_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}]
         data_tests: [not_null]
       - name: order_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}]
         data_tests:
           - not_null
           - relationships: {arguments: {to: ref('fct_orders'), field: order_id}}
       - name: review_score
-        data_type: number
+        data_type: *t_number
         data_tests:
           - accepted_values: {arguments: {values: [1, 2, 3, 4, 5], quote: false}}
-      - {name: review_comment_title, data_type: varchar, description: "Free text; masked ('***') for readers.", config: {meta: {pii_class: restricted}}}
-      - {name: review_comment_message, data_type: varchar, description: "Free text; masked ('***') for readers.", config: {meta: {pii_class: restricted}}}
+      - {name: review_comment_title, data_type: *t_varchar, description: "Free text; masked ('***') for readers.", config: {meta: {pii_class: restricted}}}
+      - {name: review_comment_message, data_type: *t_varchar, description: "Free text; masked ('***') for readers.", config: {meta: {pii_class: restricted}}}
       - {name: has_message, data_type: boolean, description: "The message holds more than white space."}
-      - {name: message_hash, data_type: varchar, description: "SHA-256 of the trimmed message, the key of review_labels; NULL when there is nothing to label.", config: {meta: {pii_class: public}}}
+      - {name: message_hash, data_type: *t_varchar, description: "SHA-256 of the trimmed message, the key of review_labels; NULL when there is nothing to label.", config: {meta: {pii_class: public}}}
       - {name: review_created_at, data_type: timestamp_ntz, description: "The day the customer wrote it (Olist gives a date)."}
       - {name: review_answered_at, data_type: timestamp_ntz, description: "When the marketplace answered; NULL until then."}
-      - {name: silver_version, data_type: number}
-      - {name: silver_change_type, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: raw_loaded_at, data_type: timestamp_ltz}
+      - {name: silver_version, data_type: *t_number}
+      - {name: silver_change_type, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: raw_loaded_at, data_type: *t_ltz}
 
   - name: delivery_promise
     description: >
@@ -315,13 +322,13 @@ models:
       contract: {enforced: true}
     columns:
       - name: order_id
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
-      - {name: customer_unique_id, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: customer_unique_id, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - name: customer_state
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         description: >
           Where the person lived when they ordered (point in time). The row policy's column. NULL for
@@ -331,20 +338,20 @@ models:
           - not_null:
               config:
                 severity: warn   # 149 known; more would mean a new gap
-      - {name: seller_count, data_type: number}
-      - {name: items, data_type: number}
-      - {name: order_status, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: seller_count, data_type: *t_number}
+      - {name: items, data_type: *t_number}
+      - {name: order_status, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - {name: purchased_at, data_type: timestamp_ntz}
       - {name: purchase_month, data_type: date}
       - {name: promised_at, data_type: timestamp_ntz, description: "The estimated delivery date shown at purchase."}
       - {name: delivered_at, data_type: timestamp_ntz}
-      - {name: promised_days, data_type: number}
-      - {name: actual_days, data_type: number}
-      - {name: days_late, data_type: number, description: "Delivered date minus promised date, in calendar days; negative = early."}
+      - {name: promised_days, data_type: *t_number}
+      - {name: actual_days, data_type: *t_number}
+      - {name: days_late, data_type: *t_number, description: "Delivered date minus promised date, in calendar days; negative = early."}
       - {name: is_late, data_type: boolean}
-      - {name: lateness_bucket, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: lateness_bucket_order, data_type: number}
-      - {name: review_score, data_type: number}
+      - {name: lateness_bucket, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: lateness_bucket_order, data_type: *t_number}
+      - {name: review_score, data_type: *t_number}
       - {name: reviewed_at, data_type: timestamp_ntz}
       - {name: reviewed_before_delivery, data_type: boolean, description: "The customer rated the order before it arrived."}
 
@@ -359,17 +366,17 @@ models:
       contract: {enforced: true}
     columns:
       - {name: purchase_month, data_type: date}
-      - {name: customer_state, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: lateness_bucket, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: lateness_bucket_order, data_type: number}
+      - {name: customer_state, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: lateness_bucket, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: lateness_bucket_order, data_type: *t_number}
       - {name: is_late, data_type: boolean}
-      - {name: delivered_orders, data_type: number}
-      - {name: reviewed_orders, data_type: number}
-      - {name: score_sum, data_type: number}
-      - {name: low_score_orders, data_type: number, description: "Reviewed 1 or 2 stars."}
-      - {name: five_star_orders, data_type: number}
-      - {name: reviewed_before_delivery, data_type: number}
-      - {name: avg_score, data_type: number, description: "For reading ONE row only."}
+      - {name: delivered_orders, data_type: *t_number}
+      - {name: reviewed_orders, data_type: *t_number}
+      - {name: score_sum, data_type: *t_number}
+      - {name: low_score_orders, data_type: *t_number, description: "Reviewed 1 or 2 stars."}
+      - {name: five_star_orders, data_type: *t_number}
+      - {name: reviewed_before_delivery, data_type: *t_number}
+      - {name: avg_score, data_type: &t_ratio "{{ 'double' if target.type == 'databricks' else 'number(10,4)' }}", description: "For reading ONE row only."}
 
   - name: seller_scorecard
     description: >
@@ -380,23 +387,23 @@ models:
       materialized: table
       contract: {enforced: true}
     columns:
-      - {name: seller_id, data_type: varchar, config: {meta: {pii_class: public}}, constraints: [{type: not_null}]}
+      - {name: seller_id, data_type: *t_varchar, config: {meta: {pii_class: public}}, constraints: [{type: not_null}]}
       - {name: purchase_month, data_type: date, constraints: [{type: not_null}]}
-      - {name: orders, data_type: number}
-      - {name: items, data_type: number}
-      - {name: revenue, data_type: "number(14,2)"}
-      - {name: freight, data_type: "number(14,2)"}
-      - {name: canceled_orders, data_type: number}
-      - {name: delivered_orders, data_type: number}
-      - {name: late_orders, data_type: number}
-      - {name: reviewed_orders, data_type: number}
-      - {name: score_sum, data_type: number}
-      - {name: low_score_orders, data_type: number}
-      - {name: shared_reviews_not_credited, data_type: number, description: "Reviews of multi-seller orders: counted here, credited to no seller."}
-      - {name: late_rate, data_type: number}
-      - {name: avg_score, data_type: number}
+      - {name: orders, data_type: *t_number}
+      - {name: items, data_type: *t_number}
+      - {name: revenue, data_type: &t_money14 "{{ 'decimal(14,2)' if target.type == 'databricks' else 'number(14,2)' }}"}
+      - {name: freight, data_type: *t_money14}
+      - {name: canceled_orders, data_type: *t_number}
+      - {name: delivered_orders, data_type: *t_number}
+      - {name: late_orders, data_type: *t_number}
+      - {name: reviewed_orders, data_type: *t_number}
+      - {name: score_sum, data_type: *t_number}
+      - {name: low_score_orders, data_type: *t_number}
+      - {name: shared_reviews_not_credited, data_type: *t_number, description: "Reviews of multi-seller orders: counted here, credited to no seller."}
+      - {name: late_rate, data_type: *t_ratio}
+      - {name: avg_score, data_type: *t_ratio}
       - name: tier
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         data_tests:
           - accepted_values: {arguments: {values: ['at risk', 'watch', 'good', 'too few orders']}}
@@ -410,25 +417,25 @@ models:
       contract: {enforced: true}
     columns:
       - name: message_hash
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         constraints: [{type: not_null}, {type: primary_key}]
         data_tests: [unique, not_null]
       - name: sentiment
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         data_tests:
           - accepted_values: {arguments: {values: ['positive', 'neutral', 'negative']}}
       - name: topic
-        data_type: varchar
+        data_type: *t_varchar
         config: {meta: {pii_class: public}}
         data_tests:
           - accepted_values: {arguments: {values: ['delivery', 'product', 'seller', 'price', 'other']}}
       - {name: label_ok, data_type: boolean, description: "false = the model answered outside the label set."}
-      - {name: model, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: prompt_version, data_type: varchar, config: {meta: {pii_class: public}}}
+      - {name: model, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: prompt_version, data_type: *t_varchar, config: {meta: {pii_class: public}}}
       - {name: labelled_at, data_type: timestamp_ntz}
-      - {name: silver_version, data_type: number}
+      - {name: silver_version, data_type: *t_number}
 
   - name: complaint_trends
     description: >
@@ -439,11 +446,11 @@ models:
       contract: {enforced: true}
     columns:
       - {name: review_month, data_type: date}
-      - {name: topic, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: sentiment, data_type: varchar, config: {meta: {pii_class: public}}}
-      - {name: reviews, data_type: number}
-      - {name: score_sum, data_type: number}
-      - {name: low_score_reviews, data_type: number}
+      - {name: topic, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: sentiment, data_type: *t_varchar, config: {meta: {pii_class: public}}}
+      - {name: reviews, data_type: *t_number}
+      - {name: score_sum, data_type: *t_number}
+      - {name: low_score_reviews, data_type: *t_number}
 
 unit_tests:
   # B68, as a test: the newest change wins, a key whose newest change is a delete is gone, and a

@@ -16,6 +16,10 @@
 -- depends_on: {{ ref('product_current') }}
 -- depends_on: {{ ref('seller_current') }}
 -- depends_on: {{ ref('inventory_current') }}
+{%- if target.type != 'snowflake' %}
+{#- Databricks (S28): Delta has no transient tables; nothing to check. #}
+select 1 as table_schema where 1 = 0
+{%- else %}
 select table_schema, table_name, table_type, is_transient
 from {{ target.database }}.information_schema.tables
 where table_type = 'BASE TABLE'
@@ -24,3 +28,4 @@ where table_type = 'BASE TABLE'
     {%- if target.name == 'ci' %} '{{ target.schema | upper }}', '{{ target.schema | upper }}_AUDIT'
     {%- else %} 'STAGING', 'SNAPSHOTS', 'GOLD', 'GOLD_AUDIT'
     {%- endif %})
+{%- endif %}

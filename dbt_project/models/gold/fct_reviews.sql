@@ -39,7 +39,9 @@ trimmed as (
         -- [[:space:]], not \s: Snowflake's \s leaves the vertical tab (char 11), Java's \s — what
         -- Spark's labelling step trims with — removes it. [[:space:]] is Java's six exactly
         -- (space, \t, \n, \x0B, \f, \r), so one text gives one hash on both platforms (S22).
-        nullif(regexp_replace(review_comment_message, '^[[:space:]]+|[[:space:]]+$', ''), '') as message_text
+        -- The reverse holds on Databricks itself: Java has no [[:space:]] class, and the same
+        -- pattern there trims nothing, silently — so trim_space() writes \s there (S28 probe).
+        nullif({{ trim_space('review_comment_message') }}, '') as message_text
     from newest
 )
 

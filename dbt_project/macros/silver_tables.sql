@@ -177,6 +177,11 @@
         "TIMESTAMP_NTZ": "TIMESTAMP_NTZ",
         "BOOLEAN": "BOOLEAN",
     } -%}
+    {#- Databricks (S28): no NUMBER type; BIGINT holds every integer Silver has (Silver's own type).
+        FLOAT there is 4 bytes, so DOUBLE — what Snowflake's FLOAT is. -#}
+    {%- if target.type == 'databricks' -%}
+        {%- do types.update({"INTEGER": "BIGINT", "DOUBLE": "DOUBLE"}) -%}
+    {%- endif -%}
     {{ return(types[variant_type]) }}
 {%- endmacro %}
 
@@ -195,13 +200,14 @@
 {%- set spec = silver_tables()[table_name] -%}
 select
 {%- for field, vtype in spec["fields"].items() %}
-    record:"{{ field }}"::{{ staging_type(vtype) }} as {{ field }},
+    {{ vget('record', field) }}::{{ staging_type(vtype) }} as {{ field }},
 {%- endfor %}
-    record:"_change_type"::string                as change_type,
-    record:"_commit_version"::number(38,0)       as commit_version,
-    record:"_commit_timestamp"::timestamp_ntz    as commit_ts,
-    dense_rank() over (order by record:"_commit_version"::number(38,0)) as night,
-    hash(record)                                 as change_hash,
+    {{ vget('record', '_change_type') }}::string                as change_type,
+    {{ vget('record', '_commit_version') }}::{{ staging_type('INTEGER') }}       as commit_version,
+    {{ vget('record', '_commit_timestamp') }}::timestamp_ntz    as commit_ts,
+    {#- dense_rank() is INT on Databricks; the contract says BIGINT (S28). Snowflake has one NUMBER. -#}
+    {% if target.type == 'databricks' %}cast({% endif %}dense_rank() over (order by {{ vget('record', '_commit_version') }}::{{ staging_type('INTEGER') }}){% if target.type == 'databricks' %} as bigint){% endif %} as night,
+    {{ vhash('record') }}                                 as change_hash,
     source_file,
     source_row,
     loaded_at

@@ -17,6 +17,6 @@ select
     count_if(review_score <= 2)                          as low_score_orders,
     count_if(review_score = 5)                           as five_star_orders,
     count_if(reviewed_before_delivery)                   as reviewed_before_delivery,
-    round(sum(review_score) / nullif(count(review_score), 0), 4) as avg_score
+    {{ ratio('sum(review_score)', 'count(review_score)') }} as avg_score
 from {{ ref('delivery_promise') }}
 group by 1, 2, 3, 4, 5

@@ -7,7 +7,7 @@
     kept visible so a report never hides the share the AI did not cover. -#}
 
 select
-    date_trunc(month, r.review_created_at)::date                          as review_month,
+    date_trunc('month', r.review_created_at)::date                          as review_month,
     case
         when not r.has_message      then 'no text'
         when l.message_hash is null then 'not labelled'

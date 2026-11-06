@@ -4645,3 +4645,38 @@ recording the merge.
   gone from `dev`.
 - Rejected: **rebase and merge** — the commits are re-made with new hashes, so `dev` holds commits CI never
   ran, and `git branch -d` no longer sees the branch as merged (it needs `-D`).
+
+## Before the trial ends: dbt's Databricks target is built and diffed against Snowflake's Gold (Session 28, 2026-11-06)
+
+**In plain words:** with four days of Snowflake left, we build Gold a second time on Databricks now, while
+Snowflake's Gold still exists to compare it to, rather than after the trial when there would be nothing
+live to check it against. The small COPY re-delivery test on the S3 stage runs first, the same session.
+
+- Chosen: **Databricks target + side-by-side diff now**, plus the COPY test (the human's pick).
+- Rejected: **build the Databricks target after the trial** and check it against numbers saved from
+  `powerbi/answer_key.sql`. Saved totals catch a wrong sum; they cannot show which rows differ, and a
+  second target that has never matched the first row for row is a claim, not a fallback.
+- Rejected: **the triage agent's draft PR through slim CI this session.** Slim CI already ran on a
+  governed model (S27); the PR path adds the agent's half only. Carried by name, after the diff.
+
+## dbt's Databricks target reads the bridge's own files, loaded by Databricks `COPY INTO`, as `ledgerline-ci` (Session 28)
+
+**In plain words:** Gold on Databricks starts from exactly what Snowflake's Gold starts from — the
+same Parquet files in the bridge bucket, copied into a raw table of one VARIANT row per change — so a
+difference between the two Golds can only come from dbt code or from the platforms, never from the
+input. dbt signs in as the `ledgerline-ci` service principal, into four schemas the owner made.
+
+- Chosen: `workspace.raw.silver_changes` (table name, VARIANT record, file, row, load time — the shape
+  of `RAW.SILVER_CHANGES`), loaded by one `COPY INTO` per Silver table folder; staging unchanged in
+  meaning, with the few SQL spellings that differ dispatched per adapter.
+- Rejected: **staging reads Silver's change feed directly** (`table_changes()`), no bridge. Shorter on
+  Databricks, but the two Golds would no longer share an input, so the diff could not tell a dbt
+  difference from a feed difference; and after the trial this is the path that has to keep working
+  from the same files.
+- Rejected: **one `COPY INTO` over all of `silver/`.** The folders hold ten different schemas; a merged
+  schema would put every other table's columns into each record as nulls (Databricks keeps a null
+  field in a VARIANT, Snowflake drops it — probe, S28).
+- Rejected: **dbt as the human's own token.** The owner passes every grant, so the run would prove
+  nothing about what dbt needs (the S12 lesson). Compromise recorded: one principal both loads raw
+  and builds Gold (Snowflake splits LOADER / TRANSFORMER); the only other principal, `ledgerline-jobs`,
+  has no secret by design.

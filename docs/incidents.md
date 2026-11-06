@@ -3490,3 +3490,71 @@ crashed and the PR went red, although nothing about governance was wrong.
 - Prevention rule: **a test that walks dbt's graph is run once under slim CI (`--defer`) before it is
   called done**; it addresses objects through `ref()` or filters by `selected_resources`, never by every
   node's `relation_name`. constraints.md, dbt.
+
+## [2026-11-06] — The review-text redaction was repaired in Snowflake's RAW but not in the bridge files it came from; a second reader of those files got the unredacted text back (Session 28) — OPEN
+
+**In plain words:** in S22 we found review titles holding 8–14 digit runs (order numbers, and numbers
+that may be a phone or a CPF). Silver was changed to redact them, and Snowflake's RAW — which already
+held the older versions — was rewritten with an `UPDATE`. But RAW was a *copy*: the Parquet files the
+bridge wrote to S3, which RAW was loaded from, still hold the original text. Today Databricks loaded
+the same files for dbt's second target, and the contact-data test found 8 unredacted rows in its raw.
+
+- What failed: `dbt build --target databricks`, test `review_text_has_no_contact_data`: **FAIL 8**, all
+  8 in layer `raw` (`workspace.raw.silver_changes`, table `review`); layer `gold` 0 — Databricks Gold
+  takes each review's newest change, which Silver had already redacted. Same test on Snowflake: 0.
+- Where the text still lives: the `review` Parquet files under `s3://ledgerline-bridge-8176114c/silver/
+  review/` (2 files) — and now `workspace.raw.silver_changes`.
+- Why nothing caught it: the test reads *a loaded table*, and until today Snowflake's RAW was the only
+  table loaded from those files. The S22 repair fixed the copy that was being tested, so the test went
+  green; the files themselves were never in any test. A repair to a copy looked like a repair to the data.
+- Containment, step 1 (this session): rewrite the 8 rows in `workspace.raw` the way S22 rewrote
+  Snowflake's RAW (`databricks/repairs/2026-11-06_redact_review_text_raw.sql`).
+- Open: the S3 files. Rewriting them in place is not free — S28's COPY test shows that a file
+  re-delivered under the same name with **new content is loaded again** by Snowflake, so a rewritten
+  bridge file would add every one of its rows to RAW a second time (the pipe watches `*.parquet`).
+- Prevention rule: **a repair to data is made at the earliest copy that still holds it, and every copy
+  downstream is listed in the repair with its own check** — a test on one loaded table is not evidence
+  about the files it was loaded from.
+
+## [2026-11-06] — Two Gold marts on Snowflake have stored their ratios as whole numbers since they were built: the contract type `number` means NUMBER(38,0) (Session 28) — OPEN, found by the cross-platform diff
+
+**In plain words:** `seller_scorecard` and `late_vs_rating` compute `late_rate` and `avg_score` as
+`round(a / b, 4)` — 0.0625, 4.0968. Their contract in `_gold.yml` says `data_type: number`. On
+Snowflake `number` with no precision *is* NUMBER(38,0), so dbt created the columns as integers and
+Snowflake rounded every value on insert, with no error: 0.0625 is stored as 0, 4.0968 as 4.
+
+- Found by: `scripts/diff_gold.py` (S28), Snowflake Gold vs the same models built on Databricks, where the
+  contract needed a separate ratio type and the values came out right. 17/19 tables identical; these two
+  differed in 7,596 and 1,287 rows, and **identical in every other column** (re-diffed without the two).
+- Size: `GOLD.SELLER_SCORECARD` 16,441 rows — `avg_score` wrong in **7,049**, `late_rate` in **2,864**
+  (vs `round(…, 4)` recomputed from the row's own counts); `GOLD.LATE_VS_RATING.AVG_SCORE` likewise
+  NUMBER(38,0). Example: seller `634964b1…`, 2018-04: 2 late of 32 → stored 0; 127 / 31 → stored 4.
+- What was NOT wrong: `tier` (computed inside the model before the contract's cast — equal on both
+  platforms), every count and sum. The Power BI answer key and the copilot's keys divide the stored sums
+  (`SUM(score_sum) / SUM(reviewed_orders)`) — the design S22 insisted on — so their numbers held;
+  the copilot's "avg of avgs" trap question (q on `late_avg_of_avgs`) read the rounded column.
+- Why nothing caught it (since S22, 2026-10-24): an enforced contract on Snowflake compares type
+  *families* — `number` accepted the model's NUMBER(…, 6) query and then created NUMBER(38,0); the tests
+  check nulls, uniqueness and tie-outs on sums, never a ratio's value; and every reader that matters
+  re-divides the sums. The only check that could see it was a second build of the same SQL with a
+  stricter type system.
+- Fix (proposed, not applied — production Gold): ratio contract type `number(10,4)` on Snowflake
+  (`t_ratio`), then republish the two marts through `publish_gold.py` (WAP), and re-run the answer key.
+- Prevention rule: **a contract type with a scale is written with its scale** (`number(p,s)`, never a
+  bare `number` for a non-integer); and a column holding a ratio gets a value test against its own
+  numerator and denominator.
+
+### Update (2026-11-06, same session) — fixed and republished; a second rounding error found on the way — FIXED
+
+- Fix 1: `t_ratio` = `number(10,4)` on Snowflake. New test `tests/ratios_match_their_counts.sql` FAILED
+  on live Gold first with **11,200** rows (7,049 + 2,864 + 1,287 — the incident's count), PASSED on
+  Databricks. Published by `publish_gold.py` (audit 103 PASS / 1 known WARN; 12 tables, 4 views,
+  governance 2/2). Columns now NUMBER(10,4); seller `634964b1…` 2018-04 reads 0.0625 / 4.0968.
+- Then the diff still found **1 row**: `late_vs_rating` PR / 2017-08 / early 8+, 902 / 203 = 4.44334975 —
+  Databricks 4.4433, Snowflake **4.4434**. Snowflake divides two integers into 6 decimal places
+  (4.443350), so `round(…, 4)` rounded a rounded number. The new test agreed with the bug: it recomputed
+  the expected value with the same division.
+- Fix 2: macro `ratio()` (cast the numerator to NUMBER(38,12) on Snowflake, one rounding), used by both
+  marts **and** by the test. Test on live Gold: FAIL **1** (that row), then republished (audit 103 PASS).
+- Added to the prevention rule: **a test's expected value is computed differently from the model's**
+  (or at higher precision) — a check that repeats the model's arithmetic repeats its bugs.

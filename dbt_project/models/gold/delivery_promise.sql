@@ -56,7 +56,7 @@ select
     s.items,
     d.status                         as order_status,
     d.created_at                     as purchased_at,
-    date_trunc(month, d.created_at)::date as purchase_month,
+    date_trunc('month', d.created_at)::date as purchase_month,
     d.estimated_delivery_at          as promised_at,
     d.delivered_at,
     d.promised_days,

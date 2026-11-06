@@ -38,13 +38,18 @@ ledgerline:
       query_tag: "ledgerline:dbt-ci"
       client_session_keep_alive: false
 
-    # Second target, after the Snowflake trial ends (~2026-11-10): Gold on Databricks.
-    # Not used yet — filled in and verified in that session.
-    # databricks:
-    #   type: databricks
-    #   host: "{{ env_var('DATABRICKS_HOST') }}"
-    #   http_path: "{{ env_var('DATABRICKS_SQL_HTTP_PATH') }}"
-    #   token: "{{ env_var('DATABRICKS_TOKEN') }}"
-    #   catalog: workspace
-    #   schema: gold
-    #   threads: 4
+    # Second target (Session 28; decisions.md S28): Gold on Databricks, built while Snowflake's Gold
+    # still exists to be compared with. Signs in as the `ledgerline-ci` service principal (OAuth
+    # machine-to-machine: client id + secret from .env), on the one SQL warehouse, into the four
+    # schemas the owner made (databricks/gold/dbt_target_setup.sql). It reads workspace.raw, the
+    # same bridge files Snowpipe loads (scripts/dbx_raw.py).
+    databricks:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST') | replace('https://', '') | trim('/') }}"
+      http_path: "{{ env_var('DATABRICKS_SQL_HTTP_PATH', '/sql/1.0/warehouses/e1b5287e7502261b') }}"
+      auth_type: oauth
+      client_id: "{{ env_var('DATABRICKS_CLIENT_ID') }}"
+      client_secret: "{{ env_var('DATABRICKS_CLIENT_SECRET') }}"
+      catalog: workspace
+      schema: staging          # default only; every folder sets its own schema in dbt_project.yml
+      threads: 4

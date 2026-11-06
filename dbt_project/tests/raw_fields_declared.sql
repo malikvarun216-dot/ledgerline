@@ -26,6 +26,25 @@ with declared as (
 ),
 
 seen as (
+{%- if target.type == 'databricks' %}
+    {#- S28: one row per key with variant_explode; a null field is KEPT in a Databricks VARIANT
+        (type VOID), where Snowflake drops it, so VOID is skipped. Databricks' type names are
+        mapped to the Snowflake TYPEOF names silver_tables() declares: one list for both. -#}
+    select r.table_name,
+           k.key                                    as field,
+           case schema_of_variant(k.value)
+               when 'STRING' then 'VARCHAR'
+               when 'BIGINT' then 'INTEGER'
+               when 'INT' then 'INTEGER'
+               when 'TIMESTAMP' then 'TIMESTAMP_NTZ'
+               else schema_of_variant(k.value)
+           end                                      as variant_type,
+           count(*)                                 as rows_
+    from {{ source('raw', 'silver_changes') }} r,
+         lateral variant_explode(r.record) k
+    where schema_of_variant(k.value) <> 'VOID'
+    group by 1, 2, 3
+{%- else %}
     select r.table_name,
            k.value::string                          as field,
            typeof(get(r.record, k.value::string))   as variant_type,
@@ -33,6 +52,7 @@ seen as (
     from {{ source('raw', 'silver_changes') }} r,
          lateral flatten(input => object_keys(r.record)) k
     group by 1, 2, 3
+{%- endif %}
 )
 
 select 'field or type not declared' as problem, s.table_name, s.field, s.variant_type, s.rows_
@@ -43,8 +63,8 @@ where d.field is null
 
 union all
 
-select 'unknown change type', table_name, record:"_change_type"::string, null, count(*)
+select 'unknown change type', table_name, {{ vget('record', '_change_type') }}::string, null, count(*)
 from {{ source('raw', 'silver_changes') }}
-where record:"_change_type"::string not in ('insert', 'update_postimage', 'delete')
-   or record:"_change_type" is null
+where {{ vget('record', '_change_type') }}::string not in ('insert', 'update_postimage', 'delete')
+   or {{ vget('record', '_change_type') }} is null
 group by 1, 2, 3

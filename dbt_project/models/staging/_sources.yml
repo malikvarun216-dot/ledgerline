@@ -6,8 +6,9 @@ sources:
       The Databricks bridge, as Snowpipe loaded it (snowflake/11_raw_landing.sql). One VARIANT row
       per Silver change; never written by dbt.
     # Drill 3: a ci replay may read a CLONE of RAW (DBT_RAW_DATABASE / DBT_RAW_SCHEMA); production never.
-    database: "{{ env_var('DBT_RAW_DATABASE', 'LEDGERLINE') if target.name == 'ci' else 'LEDGERLINE' }}"
-    schema: "{{ env_var('DBT_RAW_SCHEMA', 'RAW') if target.name == 'ci' else 'RAW' }}"
+    # target databricks (S28): the same bridge files, loaded by scripts/dbx_raw.py into workspace.raw
+    database: "{{ 'workspace' if target.type == 'databricks' else env_var('DBT_RAW_DATABASE', 'LEDGERLINE') if target.name == 'ci' else 'LEDGERLINE' }}"
+    schema: "{{ 'raw' if target.type == 'databricks' else env_var('DBT_RAW_SCHEMA', 'RAW') if target.name == 'ci' else 'RAW' }}"
     tables:
       - name: silver_changes
         identifier: SILVER_CHANGES

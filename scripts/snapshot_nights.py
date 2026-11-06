@@ -49,7 +49,10 @@ def plan(cur, snaps: str = "LEDGERLINE.SNAPSHOTS",
          staging: str = "LEDGERLINE.STAGING") -> dict[str, list[int]]:
     todo = {}
     for snap, stg in SNAPSHOTS.items():
-        cur.execute(f"SHOW TABLES LIKE '{snap.upper()}' IN SCHEMA {snaps}")
+        if snaps.startswith("workspace."):  # Databricks spells SHOW TABLES the other way round
+            cur.execute(f"SHOW TABLES IN {snaps} LIKE '{snap}'")
+        else:
+            cur.execute(f"SHOW TABLES LIKE '{snap.upper()}' IN SCHEMA {snaps}")
         exists = bool(cur.fetchall())
         done = scalar(cur, f"SELECT MAX(silver_night) FROM {snaps}.{snap}") if exists else 0
         newest = scalar(cur, f"SELECT MAX(night) FROM {staging}.{stg}")
@@ -61,12 +64,21 @@ def plan(cur, snaps: str = "LEDGERLINE.SNAPSHOTS",
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--apply", action="store_true", help="run the nights (default: only print the plan)")
-    parser.add_argument("--target", choices=["snowflake", "ci"], default="snowflake",
-                        help="ci = the CI run's schema LEDGERLINE_CI.<DBT_CI_SCHEMA> (Drill 3 replay)")
+    parser.add_argument("--target", choices=["snowflake", "ci", "databricks"], default="snowflake",
+                        help="ci = the CI run's schema LEDGERLINE_CI.<DBT_CI_SCHEMA> (Drill 3 replay); "
+                             "databricks = workspace.snapshots, as ledgerline-ci (S28)")
     args = parser.parse_args(argv)
     load_local_env(ROOT / ".env")
 
-    if args.target == "ci":
+    if args.target == "databricks":
+        from dbx import cursor
+
+        cur = cursor()
+        try:
+            todo = plan(cur, snaps="workspace.snapshots", staging="workspace.staging")
+        finally:
+            cur.connection.close()
+    elif args.target == "ci":
         schema = os.environ.get("DBT_CI_SCHEMA")
         if not schema:
             raise SystemExit("--target ci needs DBT_CI_SCHEMA (the CI run's schema)")
@@ -75,12 +87,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         where = {}
         conn = connect("LEDGERLINE_TRANSFORMER")
-    try:
-        cur = conn.cursor()
-        cur.execute("USE WAREHOUSE LEDGERLINE_WH")
-        todo = plan(cur, **where)
-    finally:
-        conn.close()
+    if args.target != "databricks":
+        try:
+            cur = conn.cursor()
+            cur.execute("USE WAREHOUSE LEDGERLINE_WH")
+            todo = plan(cur, **where)
+        finally:
+            conn.close()
     if not args.apply:
         print("plan only — run again with --apply")
         return 0

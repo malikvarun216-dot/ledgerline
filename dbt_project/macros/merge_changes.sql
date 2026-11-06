@@ -29,7 +29,9 @@
     {%- set source = arg_dict["temp_relation"] -%}
     {%- set keys = arg_dict["unique_key"] -%}
     {%- if keys is string -%}{%- set keys = [keys] -%}{%- endif -%}
-    {%- set columns = arg_dict["dest_columns"] | map(attribute="name") | list -%}
+    {#- dbt-databricks (S28) does not pass dest_columns: read them from the batch relation itself. -#}
+    {%- set dest = arg_dict.get("dest_columns") or adapter.get_columns_in_relation(source) -%}
+    {%- set columns = dest | map(attribute="name") | list -%}
     {%- set lower = columns | map("lower") | list -%}
     {%- if "silver_version" not in lower or "silver_change_type" not in lower -%}
         {{ exceptions.raise_compiler_error(

@@ -4915,3 +4915,58 @@ the external stage with re-delivered new content; the Power BI CRLF files (59); 
 MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`, `workspace.s12` (due 11-05); the
 agent's tool-call log; the triage agent's code path as a draft PR through slim CI (now proven to run on a
 governed model); the bridge must export within 29 days of its last export (last: 11-05, night 8).
+
+## Session 28 — Gold built a second time on Databricks and compared row for row: 19/19 identical, after the comparison found two Snowflake rounding bugs in production
+Date: 2026-11-06 (UTC). Scope: Session 27's `### Next` — what still needs Snowflake before the trial ends
+(~11-10). Chosen: dbt's `databricks` target + diff now, and the COPY re-delivery test (decisions.md S28).
+
+**In plain words:** we built the whole of Gold again on Databricks, from the same bridge files Snowflake
+loads, and compared every row of all 19 tables. Getting there took a handful of SQL spellings that differ
+between the platforms (one of them failed silently). The comparison then showed that two of Snowflake's
+own marts had stored their ratios as whole numbers for two weeks; fixed, tested, republished, and the two
+Golds now agree exactly. On the way, the bridge files turned out to still hold review text we had
+redacted everywhere else.
+
+### Built
+- `snowflake/experiments/s28_redelivery.py` (+ `05_scratch_schemas.sql` S28 block).
+- `databricks/gold/dbt_target_setup.sql` (schemas `raw` / `staging` / `snapshots` / `gold`, grants to
+  `ledgerline-ci`); `scripts/dbx_raw.py` (COPY INTO per Silver folder); `scripts/dbx.py` (cursor as the SP);
+  `scripts/diff_gold.py`; `snapshot_nights.py --target databricks`; profile `databricks` (OAuth M2M).
+- dbt: `macros/cross_platform.sql` (`vget`, `dec`, `vhash`, `trim_space`, `rlike_dotall`, `ratio`);
+  per-target contract types in `_gold.yml` (YAML anchors `t_*`); Databricks-only casts (`night`,
+  `lateness_bucket_order`); `merge_changes` reads columns when the adapter passes none; `date_trunc('month')`;
+  tests made portable (`raw_fields_declared`, `gold_tables_permanent`, `review_text_has_no_contact_data`);
+  new test `ratios_match_their_counts`.
+- `databricks/repairs/2026-11-06_redact_review_text_raw.sql`.
+
+### Verified
+- **COPY on the S3 stage, 11/11 predictions:** identical re-upload (same ETag) skipped; new content, same
+  name → loaded again, both versions kept (6 rows; COPY_HISTORY 2 loads). Coverage row closed.
+- **Databricks RAW = Snowflake RAW** per table (794,427 rows, 14 files); second COPY run 0 × 10.
+- **Snowflake target's compiled SQL unchanged** by the portability work (HEAD vs now: case, wrapping, and
+  `record:x` → `record:"x"` only), before the ratio fix.
+- Databricks: 24 snapshot nights PASS; `silver_night` widened INT → BIGINT in place (Delta type widening,
+  rows unchanged); final build 99 PASS / 1 WARN (149 null `customer_state`, same warn as Snowflake) / 1
+  connection error from the laptop sleeping, re-run PASS (6/6).
+- **First diff 17/19.** `seller_scorecard` / `late_vs_rating` differed only in ratio columns: Snowflake
+  NUMBER(38,0) (incidents.md 2026-11-06). Test FAIL 11,200 → fix → WAP publish (audit 103 PASS) → diff
+  1 row (double rounding 4.4434 vs 4.4433) → `ratio()` → test FAIL 1 → WAP publish (103 PASS, governance 2/2).
+- **Final diff: 19/19 tables identical**, 1,075,820 rows each side (`raw_loaded_at`, `dbt_scd_id` excluded
+  by design).
+- Redaction contained in Databricks raw: 8 → 0. `ruff` clean; `pytest` 1 failure = the carried Power BI CRLF.
+
+### Not verified / not done
+- The bridge's S3 review files still hold the unredacted text (incident OPEN; rewriting them in place
+  would make Snowpipe reload them). Delta time travel on `workspace.raw` holds the pre-repair version.
+- Databricks Gold has no governance (no masks / row filters); no reader reads it yet.
+- The copilot's trap question was graded on the rounded column: not re-run. `docs/data_journey.md`: not started.
+- Scratch CSV `silver/_scratch_s28/` and schema `LEDGERLINE.S28` still exist.
+
+### Next
+**First (trial ends ~11-10):** decide the bridge files' redaction (rewrite under a new name + let RAW
+ignore the old? or accept); re-run the copilot eval on the fixed marts; drop S28 scratch. Then
+`docs/data_journey.md`. **Carried, by name:** Drill 3 part D; Silver from empty as one batch; the Power BI
+CRLF files (59); row-policy meaning; admin MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`,
+`s16`, `s21`, `workspace.s12`; the agent's tool-call log; the triage agent's draft PR through slim CI;
+governance on Databricks Gold if it becomes the reader's copy after the trial; the bridge must export by
+~12-04.

@@ -206,3 +206,17 @@ SHOW RESOURCE MONITORS;   -- LEDGERLINE_ACCOUNT_RM, LEDGERLINE_WH_DAILY_RM; no S
 -- Session 24: schema S24 (one semantic view for Cortex Analyst, readers allowed in) is made in
 -- 16_copilot_reader.sql beside the copilot's user, so one Ctrl+A runs the session's setup. S21 is
 -- dropped there.
+
+
+-- Session 28: schema S28 for the COPY re-delivery test on the external S3 stage
+-- (snowflake/experiments/s28_redelivery.py). The LOADER owns it this time, not the transformer: the
+-- test makes a stage over S3 through LEDGERLINE_BRIDGE_S3, and only LOADER holds USAGE on that
+-- integration. Dropped when the trial ends with the rest of the account.
+USE ROLE SYSADMIN;
+CREATE SCHEMA IF NOT EXISTS LEDGERLINE.S28 COMMENT = 'Session 28 scratch: COPY re-delivery on S3';
+
+USE ROLE SECURITYADMIN;
+GRANT USAGE ON SCHEMA LEDGERLINE.S28 TO ROLE LEDGERLINE_LOADER;
+GRANT CREATE TABLE, CREATE STAGE ON SCHEMA LEDGERLINE.S28 TO ROLE LEDGERLINE_LOADER;
+
+SHOW GRANTS ON SCHEMA LEDGERLINE.S28;   -- USAGE, CREATE TABLE, CREATE STAGE to LEDGERLINE_LOADER
