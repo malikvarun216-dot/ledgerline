@@ -20,7 +20,12 @@
 # MAGIC and exactly by `regexp_replace(REDACT)`), copy has 0 matches, and copy vs `workspace.raw` — the
 # MAGIC repaired raw rows must be exactly what a load of the copy would give (by file name and row number).
 # MAGIC
-# MAGIC Run by the owner (writes need the `ledgerline_bridge` external location). After `delete`: run
+# MAGIC `plan` writes no data; it only creates the empty `repair_log` table if it is missing.
+# MAGIC
+# MAGIC Run by the owner (writes need the `ledgerline_bridge` external location). The check reads
+# MAGIC `workspace.raw.silver_changes`, which `ledgerline-ci` owns: the owner needs `SELECT` on it, granted
+# MAGIC as the schema's owner (S29: `GRANT SELECT ON TABLE workspace.raw.silver_changes TO <you>`).
+# MAGIC After `delete`: run
 # MAGIC `bridge/export_silver` in `plan` mode — Verify 1 and 2 must stay green.
 
 # COMMAND ----------
@@ -143,6 +148,9 @@ originals, copies = parquet_files(ORIGINAL), parquet_files(COPY)
 logged = spark.table(REPAIR_LOG).where(F.col("repaired_path") == (copies[0] if copies else ""))
 print(f"original: {originals}\ncopy:     {copies}\nlog lines for the copy: {logged.count()}\nmode = {MODE}")
 assert len(originals) <= 1 and len(copies) <= 1, "expected one file per folder"
+# Everything the final check reads, read once before any mode writes (incidents.md 2026-11-06, S29):
+# a missing grant fails here, while nothing has changed.
+print(f"raw holds {spark.table(RAW).where(F.col('table_name') == TABLE).count():,} {TABLE} rows")
 if originals:
     o = with_row(originals[0])
     print(f"original: {o.count():,} rows, {matches(o)} match REDACT")
@@ -167,18 +175,24 @@ if MODE == "plan":
 # COMMAND ----------
 
 if MODE == "copy":
-    assert originals and not copies, "copy needs the original and no copy yet"
-    src = with_row(originals[0])
-    redacted = src.select(
-        *[F.regexp_replace(F.col(x), REDACT, REDACTED).alias(x) if x in TEXT else F.col(x)
-          for x in src.columns],
-    )
-    # One partition, sorted by the original row number: the copy's row N is the original's row N.
-    redacted.repartition(1).sortWithinPartitions("_row").drop("_row").write.mode("error").parquet(COPY)
-    written = parquet_files(COPY)
-    assert len(written) == 1, written
+    assert originals, "copy needs the original"
     target = f"{COPY}/{posixpath.basename(originals[0])}"  # the original's name: raw keys on it
-    dbutils.fs.mv(written[0], target)
+    if copies:
+        # A copy with no log line: an earlier copy run died after writing it (S29: the check could not
+        # read raw). It is checked now like a fresh one; only the write is skipped.
+        assert copies == [target] and logged.count() == 0, "a copy exists that this run did not expect"
+        print(f"resuming: {target} exists with no log line — checking it")
+    else:
+        src = with_row(originals[0])
+        redacted = src.select(
+            *[F.regexp_replace(F.col(x), REDACT, REDACTED).alias(x) if x in TEXT else F.col(x)
+              for x in src.columns],
+        )
+        # One partition, sorted by the original row number: the copy's row N is the original's row N.
+        redacted.repartition(1).sortWithinPartitions("_row").drop("_row").write.mode("error").parquet(COPY)
+        written = parquet_files(COPY)
+        assert len(written) == 1, written
+        dbutils.fs.mv(written[0], target)
     result = check(originals[0], target)
     spark.createDataFrame(
         [(TABLE, originals[0], target, result["rows_copy"], result["rows_changed"], REASON)],

@@ -3558,3 +3558,22 @@ Snowflake rounded every value on insert, with no error: 0.0625 is stored as 0, 4
   marts **and** by the test. Test on live Gold: FAIL **1** (that row), then republished (audit 103 PASS).
 - Added to the prevention rule: **a test's expected value is computed differently from the model's**
   (or at higher precision) — a check that repeats the model's arithmetic repeats its bugs.
+
+## [2026-11-06] — The bridge repair stopped half done: the copy was written, then its check could not read the raw table it compares with (Session 29) — contained
+
+**In plain words:** the repair notebook's `copy` mode wrote the redacted twin of the review file to
+`repaired/`, then stopped at its last check with `INSUFFICIENT_PERMISSIONS: User does not have SELECT on
+Table 'workspace.raw.silver_changes'`. No log line was written, nothing was deleted, the original is
+untouched. The bucket was left in the "folder in both trees" state the bridge's Verify 1 refuses.
+
+- Why: `dbx_raw.py` created `workspace.raw.silver_changes` as the `ledgerline-ci` service principal, so
+  the principal **owns the table**; the human owns the schema `workspace.raw` but had never been granted
+  the table. In Unity Catalog owning a schema does not let you read a table someone else owns in it.
+- Why nothing caught it: `plan` mode reads raw only once a copy exists, and on the first run there was
+  none, so the only statement needing that grant ran for the first time *after* the write. S28's repair
+  of the same table was run as the principal, so the gap never showed.
+- Containment: the notebook's `copy` mode now **resumes** — a copy at the expected path with no log line
+  is checked like a fresh one and only the write is skipped. Nothing else changed in S3.
+- Fix: the schema owner grants `SELECT` on the table to the human (SQL Editor), then `copy` is re-run.
+- Prevention rule: **a repair checks that it can read everything its final check reads before it writes
+  anything** — and `plan` mode runs that same read, so a missing grant fails while nothing has changed.
