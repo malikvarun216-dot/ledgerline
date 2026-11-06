@@ -3516,6 +3516,32 @@ the same files for dbt's second target, and the contact-data test found 8 unreda
   downstream is listed in the repair with its own check** — a test on one loaded table is not evidence
   about the files it was loaded from.
 
+### Update (2026-11-06, Session 29) — the file repaired at its source; S3 version check open
+
+- **One file, not two**: `silver/review/v0000000000-0000000007/part-…-2278-1.c000.snappy.parquet`
+  (101,640 rows, 8 unredacted). The folder's `v8-8` file (7 rows) was written after S22 and was clean.
+- Repaired by `databricks/repairs/2026-11-06_redact_bridge_review_file` (decisions.md S29): a redacted
+  twin at `repaired/silver/review/v0000000000-0000000007/`, same file name, checked before and after the
+  delete — `rows_changed` **8**, `rows_wrong` 0, `matches_in_copy` 0, copy vs `workspace.raw` 101,640 /
+  0 / 0 — logged in `workspace.bridge.repair_log`, then the original folder deleted.
+- After: bridge Verify 1 `review logged folders 2, in bucket 2 (1 repaired)`; Verify 2 all 10 tables
+  0 / 0 (review 99,224 rows rebuilt = Silver); `dbx_raw.py --apply` inserted **0** everywhere (raw still
+  794,427 rows, 14 files). Snowflake untouched (its stage reads only `silver/`).
+- Two incidents on the way, both contained (below): the check could not read raw (grant); the loader's
+  "only once" guard never matched (dry count: 101,640 instead of 0).
+- **Every copy, as the prevention rule asks:**
+  | copy | state |
+  |---|---|
+  | bridge file in S3 | replaced and deleted; **old object version: unknown** — the bucket's versioning setting is not readable by our keys; the human checks |
+  | Snowflake `RAW.SILVER_CHANGES` | rewritten S22 (10-24); Time Travel 1 day + Fail-safe 7 days ended ~11-01 |
+  | Databricks `workspace.raw.silver_changes` | rewritten S28 (11-06); its Delta history keeps the pre-repair files until VACUUM (7 days) |
+  | Silver `review` | redacted S22; older Delta versions until VACUUM (30-day retention, ~11-23) |
+  | Bronze `review` | kept as delivered, by design (decisions.md S22) |
+- Status: **FIXED in the bridge**; closes when the S3 version check is answered.
+- **CLOSED (same day):** `aws s3api get-bucket-versioning --bucket ledgerline-bridge-8176114c` as the
+  human's admin login returned nothing — versioning was never enabled, so the delete left no old
+  version. What remains is only in Delta history (raw, Silver) until VACUUM, and Bronze by design.
+
 ## [2026-11-06] — Two Gold marts on Snowflake have stored their ratios as whole numbers since they were built: the contract type `number` means NUMBER(38,0) (Session 28) — OPEN, found by the cross-platform diff
 
 **In plain words:** `seller_scorecard` and `late_vs_rating` compute `late_rate` and `avg_score` as
@@ -3558,6 +3584,14 @@ Snowflake rounded every value on insert, with no error: 0.0625 is stored as 0, 4
   marts **and** by the test. Test on live Gold: FAIL **1** (that row), then republished (audit 103 PASS).
 - Added to the prevention rule: **a test's expected value is computed differently from the model's**
   (or at higher precision) — a check that repeats the model's arithmetic repeats its bugs.
+
+### Update (2026-11-06, Session 29) — the copilot re-graded on the fixed columns — CLOSED
+
+- `python scripts/copilot.py eval --only Q10,Q11,Q12,Q13` (the four questions on the two marts), as
+  `LEDGERLINE_ANALYST`: **4/4 right, $0.03**; every answer read. Q10 re-divided the sums (2.270918 late /
+  4.290135 on time); the trap (`late_avg_of_avgs`) now reads **2.4296 / 4.1484** on NUMBER(10,4) — still
+  distinct from the right answer, so the question still tests the trap. Q13's "numbers not in result"
+  were digits of the seller id (the prose checker's false positive).
 
 ## [2026-11-06] — The bridge repair stopped half done: the copy was written, then its check could not read the raw table it compares with (Session 29) — contained
 

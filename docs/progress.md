@@ -4970,3 +4970,54 @@ CRLF files (59); row-policy meaning; admin MFA (OPEN); `label_reviews` nightly; 
 `s16`, `s21`, `workspace.s12`; the agent's tool-call log; the triage agent's draft PR through slim CI;
 governance on Databricks Gold if it becomes the reader's copy after the trial; the bridge must export by
 ~12-04.
+
+## Session 29 — The bridge file that still held redacted review text, replaced at its source; nothing loaded twice
+Date: 2026-11-06 (UTC). Scope: Session 28's `### Next`, first block (trial ends ~11-10). The human chose
+the redaction fix: a checked twin under `repaired/`, original deleted (decisions.md S29).
+
+**In plain words:** one Parquet file in the bridge bucket — the source both raw tables were loaded
+from — still held 8 review titles we had redacted everywhere else. We wrote a redacted copy where
+Snowflake never looks, proved it equals what both raws already hold, taught the two readers of the
+bucket's history to read it in the original's place, and deleted the original. On the way a dry count
+showed the loader's "only once" guard was broken and would have doubled 101,640 rows; fixed first.
+
+### Built
+- `databricks/repairs/2026-11-06_redact_bridge_review_file.py` (modes `plan` / `copy` / `delete`; every
+  mode reads raw first, then runs the full check; `copy` resumes a written copy with no log line).
+- `workspace.bridge.repair_log` (created by that notebook).
+- `_export_silver.py` / `export_silver.py`: `REPAIRED_ROOT`; Verify 1 counts both trees and refuses a
+  folder in both; Verify 2's replay reads both.
+- `scripts/dbx_raw.py`: `REPAIRED_TABLES`, `repaired_insert_sql` (glob `v*/*.parquet`; file name
+  computed in an inner query, guard by alias). `tests/test_dbx_raw.py` (2 tests).
+- Grant (human, SQL Editor): `SELECT` on `workspace.raw.silver_changes` to the workspace owner.
+
+### Verified
+- Probe of raw: only **one** file affected (`v0000000000-0000000007`, 101,640 rows, 8 to redact); `v8-8`
+  (7 rows) written after S22, clean. The S28 incident's "2 files" corrected.
+- Copy checked three times (plan, copy, delete): same name and schema, 101,640 = 101,640 rows,
+  `rows_changed` **8**, `rows_wrong` 0, `matches_in_copy` 0, copy vs `workspace.raw` 101,640 / 0 / 0.
+- Original deleted; after the delete copy vs raw 101,640 / 0 / 0; `repair_log` 1 line.
+- Bridge `export_silver` plan: Verify 1 `review logged folders 2, in bucket 2 (1 repaired)`, all 10
+  tables equal; Verify 2 all 10 tables 0 / 0 (review 99,224 = Silver).
+- Loader: dry count of the guarded INSERT **101,640** (bug) → fix → **0** on live raw, 101,640 into an
+  empty one under the original's name; then `dbx_raw.py --apply`: every COPY 0, INSERT 0, raw 794,427
+  rows / 14 files (= S28).
+- Bucket versioning: never enabled (`get-bucket-versioning` empty, human's admin login) — the delete is final.
+- Copilot `eval --only Q10,Q11,Q12,Q13` as ANALYST: **4/4**, $0.03, every answer read; trap values now
+  2.4296 / 4.1484 vs right 2.2709 / 4.2901. Ratio incident CLOSED; redaction incident CLOSED.
+- `ruff` clean on changed files; `pytest tests/test_dbx_raw.py` 2 passed (full suite not re-run).
+
+### Not verified / not done
+- S28 scratch (`silver/_scratch_s28/`, `LEDGERLINE.S28`): commands given, not confirmed run.
+- Snowflake RAW cannot be rebuilt from the files alone any more without a stage over `repaired/` (not
+  built; the trial ends ~11-10). Delta history of raw / Silver keeps the old text until VACUUM.
+- Cortex not re-run on the fixed marts; the copilot only as ANALYST (not ANALYST_SP).
+- `docs/data_journey.md`: not started.
+
+### Next
+**`docs/data_journey.md`** — its own session. Before ~11-10, only if wanted: confirm the S28 scratch
+drop. **Carried, by name:** Drill 3 part D; Silver from empty as one batch; the Power BI CRLF files
+(59); row-policy meaning; admin MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`,
+`s21`, `workspace.s12`; the agent's tool-call log; the triage agent's draft PR through slim CI;
+governance on Databricks Gold if it becomes the reader's copy after the trial; the bridge must export
+by ~12-04.

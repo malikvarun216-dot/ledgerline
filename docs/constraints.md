@@ -168,6 +168,7 @@ they were found within each section.
 | **Spark Connect refuses `.write.mode("errorifexists")`**; the same mode is spelled `"error"` | Bridge export uses `"error"` |
 | A new UC external location defaults to **file events on**; without `s3:GetBucketNotification` the test fails two lines, and **Force create** keeps the flag "Enabled" | Harmless: the role cannot write notifications, so the bucket's events stay Snowpipe's |
 | Databricks Parquet folders hold `_started_*`, `_committed_*`, `_SUCCESS` beside `part-*.parquet` | Every COPY / pipe uses `PATTERN = '.*[.]parquet'`; the S3 event uses suffix `.parquet` |
+| **The bridge bucket has no versioning** (`get-bucket-versioning` empty, admin login, S29); the laptop key `ledgerline-dev` cannot read the bridge bucket at all, and the UC write role has no `DeleteObjectVersion` | A delete there is final. A repair replaces a file under `repaired/` (decisions.md S29), never in place, and deletes the original only after its check |
 
 ## Snowflake
 
