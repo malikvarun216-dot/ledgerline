@@ -61,14 +61,24 @@ REPAIRED_TABLES = ["review"]
 
 
 def repaired_insert_sql(table: str) -> str:
-    source = f"replace(_metadata.file_path, '{BUCKET}repaired/', '')"
+    # A glob, as COPY's PATTERN: a path query does not descend into `v…/` folders (they are not
+    # `key=value` partitions) and fails UNABLE_TO_INFER_SCHEMA (S29).
+    # The file's name is computed in the inner query and compared by alias. Written inside the
+    # NOT EXISTS, `_metadata` resolves to the raw Delta table's own hidden column (its storage files),
+    # never matches, and every row is inserted again — found by a dry count, S29.
     return f"""
 INSERT INTO {TABLE}
-SELECT '{table}', to_variant_object(struct(*)), {source}, _metadata.row_index + 1,
-       _metadata.file_modification_time, current_timestamp()
-FROM parquet.`{BUCKET}repaired/silver/{table}/`
-WHERE NOT EXISTS (SELECT 1 FROM {TABLE} held
-                  WHERE held.table_name = '{table}' AND held.source_file = {source})
+SELECT * FROM (
+  SELECT '{table}'                                                  AS table_name,
+         to_variant_object(struct(*))                               AS record,
+         replace(_metadata.file_path, '{BUCKET}repaired/', '')      AS source_file,
+         _metadata.row_index + 1                                    AS source_row,
+         _metadata.file_modification_time                           AS file_last_modified,
+         current_timestamp()                                        AS loaded_at
+  FROM parquet.`{BUCKET}repaired/silver/{table}/v*/*.parquet`
+) AS f
+WHERE NOT EXISTS (SELECT 1 FROM {TABLE} AS held
+                  WHERE held.table_name = f.table_name AND held.source_file = f.source_file)
 """
 
 

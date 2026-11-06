@@ -46,6 +46,8 @@ they were found within each section.
 | **`to_variant_object(struct(*))` keeps a NULL field as a key of type `VOID`** (Snowflake's Parquet → VARIANT drops it); `schema_of_variant` names types `STRING` / `BIGINT` / `TIMESTAMP` (not `VARCHAR` / `INTEGER` / `TIMESTAMP_NTZ`) | S28 probe. `raw_fields_declared` skips `VOID` and maps the names; never load mixed-schema folders into one VARIANT (every other table's columns would appear as null keys) |
 | **`hash()` refuses a VARIANT** (`DATATYPE_MISMATCH.HASH_VARIANT_TYPE`) | S28. Hash `to_json(record)` (`vhash` macro) |
 | **Databricks `COPY INTO` with a `SELECT` reads `_metadata.file_path`, `.row_index` (from 0), `.file_modification_time`; a second run inserts 0 rows** (10 tables, 794,427 rows, then 0 × 10) | S28 `scripts/dbx_raw.py`. `row_index + 1` = Snowflake's `METADATA$FILE_ROW_NUMBER` |
+| **A path query (`parquet.`s3://…/dir/``) does not descend into sub-folders that are not `key=value` partitions**: our `v…/` folders gave `UNABLE_TO_INFER_SCHEMA` | S29. Use a glob (`dir/v*/*.parquet`), as COPY INTO's `PATTERN` |
+| **`_metadata` inside a correlated subquery resolves to the subquery's own table** when that table is file-backed (every Delta table has one): a `NOT EXISTS (… held.source_file = replace(_metadata.file_path, …))` compared raw with raw's own files and never matched | S29 dry count: 101,640 rows instead of 0. Compute file metadata in an inner query and compare by alias |
 
 ## Databricks — Structured Streaming and Auto Loader
 

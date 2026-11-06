@@ -3577,3 +3577,25 @@ untouched. The bucket was left in the "folder in both trees" state the bridge's 
 - Fix: the schema owner grants `SELECT` on the table to the human (SQL Editor), then `copy` is re-run.
 - Prevention rule: **a repair checks that it can read everything its final check reads before it writes
   anything** — and `plan` mode runs that same read, so a missing grant fails while nothing has changed.
+
+## [2026-11-06] — The loader's "load the repaired file only once" guard never matched: on the live raw it would have added all 101,640 rows again (Session 29) — caught by a dry count, nothing written
+
+**In plain words:** `dbx_raw.py`'s new INSERT for the repaired review file was meant to skip a file raw
+already holds, by comparing file names. The comparison read the file name from `_metadata` *inside* the
+`NOT EXISTS` subquery, where `_metadata` means the raw Delta table's own storage files, not the Parquet
+being loaded. No name ever matched, so the guard said "new" for every row.
+
+- Found by: a dry `SELECT count(*)` of the INSERT's own query against the live raw, run before any
+  `--apply`: **101,640** rows (expected 0). After the fix: **0** on the live raw, **101,640** into an
+  empty one, all with the original file's name.
+- A second, harmless bug on the way: `parquet.\`…/repaired/silver/review/\`` does not look inside the
+  `v…/` folders (Spark descends only into `key=value` folders) and failed `UNABLE_TO_INFER_SCHEMA`; now a
+  glob `v*/*.parquet`, as COPY's `PATTERN`.
+- Why nothing caught it: the offline test checked that the guard's text was present, not what
+  `_metadata` would resolve to; the column name is valid on both sides of the subquery, so the SQL
+  parsed, ran and returned a plausible number.
+- Fix: the file name is computed in an inner query (`AS f`) and the guard compares `f.source_file`; the
+  test now asserts no `_metadata` appears inside the `NOT EXISTS`.
+- Prevention rule: **an idempotency guard is proven on live data by a dry count before its first
+  write** — the count against the live table must be the number you predicted (here 0), and the same
+  query against nothing must load everything.
