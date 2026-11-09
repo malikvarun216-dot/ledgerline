@@ -3696,3 +3696,45 @@ session, so a new red is never hidden behind an old one; and every session start
 last CI result** (public API, one line — added to the start-of-session list in the local project
 instructions). The 2026-10-24 rule stands: no commit is handed over without a full `ruff` + `pytest`
 run newer than the last edit.
+
+## [2026-11-10] — The delivery-days model trained, then Unity Catalog refused to register it: two price columns were DECIMAL, which an MLflow signature cannot describe (Session 33) — fix written, re-run pending
+
+**In plain words:** steps 0–6 of `databricks/ml/delivery_days` ran and printed every number. Step 7,
+registering the model, failed: `MlflowException: Model passed for registration did not contain any
+signature metadata`. A signature is the model's declared list of input columns and types; Unity Catalog
+requires one. Feature Engineering could not write it because `total_price` and `total_freight` were
+`DECIMAL(12,2)` — Gold's money type — and MLflow signatures have no decimal type.
+
+- Why nothing caught it: S12b, the only other registered model, read prices from Silver, where they are
+  `DOUBLE`. This model reads Gold (decisions.md S33), and the model itself never cared: its first step
+  turns every input into float64, so training and the test numbers were fine. Only the registry looks at
+  the declared types. The cause was printed as a WARNING two lines above the error.
+- Left behind: an MLflow logged model with no signature in the experiment, and the registered model
+  *name* `workspace.ml.delivery_days` with no version (the name is created before the refusal). Nothing
+  else written.
+- Fix: the spine casts both columns to `DOUBLE` (same values). The re-run must print the same step 5 and
+  step 6 tables, because the model already saw these values as float64.
+- **Prevention:** a training spine read from Gold casts every DECIMAL to DOUBLE (constraints.md, ML), and
+  a registration log is read from its first WARNING, not from the error.
+
+## [2026-11-10] — S12b's champion was trained on 2,496 labels that did not exist at its own cutoff (found Session 33) — OPEN
+
+**In plain words:** S12b's late-delivery model claims to be "the model you could have trained on
+2018-01-01". It trained on every order placed before that day. 2,496 of those 43,693 orders (5.7 %) were
+still on the road on 1 January, so their label (late or not) came from the future. Its test numbers are
+still honest, because test orders are after the cutoff and its features are point-in-time; what is wrong
+is the training set it says it had.
+
+- Found by: `delivery_days` step 4, which counts labels from after the cutoff under each rule. The same
+  spine (96,470 orders, 43,693 before the cutoff) as S12b, so the number applies to it directly.
+- Size of the effect, measured on the delivery-days model: trained the leaky way, test error 5.069 days;
+  on known labels only, 5.098; on the maturity window, 5.130. The leak helps by 0.06 days here — small,
+  but it is the direction a leak always flatters.
+- What it hides: under "known labels only" the last 30 days before the cutoff look 10.32 days fast; the
+  truth is 15.25. The leaky rule sees the truth only because it is reading the future.
+- Why nothing caught it: S12b's lesson was a leaking *feature*, so it checked features as of the order
+  time and treated the label as plain data. A label has a time too: the moment it becomes known.
+- Fix (proposed, not applied): retrain `late_delivery` with `training_mask(..., "matured")` and register
+  it as a new version; compare test AUC with 0.5977.
+- **Prevention:** every training set names its label rule (`placed` / `delivered` / `matured`, shared in
+  `databricks/ml/_delivery_days`) and prints its count of labels from after the cutoff.

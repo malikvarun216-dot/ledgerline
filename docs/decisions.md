@@ -4811,3 +4811,22 @@ ETA is registered (`workspace.ml.delivery_days`, alias `champion`); the promise 
   `seller_delivery_days_features` (average days) — one feature table read by two models. State codes are
   turned into numbers inside the model from a fixed list (no fitted encoder), S12b's rule: the model
   normalises its own inputs.
+
+## The delivery-days notebook reads Databricks Gold through a schema-level grant to the one person who runs it, not to `analysts` (Session 33, 2026-11-10)
+
+**In plain words:** the notebook's first read of Gold was refused: the human owns the `workspace.gold`
+schema, but `ledgerline-ci` created every table in it, and owning the folder does not let you read the
+files (constraints.md, Unity Catalog). One grant fixes it. The question is who gets it.
+
+- Chosen: `GRANT USE SCHEMA, SELECT ON SCHEMA workspace.gold` to the human's own Databricks user, typed in
+  the SQL Editor by the schema owner. A schema-level grant reaches every table and view in it, including
+  the ones dbt drops and re-creates on the next build; the human already owns `workspace.pii` and sees
+  everything there, so it widens nothing. Not committed as a file: it names a personal login.
+- Rejected: **grant to `analysts`** (the S12 reader group). Databricks Gold has no masks or row filters
+  yet, and the S18 rule carried with "governance on Databricks Gold" is that Gold readers fail closed:
+  every text column hidden unless declared public. Granting a reader group first would break that.
+- Rejected: **a `gold_ml` account group** with the human in it, granted in a committed SQL file — the
+  production shape (grants go to groups, so a person leaving is one membership removed). Deferred until
+  there is a second ML reader; for one person it is a group of one.
+- Rejected: **per-table grants or dbt's `grants:` config** — a table grant dies when dbt replaces the
+  table, and the dbt config needs a Gold rebuild to take effect.

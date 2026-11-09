@@ -111,8 +111,10 @@ delivered = promise.join(first_item, "order_id").join(totals, "order_id").select
     F.col("delivered_at").cast("timestamp").alias("delivered_at"),
     F.col("promised_days").cast("int").alias("promised_days"),
     F.col("actual_days").cast("int").alias("actual_days"),
-    "total_price",
-    "total_freight",
+    # Gold's money is DECIMAL(12,2); an MLflow signature has no decimal type, and Unity Catalog will not
+    # register a model without a signature (S33's first run). Same values, DOUBLE.
+    F.col("total_price").cast("double").alias("total_price"),
+    F.col("total_freight").cast("double").alias("total_freight"),
     "n_items",
     F.month("purchased_at").alias("purchase_month"),
     F.dayofweek("purchased_at").alias("purchase_weekday"),

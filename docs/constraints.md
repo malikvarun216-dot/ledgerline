@@ -114,6 +114,7 @@ they were found within each section.
 | **A bundle's run-as identity cannot read the notebooks the deployer uploaded** unless listed in the bundle's `permissions` (`CAN_VIEW`); `run_as` grants nothing, and UC grants do not cover workspace files | S12: first run failed in 0 s. A deploy is done only when one run as the run-as identity is green |
 | **`CREATE … IF NOT EXISTS` on an existing object needs no `CREATE` privilege** | S12: `ledgerline-jobs` ran `contact_vault` with only USE / SELECT / MODIFY / volume / READ FILES |
 | **Free Edition UC secrets: SQL cannot touch them** — `SHOW GRANTS ON SECRET` / `GRANT READ SECRET ON SECRET` → `[UC_SECRETS_NOT_ENABLED]` on the SQL warehouse **and** in a notebook; `dbutils.secrets.get(catalog=…, schema=…, key=…)` works. A job reading one needs `USE SCHEMA` on the secrets schema **and** `READ SECRET` on the secret | S15 incident: grant `READ SECRET` in Catalog Explorer → schema → Overview → **Secrets** tab → secret → Permissions (the left tree shows a secrets-only schema as "No data"; the schema grant dialog lists no secret privilege) |
+| **Owning a schema does not let you read the tables in it**: the human owns `workspace.gold` (made it, S28), `ledgerline-ci` created every table there, and the owner's read was refused: `[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table 'workspace.gold.delivery_promise'` | S33, `delivery_days` step 0 (nothing written). A new reader of what a service principal builds needs a grant; grant on the **schema** (`USE SCHEMA, SELECT`), which reaches the tables dbt re-creates, never on each table |
 
 ## Databricks — Lakeflow Declarative Pipelines (DLT)
 
@@ -131,6 +132,7 @@ they were found within each section.
 | **Feature Engineering runs on Free Edition** (`%pip install databricks-feature-engineering` + restart; it upgrades `databricks-sdk` 0.122 → 0.147 in that session); MLflow is **3.12.0** | S12b. `fe.log_model` registers an MLflow-3 logged model; the raw model is at `data/feature_store/raw_model` |
 | **`score_batch` feeds the model through a Spark UDF: a NULL BIGINT arrives as pandas nullable `Int64` + `pd.NA`**, not float NaN as with `toPandas()` | S12b: scikit-learn refused it. Normalise input types inside the model |
 | **Score a registered model in a session of its own** — the training session's `score_batch` kept answering like an older version | S12b: fresh session = training on 52,777 of 52,777 (cause inferred: workers' cached model) |
+| **A model whose input has a DECIMAL column cannot be registered in Unity Catalog**: `fe.log_model` warns "Model could not be logged with a signature: Input DataFrame contains column data types not supported", logs it anyway, then registration fails: `MlflowException: Model passed for registration did not contain any signature metadata`. The registered model's *name* is created before the refusal ("Successfully registered model"), with no version | S33: Gold money is `DECIMAL(12,2)` (S12b read Silver's DOUBLE and never met it). Cast decimals to DOUBLE in the training spine; read the log for that warning, it comes before the error |
 
 ## Kafka and Confluent (incl. Spark reading Kafka)
 
