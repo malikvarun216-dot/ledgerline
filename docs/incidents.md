@@ -3738,3 +3738,36 @@ is the training set it says it had.
   it as a new version; compare test AUC with 0.5977.
 - **Prevention:** every training set names its label rule (`placed` / `delivered` / `matured`, shared in
   `databricks/ml/_delivery_days`) and prints its count of labels from after the cutoff.
+
+### Update (2026-11-10, same session) — the registration incident CLOSED; the "0.06 days" above is inside the noise
+
+- Registration: after the `DOUBLE` cast, step 7 printed `Created version '1' of model
+  'workspace.ml.delivery_days'` and `version 1 = @champion; … 52,777 test orders`. **CLOSED.**
+- The cast was predicted to leave steps 5 and 6 unchanged. **It did not**: every row count and every
+  baseline was identical, but every model moved — placed 5.069 → 5.085, delivered 5.098 → 5.103, matured
+  5.130 → 5.120 days; our promise 6.071 % / 24.10 days → 5.969 % / 24.31 days. Entry below.
+- Correction to the S12b-label entry: the gap between the three rules (0.06 days in run 1, 0.035 in run
+  2) is the same size as the run-to-run wobble (0.016 days for one rule), so "the leak helps by 0.06 days"
+  is not a measurement. What held in both runs: the order placed < delivered < matured, and the 2,496
+  labels from after the cutoff — a count, not a model, so it does not wobble.
+
+## [2026-11-10] — The same notebook on the same data trained different models on two runs: Spark's row order fed scikit-learn's early stopping (Session 33) — cause inferred, proof cell added
+
+**In plain words:** `delivery_days` ran twice on identical data (same counts, same baselines to the
+third decimal) and every model's test error changed in the second or third decimal. The models use
+early stopping: they set aside 10 % of the rows they are given, by position, to decide when to stop
+adding trees. The seed is fixed, but Spark hands the rows to pandas in whatever order its shuffle
+produced, so the 10 % set aside was a different 10 % each run.
+
+- Why nothing caught it: `random_state=0` looks like reproducibility, and S12b's model never re-ran
+  for comparison (its three runs that "agreed" compared AUC to four decimals, after the same session's
+  `collect()` had fixed the order). The data was fixed once (`createDataFrame(collect())`, Drill 2's
+  lesson) — but the Feature Engineering join after it re-shuffles.
+- What it changed: no conclusion about the leak's size can be finer than this wobble (update above).
+  The registered version 1 is one of these unsorted fits.
+- Fix: the training rows are sorted by `order_id` before any model sees them; step 5b fits the matured
+  model twice sorted and once shuffled, and prints how many test predictions differ — the proof of the
+  cause, and the noise floor, in one run.
+- **Prevention:** a training set is sorted by its key before fitting; "same seed" is not "same model"
+  unless the row order is fixed too. A comparison between two models is reported against the
+  shuffled-order gap, never alone.

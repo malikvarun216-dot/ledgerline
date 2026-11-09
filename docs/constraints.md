@@ -315,6 +315,7 @@ they were found within each section.
 
 | Fact | Consequence |
 |---|---|
+| **A Databricks Git folder warns about any `text eol=crlf` line in `.gitattributes`** ("EOL settings that can result in the appearance of unexplained diffs … remove any lines containing `text eol=crlf`") — and still shows "No changed files" after a Pull | S33, first Pull after S31 pinned Power BI's files CRLF. Harmless while Databricks never opens `powerbi/`; keep the pin (decisions.md S31). Dismiss the banner; a file under `powerbi/` showing as changed there would be the real signal |
 | **Tests that call a CLI `main()` inherit `.env` and installed clients** | Session 6: the suite published to live `inventory.cdc` from the laptop. `tests/conftest.py::no_live_services` (autouse) now blocks every live credential. Never weaken it; after touching it, re-count the live topic |
 | **Databricks re-saves a notebook on open/run**: adds a `[tool.databricks.environment]` header, drops the final newline | Uncommitted "M" files → a Pull conflicts. Notebooks are committed in that exact form with `environment_version = "6"`; `tests/test_notebooks.py` enforces it |
 | Git-folder conflict → **never merge**: Abort, read one diff, Discard changes, Pull | The workspace is a consumer of git; its side is never kept |

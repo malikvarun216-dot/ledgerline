@@ -195,6 +195,10 @@ lookups = [
 ]
 full = fe.create_training_set(df=spine, feature_lookups=lookups, label="actual_days").load_df()
 p = full.toPandas().merge(delivered.select("order_id", "delivered_at").toPandas(), on="order_id")
+# Spark returns rows in no fixed order, and the models' early stopping holds out 10% of the rows they
+# are given, chosen by position: same seed + another order = another model (S33, runs 1 and 2). Sorted,
+# a re-run trains the same model.
+p = p.sort_values("order_id", ignore_index=True)
 print(f"training set: {len(p):,} rows (spine {n:,}); "
       f"no seller history yet: {int(p.seller_deliveries.isna().sum()):,}; "
       f"no average days yet: {int(p.seller_avg_days.isna().sum()):,}")
@@ -278,6 +282,30 @@ results.append({"forecast": "Olist's promise, read as a forecast",
                 **errors(test["actual_days"], test["promised_days"])})
 print(pd.DataFrame(results).round(3).to_string(index=False))
 print(f"test actual days: median {test.actual_days.median():.0f}, mean {test.actual_days.mean():.2f}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5b. Same rows, same seed — does the order of the rows change the model?
+# MAGIC
+# MAGIC Runs 1 and 2 of this notebook printed different step 5 numbers from identical data. Three fits of the
+# MAGIC matured model: the sorted rows twice, and the same rows shuffled. If order is the cause, the first
+# MAGIC two agree exactly and the third does not. The gap is the noise floor any comparison in step 5 must
+# MAGIC beat.
+
+# COMMAND ----------
+
+shuffled = matured.sample(frac=1, random_state=1)
+fits = {
+    "sorted, fit 1": eta_model().fit(matured, matured["actual_days"]).predict(test),
+    "sorted, fit 2": eta_model().fit(matured, matured["actual_days"]).predict(test),
+    "shuffled": eta_model().fit(shuffled, shuffled["actual_days"]).predict(test),
+}
+base = fits["sorted, fit 1"]
+for name, pred in fits.items():
+    print(f"{name:14} test MAE {errors(test['actual_days'], pred)['mae']:.4f}; "
+          f"orders whose prediction differs from fit 1: {int((np.abs(pred - base) > 1e-9).sum()):,}; "
+          f"largest difference {np.abs(pred - base).max():.3f} days")
 
 # COMMAND ----------
 
