@@ -5137,3 +5137,47 @@ as one batch; row-policy meaning; `label_reviews` nightly; the six experiment sc
 the agent's tool-call log; the triage agent's draft PR through slim CI (slim CI needs Snowflake — now
 only on the S16 / S27 records); governance on Databricks Gold if it becomes the reader's copy (carries
 the S18 rule); the bridge must export by ~12-04.
+
+## Session 32 — The cold read of the data's journey: 19 places a stranger would have stopped, fixed in place
+Date: 2026-11-10 (local; 2026-11-09 UTC). Scope: Session 31's `### Next` — read the final write-up cold
+(Rule 5), now that the Snowflake trial is over.
+
+**In plain words:** the final document tells the data's whole journey to someone who has never heard of
+the project. Read end to end as that person, it failed in 19 places: some lines still said "planned" or
+"incident OPEN" about things that were finished or closed; four pairs of numbers disagreed with no word
+of why (34,448 vs 34,348 SKUs, 158,346 vs 158,446 stock events, 102,425 lines vs 112,650 units, 43,690
+vs 43,689 people); terms were used before they were defined; and two claims were looser than an
+interviewer would accept. Each was fixed in place; nothing in the pipeline changed.
+
+### Built
+- The journey document (local only): a one-paragraph "what this is", a one-screen map of the whole path,
+  a "where it stands (2026-11-10)" note (trial over, Gold now builds on Databricks, Kafka's copy expires
+  ~12-25); "planned" and "OPEN" states brought up to date; every "today" replaced by its date; the four
+  count pairs reconciled where they first appear; Unity Catalog, service principal, S3, Parquet,
+  PERMISSIVE mode and *schema*'s two meanings defined at first use; "Kappa-style" corrected (Kappa = one
+  stream code path that also replays for corrections, not "a stream on a schedule"); the course map's
+  lineage row pointed at where lineage is actually shown. 1,796 → 1,862 lines. The pre-edit copy was kept
+  outside the repo for the session.
+
+### Verified
+- GitHub (public API): `ci #113` on `dev` (`9b2d327`, 2026-11-09 20:48 UTC) **success** — the red
+  streak `#110`–`#112` is over; `job-watch #21`–`#23` success.
+- Every reconciling sentence checked against the docs before writing it: 34,448 + 102,425 + 21,473 =
+  158,346 (+100 delists = 158,446); 34,448 − 100 = 34,348; the PII nights run one below the dims nights
+  (22,496 / 43,689 vs 22,497 / 43,690) — the one erased person; the one unmatched join line is in the
+  batch answer too (S11 progress).
+- No `planned`, `incident OPEN` or dated "today" left (`grep`); file UTF-8, LF.
+
+### Not verified / not done
+- The document was not re-read live against either platform: its numbers are the S30 readings, now
+  labelled with their dates. Nothing ran on Databricks or Snowflake this session.
+- Not checked whether the Snowflake trial account still answers; the document calls it over by the
+  trial's end date.
+
+### Next
+The project's phase list is done; what is left is carried work, by name: Drill 3 part D (the Databricks
+regression notebooks re-run); Silver from empty as one batch; row-policy meaning; `label_reviews`
+nightly; governance on Databricks Gold now that it is the only Gold (carries the S18 rule: fail closed);
+the agent's tool-call log; the triage agent's draft PR through slim CI (Snowflake gone: on the S16 / S27
+records only); the six experiment schemas (optional); **the bridge must export by ~12-04**; Kafka's
+copy expires ~12-25. First thing, as always: `dev`'s last CI run.

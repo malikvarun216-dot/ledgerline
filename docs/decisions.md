@@ -4765,3 +4765,49 @@ nothing, so that incident is closed as **never fixed**, with the rule carried to
 - **Keep S18 / S19 open until Databricks Gold has governance.** The Snowflake objects they describe end
   with the account; an incident open on a platform that no longer exists is noise. The rule they teach
   is carried by name instead ("governance on Databricks Gold").
+
+## The delivery-days model: Gold's point-in-time view as the spine, training labels only once they are known (a maturity window at the split), a median for the ETA and a quantile for the promise (Session 33, 2026-11-10)
+
+**In plain words:** a second model beside S12b's late yes/no: *how many days will this order take to
+arrive?* It reads each order, the customer's and the seller's state **as they were at purchase**, and the
+promised days from Gold on Databricks (now the only Gold), plus the seller's record from two
+point-in-time feature tables. Three choices, each with what was rejected.
+
+**1. The spine comes from Gold (`delivery_promise` + `order_items_at_sale`), not Silver.** Silver's
+`customer` holds where a person lives *now*, and Olist really does record different cities for the same
+person across orders, so for an older order the current address is the future. Gold's view already joins
+every order to the customer and seller versions valid at its purchase time, and `actual_days` /
+`promised_days` are then the same numbers the report shows (calendar days).
+- Rejected: **Silver, as S12b did** — the SCD2 as-of join would be written a second time in the notebook,
+  and "days" would get a second definition.
+- Rejected: **no geography** — the route (seller state to customer state) is the main known driver of
+  delivery time in Brazil; leaving it out to avoid the join would test the model, not the data work.
+- Trade-off: the model now depends on the bridge, `workspace.raw` and the dbt `databricks` build; Gold
+  there has no governance yet (carried by name).
+
+**2. Training uses only labels that existed at the cutoff, with a maturity window.** A delivery time is
+known only when the parcel arrives. With a cutoff of 2018-01-01, an order placed 2017-12-20 and delivered
+2018-01-10 has a label from after the cutoff. S12b trained on "placed before the cutoff", which uses such
+labels. "Delivered before the cutoff" uses none, but among recent orders it keeps only the fast ones (the
+slow ones are still on the road), so the model learns that the newest orders are quick. Chosen: orders
+placed at least **W** days before the cutoff and delivered before it, W = the 99th percentile of delivery
+days among orders resolved long before (computed, printed). All three rules are trained and scored on the
+same test orders, and the notebook prints how fast each rule's last month looks.
+- Rejected: **a survival model** (it keeps the still-travelling orders as "at least N days") — right in
+  principle and named as the stronger answer; one more library and model family for a point the window
+  makes with ordinary regression.
+- Consequence for S12b: its `late_delivery@champion` was trained on "placed before the cutoff"; the
+  notebook counts how many of those training labels came from after it.
+
+**3. Two losses, one model registered.** ETA = the **median** (`loss="absolute_error"`): delivery days
+have a long tail (orders taking 100+ days), and squared error lets that tail pull every forecast up.
+Promise = a **quantile** model at q = Olist's own on-time share in the training rows, so it compares
+like for like with Olist's promise: at about the same lateness, how many days does each promise? Only the
+ETA is registered (`workspace.ml.delivery_days`, alias `champion`); the promise model is an MLflow run.
+- Rejected: **register both** — two registered models and no consumer for the second.
+- Rejected: **squared error on log(days)** — also tames the tail, but predicts a geometric mean, not a
+  number an operator can read as "half the parcels arrive by then".
+- With it: S12b's `seller_delivery_features` is reused unchanged (late rate), beside a new
+  `seller_delivery_days_features` (average days) — one feature table read by two models. State codes are
+  turned into numbers inside the model from a fixed list (no fitted encoder), S12b's rule: the model
+  normalises its own inputs.

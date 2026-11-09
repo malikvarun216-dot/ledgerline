@@ -4,7 +4,7 @@
 # environment_version = "6"
 # ///
 # MAGIC %md
-# MAGIC # Score `workspace.ml.late_delivery@champion` — in a session of its own (Session 12b)
+# MAGIC # Score a registered model's `@champion` — in a session of its own (Session 12b; widgets S33)
 # MAGIC
 # MAGIC Production scores a registered model somewhere other than where it was trained. This notebook
 # MAGIC does exactly that, and checks two things:
@@ -14,6 +14,10 @@
 # MAGIC 2. **Scoring through Feature Engineering** — `score_batch` is given only the test orders' spine and
 # MAGIC    looks each seller up as of the order's time itself; every prediction must equal the training
 # MAGIC    notebook's (`late_delivery` saved them in `workspace.ml.late_delivery_test_orders`).
+# MAGIC
+# MAGIC Widgets (Session 33) pick the model; the defaults are S12b's. For the delivery-days model:
+# MAGIC `model` = `workspace.ml.delivery_days`, `test_table` = `workspace.ml.delivery_days_test_orders`,
+# MAGIC `expected_column` = `trained_prediction`. A regression's predictions are compared within 1e-9.
 
 # COMMAND ----------
 
@@ -30,9 +34,14 @@ import os
 import mlflow
 from databricks.feature_engineering import FeatureEngineeringClient
 from mlflow import MlflowClient
+from pyspark.sql import functions as F
 
-MODEL = "workspace.ml.late_delivery"
-TEST = "workspace.ml.late_delivery_test_orders"
+dbutils.widgets.text("model", "workspace.ml.late_delivery")
+dbutils.widgets.text("test_table", "workspace.ml.late_delivery_test_orders")
+dbutils.widgets.text("expected_column", "step6_prediction")
+MODEL = dbutils.widgets.get("model")
+TEST = dbutils.widgets.get("test_table")
+EXPECTED = dbutils.widgets.get("expected_column")
 mlflow.set_registry_uri("databricks-uc")
 client = MlflowClient(registry_uri="databricks-uc")
 
@@ -72,16 +81,19 @@ for v in sorted(int(m.version) for m in client.search_model_versions(f"name = '{
 
 fe = FeatureEngineeringClient()
 test = spark.table(TEST)
-spine = test.drop("step6_prediction")  # ids, time and order columns only; seller features looked up
+spine = test.drop(EXPECTED)  # ids, time and order columns only; seller features looked up
 scored = fe.score_batch(model_uri=f"models:/{MODEL}@champion", df=spine)
-trained = test.select("order_id", "step6_prediction")
+trained = test.select("order_id", F.col(EXPECTED).alias("expected"))
 both = scored.select("order_id", "prediction").join(trained, "order_id", "full_outer")
 summary = both.selectExpr(
     "count(*) AS orders",
-    "count_if(prediction = step6_prediction) AS same",
-    "count_if(prediction IS NULL OR step6_prediction IS NULL) AS one_side_only",
-    "sum(prediction) AS predicted_late",
+    "count_if(abs(prediction - expected) <= 1e-9) AS same",
+    "count_if(prediction IS NULL OR expected IS NULL) AS one_side_only",
+    "sum(prediction) AS prediction_sum",
+    "avg(prediction) AS prediction_mean",
 ).first()
-print(f"score_batch: {summary.orders:,} test orders; same prediction as training: {summary.same:,}; "
-      f"on one side only: {summary.one_side_only}; predicted late: {summary.predicted_late}")
+print(f"score_batch ({MODEL}): {summary.orders:,} test orders; "
+      f"same prediction as training: {summary.same:,}; on one side only: {summary.one_side_only}; "
+      f"sum of predictions: {summary.prediction_sum} (for late_delivery = predicted late); "
+      f"mean: {summary.prediction_mean}")
 assert summary.same == summary.orders, "scoring disagrees with training"
