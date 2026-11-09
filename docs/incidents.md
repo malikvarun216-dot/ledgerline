@@ -3771,3 +3771,13 @@ produced, so the 10 % set aside was a different 10 % each run.
 - **Prevention:** a training set is sorted by its key before fitting; "same seed" is not "same model"
   unless the row order is fixed too. A comparison between two models is reported against the
   shuffled-order gap, never alone.
+
+### Update (2026-11-10, run 3) — the row-order cause proven; CLOSED
+
+- Step 5b, the matured model on the same 33,421 rows and seed: sorted fit 1 vs sorted fit 2 — **0** of
+  52,777 test predictions differ; shuffled — **52,777** differ, by up to **6.046 days**, test MAE
+  5.0808 vs 5.1310. Cause proven, not inferred. Noise floor ≈ **0.05 days** of MAE.
+- Run 3 (sorted) step 5: placed 5.065, delivered 5.111, matured 5.131 — the same order as runs 1 and 2;
+  the 0.066-day spread between rules is the size of the noise floor, as the correction above says.
+- Registered `workspace.ml.delivery_days` **version 2** = `@champion` from the sorted fit;
+  `score_champion` in a fresh session: **52,777 of 52,777** predictions equal to training, 0 one-sided.

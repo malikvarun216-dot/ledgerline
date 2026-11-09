@@ -5181,3 +5181,69 @@ nightly; governance on Databricks Gold now that it is the only Gold (carries the
 the agent's tool-call log; the triage agent's draft PR through slim CI (Snowflake gone: on the S16 / S27
 records only); the six experiment schemas (optional); **the bridge must export by ~12-04**; Kafka's
 copy expires ~12-25. First thing, as always: `dev`'s last CI run.
+
+## Session 33 — How many days will this order take? A delivery-days model on Databricks Gold, and the label that came from the future
+Date: 2026-11-10 (local; 2026-11-09 UTC on Databricks). Scope: the coverage row "delivery-days model
+beside S12b's late yes/no" (★★, B after the trial), chosen by the human from the carried list.
+
+**In plain words:** a second model beside S12b's late yes/no predicts the number of calendar days from
+purchase to delivery. It reads Gold, where each order already carries the customer and seller as they
+were at purchase. Its trap was a *label* from the future: a delivery time exists only once the parcel
+arrives, and S12b's way of picking training rows used 2,496 such labels. Three rules for picking them
+were measured. The run also found three platform facts (Gold unreadable by its owner, decimals
+unregistrable, row order changing a seeded model), each fixed and recorded. The model is registered and
+scores identically outside its training session.
+
+### Built
+- `databricks/ml/_delivery_days.py` (shared code, `%run`; pandas / numpy only): `model_inputs` (inputs
+  by name → float64, states → codes from a fixed list of 27, `same_state`), `training_mask` (rules
+  `placed` / `delivered` / `matured`), `maturity_window`, `errors`, `promise_report`, `route_median`.
+- `databricks/ml/delivery_days.py`: spine from `workspace.gold.delivery_promise` + `order_items_at_sale`
+  (prices cast DOUBLE); feature table `workspace.ml.seller_delivery_days_features` (`TIMESERIES` key)
+  beside S12b's `seller_delivery_features`, both looked up by Feature Engineering; the three rules; median
+  models (`absolute_error`) per rule + three baselines; step 5b (row-order proof); a quantile promise
+  model (MLflow only); `fe.log_model` → `workspace.ml.delivery_days`, alias `champion`; test predictions
+  in `workspace.ml.delivery_days_test_orders`.
+- `databricks/ml/score_champion.py`: widgets `model` / `test_table` / `expected_column` (defaults = S12b),
+  comparison within 1e-9.
+- `tests/test_delivery_days.py` (13 tests). `docs/constraints.md`: 3 facts (schema owner cannot read an
+  SP's tables; DECIMAL blocks UC registration; Git folder warns on `eol=crlf`).
+- Grant (human, SQL Editor, not committed: it names a login): `USE SCHEMA, SELECT ON SCHEMA workspace.gold`
+  to the human's user (decisions.md S33).
+
+### Verified (Databricks, three runs; numbers from run 3 unless said)
+- Step 0, run 1: `INSUFFICIENT_PERMISSIONS … SELECT on Table 'workspace.gold.delivery_promise'` — nothing
+  written. After the grant, `SHOW GRANTS` 2 rows (SELECT, USE SCHEMA on the schema); reads pass.
+- Spine **96,470** delivered orders = S12b's from Silver (**+0**). Days: median 10, p90 23, p99 46,
+  longest 210, mean 12.50. No customer state 149, no seller state 2,231, same state 36.0 %. Feature
+  table 96,428 rows, 2,960 sellers; training set 96,470, 5,281 with no seller history.
+- Cutoff 2018-01-01, window **W = 45 days**, 52,777 test orders. Rules: placed 43,693 rows, **2,496
+  labels from after the cutoff**; delivered 41,197, 0; matured 33,421, 0. Last 30 days before the
+  cutoff: delivered rule 10.32 days mean vs **truth 15.25** (5,246 orders).
+- Test MAE (days): placed 5.065, delivered 5.111, matured **5.131**; route median 5.356; overall median
+  6.362; Olist's promise read as a forecast 12.909 (bias +11.375). Within 3 days: matured 0.460, route
+  median **0.490**. Same rule order in all three runs.
+- Step 5b: sorted fits ×2 → **0** of 52,777 predictions differ; shuffled → 52,777 differ, up to 6.046
+  days, MAE 5.0808 vs 5.1310 — noise floor ≈ 0.05 days, about the size of the rule spread.
+- Promise: q = 0.962 (Olist on time in training). Test: Olist 7.727 % late, 23.44 days promised; ours
+  5.849 % late, 24.32 days (run 1 6.071 % / 24.10; run 2 5.969 % / 24.31).
+- Run 1 step 7: `MlflowException … did not contain any signature metadata` (DECIMAL prices). Run 2:
+  version 1 registered. Run 3: **version 2 = @champion** (sorted fit).
+- `score_champion`, fresh session: defaults (S12b) **52,777 / 52,777** equal, 120 predicted late — as
+  S12b; widgets on `delivery_days` v2 **52,777 / 52,777** equal, 0 one-sided, mean prediction 10.45 days.
+  Both versions' pipelines: `inputs:FunctionTransformer`, `gb:HistGradientBoostingRegressor`.
+- `ruff` clean; `pytest` **270 passed** — run after the last code edit (the row-order sort and step 5b).
+
+### Not verified / not done
+- S12b's `late_delivery` not retrained on matured labels (incident 2026-11-10, OPEN).
+- The promise models were not compared at equal lateness (ours late less, promises 0.9 days more).
+- Version 1 of `delivery_days` (unsorted fit) left registered, not champion. Grant to a group, not a
+  person: deferred until a second reader.
+
+### Next
+Carried, by name: retrain S12b's `late_delivery` on matured labels; the hand-labelled review evaluation
+set (the last coverage row at B); Drill 3 part D; Silver from empty as one batch; row-policy meaning;
+`label_reviews` nightly; governance on Databricks Gold (fail closed — this session granted one person,
+not a group, for that reason); the agent's tool-call log; the triage agent's draft PR through slim CI
+(S16 / S27 records); the six experiment schemas (optional); **the bridge must export by ~12-04**;
+Kafka's copy expires ~12-25. First thing: `dev`'s last CI run.

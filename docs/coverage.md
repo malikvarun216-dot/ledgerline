@@ -173,7 +173,7 @@ question a marketplace asks, from data in to a reader.
 | Gold marts: `delivery_promise`, `seller_scorecard` (rules), `late_vs_rating` (cohorts); AI review labels in the production path | ★★★ | ✓ S22 (labels run by hand; nightly task carried) |
 | BI tool on Snowflake Gold — Power BI Desktop as the analyst role (promise accuracy, seller scorecard, rating cohorts, complaint trends); masks and row policy inside the report | ★★★ | ✓ S23 (key pair verified; Import + DirectQuery; ANALYST and ANALYST_SP = answer key) |
 | Analyst copilot: LangGraph agent, SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 answer-key questions, beside Cortex Analyst | ★★★ | ✓ S24 (copilot 20/20 and Cortex 20/20, both as ANALYST and ANALYST_SP; Cortex via REST as the same user) |
-| Delivery-days model (regression) beside S12b's late yes/no | ★★ | B after the trial (Databricks) |
+| Delivery-days model (regression) beside S12b's late yes/no | ★★ | **✓ S33** (2026-11-10; `workspace.ml.delivery_days@champion` v2, scored 52,777 / 52,777) |
 | Hand-labelled evaluation set for the review labels (100–200) | ★★ | B after the trial (Databricks) |
 | ETA scoring endpoint; demand forecast; stock-out board | ★ | optional — built only if time remains, else X with that reason |
 
@@ -205,7 +205,7 @@ map are in one list; additions in **bold**. Experiments come from the tracker in
 | **S24** ✓ (2026-10-29) | **analyst copilot, LangGraph**: SQL tool as `LEDGERLINE_ANALYST`, execution accuracy on ~20 questions, beside Cortex Analyst | — |
 | **Drill 3** ✓ 2026-10-30 | attacks on Gold (late data, SCD2 point-in-time, the whole pipeline replayed from empty) — Gold replayed from RAW (16/19 identical; deletes re-dated), B1–B6, incident regression; Silver from empty and part D carried (progress.md) | — |
 | **S28** ✓ (2026-11-06) | dbt's `databricks` target built **before** the trial ends and diffed row for row against Snowflake Gold (19 tables); COPY re-delivery on S3 | — |
-| After the trial | ~~Gold on Databricks via dbt's second target~~ (done S28); delivery-days model; hand-labelled review eval set; optional ETA endpoint / demand forecast / stock-out board | — |
+| After the trial | ~~Gold on Databricks via dbt's second target~~ (done S28); ~~delivery-days model~~ (done S33); hand-labelled review eval set; optional ETA endpoint / demand forecast / stock-out board | — |
 
 **Cost of the additions:** about 10–12 hours spread over existing sessions, two
 optional sessions (S12b, S20 — S12b kept on 2026-10-06, so now one), and roughly 10 minutes per theory hook.
