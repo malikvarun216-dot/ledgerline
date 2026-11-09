@@ -327,6 +327,37 @@ for name, rows_in in (("sorted, refit", matured), ("shuffled", shuffled)):
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 6a. What AUC cannot see — calibration per rule, and a noise range (Session 34, run 2)
+# MAGIC
+# MAGIC Run 1: the rules' last-month late share ranged from 0.39 % to 7.28 %, yet test AUC moved only between
+# MAGIC 0.587 and 0.609. AUC ranks orders; it never asks whether the probabilities are the right *size*. A
+# MAGIC training set that leans on time should predict too few late parcels — **calibration**, read here as
+# MAGIC the mean predicted probability beside the test's real late share, and the Brier score (mean squared
+# MAGIC gap between probability and outcome; lower is better). Five shuffles of the matured rows give the
+# MAGIC range AUC moves by from row order alone.
+
+# COMMAND ----------
+
+from sklearn.metrics import brier_score_loss
+
+actual = float(test.late.mean())
+calibration = []
+for rule, fitted in models.items():
+    prob = fitted.predict_proba(test)[:, 1]
+    calibration.append({"rule": rule, "test_auc": round(roc_auc_score(test.late, prob), 4),
+                        "mean_probability": round(float(prob.mean()), 4), "actual_late": round(actual, 4),
+                        "brier": round(brier_score_loss(test.late, prob), 5),
+                        "predicted_late_at_0.5": int((prob >= 0.5).sum())})
+print(pd.DataFrame(calibration).to_string(index=False))
+
+shuffles = (matured.sample(frac=1, random_state=k) for k in range(1, 6))
+aucs = [auc_on(model().fit(s, s.late), test) for s in shuffles]
+print(f"matured, 5 shuffles: test AUC {min(aucs):.4f} to {max(aucs):.4f} (sorted: "
+      f"{auc_on(models['matured'], test):.4f})")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 6b. The feature leak — honest vs leaky features, both on the matured rows
 # MAGIC
 # MAGIC Three numbers: the honest model on honest test features; the leaky model on leaky test features
