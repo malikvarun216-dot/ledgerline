@@ -29,3 +29,17 @@
 *.parquet binary
 *.zip     binary
 *.png     binary
+
+# Power BI Desktop is the editor of the PBIP project (since S23) and rewrites every file it owns with
+# CRLF on each save. Its files are pinned to CRLF in the working tree, so the disk matches what Desktop
+# writes; the repository still stores LF (git converts on commit), so a diff stays a real diff and a
+# fresh checkout on CI is LF as everywhere else. Our own files under powerbi/ (answer_key.sql,
+# build_pages.py) are not listed and stay LF. tests/test_line_endings.py keeps eol=crlf inside
+# powerbi/ only (Session 31).
+powerbi/**/*.json      text eol=crlf
+powerbi/**/*.tmdl      text eol=crlf
+powerbi/**/*.pbip      text eol=crlf
+powerbi/**/*.pbir      text eol=crlf
+powerbi/**/*.pbism     text eol=crlf
+powerbi/**/.platform   text eol=crlf
+powerbi/.gitignore     text eol=crlf

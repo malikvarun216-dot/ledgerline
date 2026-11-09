@@ -262,6 +262,7 @@ they were found within each section.
 | **Cards round to thousands by default** ("96K") | S23. `labelDisplayUnits = 1D` (`build_pages.py`): a governance proof needs 95,696 = 95,696, not 96K = 96K |
 | **DirectQuery `DISTINCTCOUNT` becomes `COUNT(DISTINCT x) + MAX(x IS NULL flag)`** in the SQL sent to Snowflake — DAX counts a blank as a value, SQL does not. Result 93,356 = Import = Snowflake; Microsoft's listed ADBC count-distinct issue **did not reproduce** here | S23. Query tag `{"PowerQuery":true,…}` marks every Power BI query in `QUERY_HISTORY`; 171 ms per DirectQuery visual, each click a warehouse query |
 | **A row policy filters only tables that carry its column**: the SP reader saw 40,434 orders in `delivery_promise` but all 16,441 seller-months and 99,224 reviews in `seller_scorecard` / `complaint_trends` (no `customer_state`) | S23. Whether that is a gap depends on what the policy is for (customer rows vs regional scope) — a decision, open |
+| **Power BI Desktop writes every PBIP file it owns with CRLF, on every save** (json, tmdl, pbip, pbir, pbism, .platform, its .gitignore) | S31: 59 of 61 tracked `powerbi/` files `w/crlf`; the 2 written by hand LF. Pinned `eol=crlf` in `.gitattributes` (repo stays LF); `test_line_endings.py` accepts CRLF only where pinned, only under `powerbi/` (decisions.md S31) |
 
 ## dbt
 

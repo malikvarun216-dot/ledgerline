@@ -2887,7 +2887,7 @@ UTC still flags a missed night the same day. **Decision: no dead man's switch** 
 a second service to run and pay for, against a delay that is consistent and harmless). **Prevention
 kept, refined:** when reading a GitHub-scheduled workflow, expect it **up to ~6 hours late**; "not
 run yet" is only a finding after that. Closed.
-## [2026-10-19] — Masked Gold data escaped the mask: the experiment's copy in scratch schema S18 is readable in clear text by the analyst (Session 18, found S18b) — OPEN
+## [2026-10-19] — Masked Gold data escaped the mask: the experiment's copy in scratch schema S18 is readable in clear text by the analyst (Session 18, found S18b) — OPEN → CLOSED 2026-11-09 (S31)
 
 **In plain words:** Gold hides customers' city and zip from analysts. Yesterday's experiment made
 copies of Gold in the scratch schema `LEDGERLINE.S18`, signed in as the transformer (which sees
@@ -2918,7 +2918,20 @@ customer-named column left in S18 is `STATE_ACCESS.customer_state` (2 rows: role
 person). Undroppable for 1 day (retention). The prevention is decided after experiment S18b-1
 (how masked data escapes), which recreates such copies on purpose and measures each route.
 
-## [2026-10-21] — Tagging the whole database broke every read of Gold's row-policy objects: the tag attached its mask to the row policy's own lookup table, even where the tag said `public` (Session 19) — OPEN
+### Update (2026-11-09, Session 31) — CLOSED on numbers, the human's call
+
+Read by `snowflake/18_trial_end.sql` as ACCOUNTADMIN, 2026-11-09 (UTC), the trial's last day (ACCOUNT_USAGE, lag up to ~3 h): the schemas still standing in `LEDGERLINE` are GOLD, GOLD_AUDIT, GOVERNANCE, PUBLIC,
+RAW, SNAPSHOTS, STAGING — **no scratch schema**; `LEDGERLINE_CI` holds only PUBLIC. The two reader roles'
+live grants outside GOLD / GOVERNANCE are **only** USAGE on the database and on the two warehouses — no
+reader can read any table outside GOLD. The route this incident used (a reader grant on scratch holding
+copies made by a clear-text role) no longer exists, and the account ends ~2026-11-10.
+**Not built:** the structural prevention (the tag on the whole database) — the 2026-10-21 incident proved
+it breaks the row policy, and no working design was proven before the trial ended. **The rule stands and
+carries to Databricks Gold** if it becomes the reader's copy: *a mask protects a place, not the data;
+a copy made by a role that sees clear text lands only where the same mask applies, and a reader is never
+granted on scratch.*
+
+## [2026-10-21] — Tagging the whole database broke every read of Gold's row-policy objects: the tag attached its mask to the row policy's own lookup table, even where the tag said `public` (Session 19) — OPEN → CLOSED 2026-11-09 (S31)
 
 **In plain words:** to close the leak of 2026-10-19 we put the "hide text" tag on the whole
 `LEDGERLINE` database and marked the GOVERNANCE schema `public`, expecting `public` to mean "no
@@ -2964,6 +2977,15 @@ in the session too (constraints.md, S14). The SP check in the handed-over SQL co
 a row-policy failure of that kind — a third prevention point: **reader checks run through `sf.py`
 as the service user, never in a human's Snowsight session.** Meanwhile the leak's prevention is the
 rule only: the S19 scratch schema gets **no** reader grant; `gold_governed` back to its S18 checks.
+
+### Update (2026-11-09, Session 31) — CLOSED, the human's call
+
+Contained since 2026-10-21 (revert verified: analyst 95,696 masked, SP analyst 40,143); re-confirmed by
+reads in S23, S25 and S30 (95,696 / 40,143). What kept it open was the 2026-10-19 leak's missing
+prevention; `snowflake/18_trial_end.sql` as ACCOUNTADMIN, 2026-11-09 (UTC), the trial's last day (ACCOUNT_USAGE, lag up to ~3 h) shows that leak's route gone (no scratch schema, no reader grant outside GOLD), and
+that incident is closed with it. Its three prevention rules (a tag attaches its mask wherever it reaches;
+scratch probe first, as each reader; reader checks through the service user, never a human's Snowsight
+session) are in constraints.md and carry to any governance on Databricks Gold.
 
 ## [2026-10-21] — The AI step labelled a review that was only a line break: Spark's `trim` left the `\n` in place, so "nothing" was sent to the model and came back as a 5-star review read as "negative, product" (Session 19b)
 
@@ -3069,7 +3091,7 @@ failed, the `deploy` job was skipped on both pushes.
   output is newer than the last file edit** — a green run before the last edit proves nothing about
   the commit. Any new notebook is checked by `tests/test_notebooks.py` before it is reported done.
 
-## [2026-10-24] — Power BI signed in to Snowflake as the human ACCOUNTADMIN with a password alone, and our docs had claimed that user had MFA (Session 23) — OPEN
+## [2026-10-24] — Power BI signed in to Snowflake as the human ACCOUNTADMIN with a password alone, and our docs had claimed that user had MFA (Session 23) — OPEN → CLOSED 2026-11-09 (S31)
 
 **In plain words:** Power BI's sign-in window opened on its "username + password" tab, and the human's
 own admin login (`ZUBA11`) was typed in — the instructions named the right tab (Key pair) two messages
@@ -3114,6 +3136,16 @@ the KeyPair tab; the Navigator then listed `LEDGERLINE`, `SNOWFLAKE`, `SNOWFLAKE
 Preventions 2 and 3 are in force (the Navigator check is in constraints.md; CLAUDE.md corrected).
 **Prevention 1 is parked by the human** (decisions.md 2026-10-24, "The admin-login prevention is
 parked"); the incident stays OPEN until it is decided before Drill 3.
+
+### Update (2026-11-09, Session 31) — CLOSED with the account, **never fixed** (the human's call)
+
+`snowflake/18_trial_end.sql` as ACCOUNTADMIN, 2026-11-09 (UTC), the trial's last day (ACCOUNT_USAGE, lag up to ~3 h): `ZUBA11` — `type PERSON, has_mfa false`, last login 2026-11-05. Prevention 1 (MFA + an
+authentication policy on the admin) was parked on 2026-10-24 and **never done**; the risk ends with the
+account (~2026-11-10), not because it was fixed. The four service users show `has_mfa false` too, but
+they are `TYPE = SERVICE` with key pairs and no password — MFA does not apply to them. Preventions 2
+and 3 were in force throughout. **Carried rule:** on any future Snowflake account, the human admin enrols
+MFA (and gets the browser-only authentication policy) **before the first warehouse is created** — a
+security step left for later stayed undone for the account's whole life.
 
 ## [2026-10-29] — The copilot's grader marked two of Cortex Analyst's right answers wrong (Session 24) — CLOSED
 
@@ -3633,3 +3665,34 @@ being loaded. No name ever matched, so the guard said "new" for every row.
 - Prevention rule: **an idempotency guard is proven on live data by a dry count before its first
   write** — the count against the live table must be the number you predicted (here 0), and the same
   query against nothing must load everything.
+
+## [2026-11-06] — CI on `dev` was red for three days after Session 29: a new notebook was committed with a final newline, the third time this exact failure has happened (found S31, 2026-11-09)
+
+**In plain words:** Session 29's repair notebook was saved with a newline at the very end of the file.
+Databricks always strips that newline when it saves a notebook, so the repo copy would show as
+"modified" after every run — `tests/test_notebooks.py` exists to catch exactly this and failed. Every
+CI run on `dev` since S29's first commit was red: `ci #110` (`fe7457c`), `#111` (`032c129`), `#112`
+(`8e5bace`), all 2026-11-06. Nobody saw it until S31 ran the full suite locally on 2026-11-09.
+
+**Why nothing caught it.**
+- S29 ran only `pytest tests/test_dbx_raw.py` (2 passed) and wrote "full suite not re-run" in
+  progress.md — honest, but the commits were still handed over and pushed. The 2026-10-24 rule ("a
+  commit is handed over only with a `ruff` + `pytest` run newer than the last edit") is a rule of
+  behaviour, and a busy session skipped it.
+- The full suite already had one known failure (the 59 Power BI CRLF files, carried since S23), so
+  "pytest is red" had become normal on the laptop; a second red test looked like the first.
+- A red CI run sends nothing anyone reads: `job_watch.yml` watches Databricks jobs, not CI, and no
+  session start looked at CI's result.
+
+**Same failure, third time:** `ci #85` (S8-era notebook), 2026-10-24 (Session 22's notebook), now S29.
+
+**Fix (S31).** The final newline stripped (`databricks/repairs/2026-11-06_redact_bridge_review_file.py`,
+1 byte); the Power BI CRLF failure removed at its cause (decisions.md, S31); `pytest tests/
+--strict-markers -ra` → **257 passed**, `ruff check .` clean, run after the last edit. Green on GitHub
+only once the human pushes.
+
+**Prevention rule:** **a known-red test is never carried — it is fixed or skipped by name the same
+session, so a new red is never hidden behind an old one; and every session starts by reading `dev`'s
+last CI result** (public API, one line — added to the start-of-session list in the local project
+instructions). The 2026-10-24 rule stands: no commit is handed over without a full `ruff` + `pytest`
+run newer than the last edit.
