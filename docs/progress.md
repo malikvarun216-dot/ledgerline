@@ -5021,3 +5021,119 @@ drop. **Carried, by name:** Drill 3 part D; Silver from empty as one batch; the 
 `s21`, `workspace.s12`; the agent's tool-call log; the triage agent's draft PR through slim CI;
 governance on Databricks Gold if it becomes the reader's copy after the trial; the bridge must export
 by ~12-04.
+
+### Addendum (same day) — the S28 scratch, dropped
+- `aws s3 rm s3://ledgerline-bridge-8176114c/silver/_scratch_s28/ --recursive` → `delete: …/stock.csv`
+  (1 object); `DROP SCHEMA LEDGERLINE.S28` as SYSADMIN → `S28 successfully dropped.` The "not confirmed"
+  line above is now done. Next is unchanged: `docs/data_journey.md`.
+
+---
+
+## Session 30 — The Snowflake half of the data's journey written, every example value re-read live
+Date: 2026-11-06 (UTC). Scope: Session 29's `### Next` (`docs/data_journey.md`). The human chose to write
+the Snowflake parts first, while the trial (ends ~11-10) can still re-check their numbers.
+
+**In plain words:** the final write-up now tells Parts 5, 6 and 8 (stops 14–21 and 24–26: the bridge,
+dbt staging, history, facts, the point-in-time join, CI, streams and tasks, governance, the readers,
+cost, Drill 3), each with the example order's real values, a few lines of the repo's own code and what
+it teaches. Before writing, every value was read again from Snowflake; none had moved.
+
+### Built
+- `docs/data_journey.md`: stops 14–21, 24–26 written in full (~39 KB), below the outline.
+
+### Verified (read-only, 2026-11-06, `sf.py`)
+- As TRANSFORMER: RAW 794,427 rows / 14 files (orders 118,028, items 112,650, stock events 158,446,
+  customers 96,358). O (`6b80bb20…`): RAW orders insert v2, file row 108,188, loaded 2026-10-11 14:06:32;
+  `FCT_ORDERS` delivered, person `4687b78e…`, created 2017-02-19 01:15:03, delivered 2017-02-24, promised
+  2017-03-17, 1 unit, `silver_version` 2; item 115.90 + 12.20; at sale ourinhos/SP, `utilidades_domesticas`,
+  seller louveira/SP, all found; `DIM_CUSTOMER` one version (19906, valid from 2017-02-19, current); O's
+  SKU 13 in stock. Counts: 99,441 orders, 112,650 items, 95,696 customers, 34,348 SKUs, 96,358 customer
+  versions. `LATE_VS_RATING`: on time 4.29 (89,448 reviewed), late 2.27 (6,382).
+- As `LEDGERLINE_BI_SVC`: ANALYST sees O's customer with city and zip `***`, 95,696 customers / 27 states,
+  all cities masked; ANALYST_SP 40,143 / 1 state, all masked. Same as S18 / S23 / S25.
+
+### Not verified / not done
+- Parts 1–4 and 7 (stops 1–13, 22–23) and the cross-cutting chapters: not written.
+- Nothing changed in code, data, Snowflake or Databricks.
+
+### Next
+`docs/data_journey.md` Parts 1–4 and 7, then the cross-cutting chapters (Databricks and the repo only;
+no trial needed). **Before ~11-10, only if wanted:** anything still to be read live on Snowflake.
+**Carried, by name:** Drill 3 part D; Silver from empty as one batch; the Power BI CRLF files (59);
+row-policy meaning; admin MFA (OPEN); `label_reviews` nightly; drop `workspace.s19b`, `s16`, `s21`,
+`workspace.s12`; the agent's tool-call log; the triage agent's draft PR through slim CI; governance on
+Databricks Gold if it becomes the reader's copy after the trial; the bridge must export by ~12-04.
+
+### Addendum (same day) — the rest of the stops written
+- `docs/data_journey.md`: stops 1–13 (Parts 1–4) and 22–23 (Part 7) written in full, from the recorded
+  facts and the repo's code (~95 KB in all). All 26 stops are written; the cross-cutting chapters are not.
+  Nothing live was read for these parts, and nothing changed in code or data.
+- One claim corrected while writing: the Airflow choice is given with the reasons decisions.md records
+  (S6), not a remembered one.
+- Next: the cross-cutting chapters (batch vs stream, idempotency, dedup, CDC vs CDF, the one-page
+  platform chapters, the top incidents), then the tools chapter and the course map. Carried list unchanged.
+
+### Addendum (2026-11-07) — the cross-cutting chapters written; the document complete in draft
+- `docs/data_journey.md` (~115 KB): batch vs stream, idempotency at every hop, dedup at every MERGE
+  source, CDC vs CDF, one page each for Databricks / Snowflake / dbt, ten incidents with their rules;
+  the tools chapter's "when ours, when theirs"; a "beyond this project" chapter; the course map's S20 /
+  S21 rows settled (S21 ✓, S20 theory). Stop 25 now carries S21's Databricks numbers too.
+- Written from recorded facts and the repo; nothing live read, nothing changed in code or data.
+- Next: a read-through of the whole document cold (Rule 5: lands on a first read?), then the carried list
+  (unchanged above). Before ~11-10, only if wanted: anything still to be read live on Snowflake.
+
+---
+
+## Session 31 — Housekeeping before the cold read: CI was red for three days, the trial's last day read, three incidents closed
+Date: 2026-11-09 (UTC; 2026-11-10 local). Scope: the human chose four items from Session 30's carried
+list: Snowflake's last day, the Power BI CRLF files, the Databricks scratch schemas, the commit for S29/S30.
+
+**In plain words:** before reading the final write-up cold, we cleared what had been carried for weeks.
+Running the whole test suite showed that CI on `dev` had been red since Session 29 — a notebook committed
+with a final newline — and nobody had seen it, partly because a known failure (Power BI's line endings)
+had made "red" look normal. Both are fixed at their cause. On the Snowflake trial's last day one query
+recorded what it cost and what is still standing, and the three incidents left open there were closed.
+
+### Built
+- `.gitattributes`: Power BI Desktop's own files pinned `eol=crlf` (repo stays LF); `tests/test_line_endings.py`
+  accepts CRLF only where pinned, and a second test keeps the pin inside `powerbi/` (decisions.md S31).
+- `databricks/repairs/2026-11-06_redact_bridge_review_file.py`: final newline removed (1 byte).
+- `snowflake/18_trial_end.sql`: one read-only grid as ACCOUNTADMIN — spend, schemas, reader grants, users.
+- `databricks/ops/drop_scratch.py`: S22's `review` tables added to its keep-list (it would have stopped on
+  them as "unknown" at its next run).
+- `docs/constraints.md`: fact 229 (Power BI Desktop writes CRLF).
+
+### Verified
+- GitHub (public API): `ci #110`, `#111`, `#112` on `dev` (`fe7457c`, `032c129`, `8e5bace`, 2026-11-06)
+  **failure**; cause reproduced locally (`test_no_notebook_ends_with_a_newline`). After the fixes,
+  `pytest tests/ --strict-markers -ra` → **257 passed**; `ruff check .` clean — run after the last edit.
+  **Not yet green on GitHub:** needs the human's push.
+- `git ls-files --eol powerbi`: 59 `i/lf w/crlf attr/text eol=crlf`, 2 `i/lf w/lf` (`answer_key.sql`,
+  `build_pages.py`); `git status` shows no Power BI file modified.
+- Snowflake, `18_trial_end.sql` as ACCOUNTADMIN (2026-11-09, ACCOUNT_USAGE): **12.1464 credits billed**,
+  2026-10-11 → 11-09 (warehouses 8.7725, AI services 3.3500, auto-clustering 0.0225, Snowpipe 0.0003,
+  serverless tasks 0.0001) ≈ $36 of the $400 trial at $3 / credit; **$0 real money**. Schemas: only
+  GOLD, GOLD_AUDIT, GOVERNANCE, PUBLIC, RAW, SNAPSHOTS, STAGING (+ `LEDGERLINE_CI.PUBLIC`) — no scratch.
+  Reader grants outside GOLD / GOVERNANCE: USAGE on the database and two warehouses only. `ZUBA11`
+  `has_mfa false`; the four service users `TYPE = SERVICE`.
+- Incidents CLOSED (the human's call): 2026-10-19 S18 leak and 2026-10-21 database tag (on the grid);
+  2026-10-24 admin MFA — closed with the account, **never fixed**. New: 2026-11-06 red CI (fixed locally).
+- Databricks `label_reviews` in `plan`: S19b answers 1,500, text in Silver 1,399, **not yet here 0**;
+  labels 35,616, waiting 0, answered twice 0, `label_ok` false 15. Schema listing: 23 schemas; `bronze` 10
+  and `silver` 15 tables = the keep-list exactly (no scratch tables there).
+- `DROP SCHEMA workspace.s12 / s16 / s19b / s21 CASCADE` (24 tables): **reported done by the human**;
+  the listing was not re-run afterwards.
+
+### Not verified / not done
+- CI green on GitHub (after the push). The listing after the drops.
+- Six old experiment schemas left by the human's choice (16 tables): `drill2_bronze`, `drill2_silver`,
+  `exp03_bronze`, `exp03_silver`, `exp03h_bronze`, `exp03h_silver` — each rebuilt by its own notebook.
+
+### Next
+The cold read of `docs/data_journey.md` (Rule 5), now that the trial is over: its Snowflake stops are
+history, and anything they say is still open (admin MFA, the S18 / S19 incidents) is now closed.
+First thing: `dev`'s last CI run must be green. **Carried, by name:** Drill 3 part D; Silver from empty
+as one batch; row-policy meaning; `label_reviews` nightly; the six experiment schemas above (optional);
+the agent's tool-call log; the triage agent's draft PR through slim CI (slim CI needs Snowflake — now
+only on the S16 / S27 records); governance on Databricks Gold if it becomes the reader's copy (carries
+the S18 rule); the bridge must export by ~12-04.

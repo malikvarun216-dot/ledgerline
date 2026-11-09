@@ -26,10 +26,12 @@ KEEP = {
         "customer", "product", "seller", "customer_order_link", "dims_merge_log", "dims_rejected_rows",
         "inventory", "inventory_events", "inventory_cdc_log",
         "orders", "orders_log", "order_items",
+        "review", "review_ai_calls", "review_labels",  # Session 22 (listed S31)
     },
     "bronze": {
         "customer", "product", "seller", "customer_order_link", "orders", "orders_quarantine",
         "inventory_cdc", "inventory_cdc_quarantine", "stream_progress",
+        "review",  # Session 22 (listed S31)
     },
 }
 SCRATCH_PREFIXES = {

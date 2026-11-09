@@ -4722,3 +4722,46 @@ then delete the original. The personal data is gone from its earliest copy; noth
 - Open: whether the bucket keeps old object versions. The laptop key cannot read the bucket's
   versioning setting and the write role cannot delete a version; if versioning is on, the old version
   must be removed by the human in the console.
+
+## Power BI Desktop's own files stay CRLF on disk, pinned by `.gitattributes`; the line-ending test accepts CRLF only where it is pinned, and only under `powerbi/` (Session 31, 2026-11-09)
+
+**In plain words:** Power BI Desktop saves every file of its project with Windows line endings (CRLF),
+every time. Our test that keeps the laptop's files in LF failed on those 59 files from S23 on. Instead
+of fighting the editor, we tell git that these files are CRLF on disk (the repository still stores LF),
+and the test now accepts CRLF only where git was told to expect it — and only inside `powerbi/`.
+
+- Measured: of 61 tracked files under `powerbi/`, the 59 Desktop writes (42 `.json`, 11 `.tmdl`, `.pbip`,
+  `.pbir`, `.pbism`, two `.platform`, its `.gitignore`) were `w/crlf`; the 2 we write by hand
+  (`answer_key.sql`, `build_pages.py`) were `w/lf`. After the change: `git ls-files --eol` shows the 59 as
+  `i/lf w/crlf attr/text eol=crlf`, `git status` shows none of them modified, the 2 stay `eol=lf`.
+- Why it is safe: the S16 reason for the test is dbt, which checksums bytes on disk. Nothing that reads
+  bytes (dbt, Spark, Auto Loader) reads `powerbi/`. CI checks out LF everywhere; the repository is LF.
+- A second test (`test_crlf_pin_stays_inside_powerbi`) fails if `eol=crlf` ever reaches a file outside
+  `powerbi/`, so the exemption cannot spread to where it would matter.
+
+**Rejected:**
+- **Rewrite the 59 files as LF.** Green today; red again after the next save in Desktop, which has been
+  the editor since S23 — the same carried failure, which is how a new red test hid behind it
+  (incidents.md 2026-11-06).
+- **Skip `powerbi/` by path in the test.** Would also stop checking our own `.py` / `.sql` there, and
+  says nothing to git, so `git ls-files --eol` would keep reporting a mismatch.
+
+## The admin-MFA incident is closed with the Snowflake account, never fixed; the S18 / S19 governance incidents are closed on the trial's last-day reading (Session 31, 2026-11-09, the human's call)
+
+**In plain words:** the Snowflake trial ends ~2026-11-10. On its last day one read-only query
+(`snowflake/18_trial_end.sql`) showed no scratch schema left and no analyst grant outside GOLD, so the
+2026-10-19 leak has no route left; the human closed it and the 2026-10-21 tag incident with it. The human
+admin still has no MFA (`has_mfa false`); enrolling it hours before the account disappears protects
+nothing, so that incident is closed as **never fixed**, with the rule carried to any future account.
+
+- Numbers (ACCOUNT_USAGE, lag ≤ ~3 h): 12.1464 credits billed over 2026-10-11 → 11-09 (warehouses
+  8.7725, AI services 3.3500, auto-clustering 0.0225, Snowpipe 0.0003, serverless tasks 0.0001) ≈ $36 of
+  the $400 trial balance at Enterprise's $3 per credit; **$0 of real money** (no card was asked).
+- Supersedes the 2026-10-24 entry "The admin-login prevention is parked" — parked became never done.
+
+**Rejected:**
+- **Enrol MFA in the last hours, then close as fixed.** It would protect an account with hours to live,
+  and ACCOUNT_USAGE lags up to 3 h, so `has_mfa` might not even show true before expiry — a fix in name.
+- **Keep S18 / S19 open until Databricks Gold has governance.** The Snowflake objects they describe end
+  with the account; an incident open on a platform that no longer exists is noise. The rule they teach
+  is carried by name instead ("governance on Databricks Gold").
