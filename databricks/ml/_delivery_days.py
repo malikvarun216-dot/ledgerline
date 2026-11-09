@@ -13,13 +13,12 @@
 # MAGIC | piece | what it decides |
 # MAGIC |---|---|
 # MAGIC | `model_inputs` | the model's own first step: picks its inputs by name and turns them into numbers |
-# MAGIC | `training_mask` | which orders may train a model at a cutoff: the three label rules |
-# MAGIC | `maturity_window` | how long to wait before a label counts as settled |
 # MAGIC | `errors`, `promise_report`, `route_median` | the numbers every model and baseline is read by |
+# MAGIC
+# MAGIC The label rules (`training_mask`, `maturity_window`) moved to `_labels` in Session 34, shared with
+# MAGIC `late_delivery`.
 
 # COMMAND ----------
-
-import math
 
 import numpy as np
 import pandas as pd
@@ -44,8 +43,6 @@ MODEL_INPUTS = [*ORDER_NUMERIC, *SELLER_FEATURES, *STATE_COLUMNS, "same_state"]
 # Positions of the state columns in MODEL_INPUTS, for HistGradientBoosting's categorical_features.
 CATEGORICAL = [MODEL_INPUTS.index(c) for c in STATE_COLUMNS]
 
-RULES = ("placed", "delivered", "matured")
-
 
 def model_inputs(X):
     """Only the model's inputs, by name, as float64 — whatever types the caller passes.
@@ -65,40 +62,6 @@ def model_inputs(X):
     same = (out["customer_state"] == out["seller_state"]).astype("float64")
     out["same_state"] = same.where(known)
     return out[MODEL_INPUTS]
-
-
-def training_mask(created_at, delivered_at, cutoff, rule, window_days=None):
-    """Which orders may train a model built at `cutoff`, under one of three label rules.
-
-    placed     placed before the cutoff — includes labels that only exist after it (the leak);
-    delivered  delivered before the cutoff — only known labels, but the newest orders keep only their
-               fast deliveries (the slow ones are still on the road);
-    matured    placed at least `window_days` before the cutoff AND delivered before it — known labels,
-               and old enough that almost every order has arrived.
-    """
-    cutoff = pd.Timestamp(cutoff)
-    if rule == "placed":
-        return created_at < cutoff
-    known = delivered_at < cutoff
-    if rule == "delivered":
-        return known
-    if rule == "matured":
-        if window_days is None:
-            raise ValueError("rule 'matured' needs window_days")
-        return (created_at < cutoff - pd.Timedelta(days=window_days)) & known
-    raise ValueError(f"unknown rule {rule!r}; expected one of {RULES}")
-
-
-def maturity_window(created_at, delivered_at, actual_days, cutoff, q=0.99, settled_days=180):
-    """Days to wait before a label counts as settled: the q-quantile of delivery days among orders that
-    were placed more than `settled_days` before the cutoff and had arrived by it — orders whose
-    outcome was long known at the cutoff, so the window itself uses no label from after it."""
-    cutoff = pd.Timestamp(cutoff)
-    settled = (created_at < cutoff - pd.Timedelta(days=settled_days)) & (delivered_at < cutoff)
-    days = pd.to_numeric(pd.Series(actual_days)[settled.to_numpy()], errors="coerce").dropna()
-    if days.empty:
-        raise ValueError("no settled orders before the cutoff")
-    return math.ceil(float(days.quantile(q)))
 
 
 def errors(actual, predicted):

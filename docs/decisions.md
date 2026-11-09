@@ -4830,3 +4830,39 @@ files (constraints.md, Unity Catalog). One grant fixes it. The question is who g
   there is a second ML reader; for one person it is a group of one.
 - Rejected: **per-table grants or dbt's `grants:` config** — a table grant dies when dbt replaces the
   table, and the dbt config needs a Gold rebuild to take effect.
+
+## S12b's late-delivery model retrains on matured labels, where "known" means *decided*: a late parcel is late the moment its promised day ends, not when it arrives (Session 34, 2026-11-10)
+
+**In plain words:** the late yes/no model trained on every order placed before 1 January 2018, though
+2,496 of them were still on the road that day (incidents.md 2026-11-10). It now trains only on labels
+that were settled by the cutoff, from orders old enough that almost all labels were in. What is new
+beside Session 33's rule: for a yes/no label, "settled" comes sooner than the parcel. An order promised
+for 22 December and still travelling on 23 December is late, whenever it arrives.
+
+- Chosen: the label's time is `late_label_known_at` = the earlier of the arrival and midnight after the
+  promised day. Train on the **matured** rule with that time: placed at least W days before the cutoff,
+  decided by it. W = the 99th percentile of days from order to decision, read from orders settled 180
+  days before the cutoff (S33's method, applied to the decision time, not the arrival). Rows sorted by
+  `order_id` before every fit (S33). Registered as a new version of `workspace.ml.late_delivery`,
+  alias `champion` moved to it; the old versions stay registered for comparison.
+- Rejected: **the "delivered" rule (arrived before the cutoff), as Session 33 used for days.** For a
+  number of days the arrival *is* when the label exists. For late-or-not it is too late a time: it drops
+  late parcels still travelling, whose label is already known — the very ones that make an order
+  late — so the training set leans on time.
+- Rejected: **"decided" alone (no window).** A late label can only be decided once the promise passes
+  (about three weeks after purchase), while an on-time one is decided as soon as the parcel lands. For
+  orders placed in the last weeks before the cutoff only the on-time ones are decided yet, so that
+  stretch still leans on time. The window removes the stretch.
+- Rejected: **survival-style training** (keep the undecided orders as "not late so far" with a weight)
+  — the honest way to use every row, but a different model family for a gain smaller than the run-to-run
+  noise S33 measured; the window is the standard shape and needs no new library.
+- Rejected: **a new notebook for the retrain.** The registered model, the test-orders table and
+  `score_champion`'s defaults all belong to `late_delivery`; a second notebook writing the same model
+  would leave two recipes for one champion.
+- With it: `training_mask` and `maturity_window` move from `_delivery_days` into a new shared
+  `databricks/ml/_labels` (with `late_label_known_at`), `%run` by both notebooks. Rejected: `%run
+  ./_delivery_days` from `late_delivery` — that file also defines `MODEL_INPUTS` and `SELLER_FEATURES`,
+  names `late_delivery` uses for its own, different lists; the later definition would silently win.
+  Rejected: copying the two functions — two definitions of one rule drift.
+- The feature-leak comparison (S12b's step 6, now 6b) trains its honest and leaky models on the same
+  matured rows, so the notebook keeps its first lesson without the second leak inside it.

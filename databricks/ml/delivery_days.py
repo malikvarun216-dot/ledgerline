@@ -49,6 +49,10 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+# MAGIC %run ./_labels
+
+# COMMAND ----------
+
 import mlflow
 import numpy as np
 import pandas as pd

@@ -80,68 +80,6 @@ def test_categorical_positions_point_at_the_state_columns():
     assert len(dd.STATES) == 27 and len(set(dd.STATES)) == 27
 
 
-# --- training_mask: which labels may train a model at the cutoff ---------------------------------
-
-CUTOFF = "2018-01-01"
-
-
-def _orders():
-    # name: (placed, delivered)
-    rows = {
-        "old_fast": ("2017-06-01", "2017-06-10"),
-        "recent_fast": ("2017-12-20", "2017-12-27"),
-        "recent_slow": ("2017-12-20", "2018-01-10"),  # label exists only after the cutoff
-        "at_window_edge": ("2017-11-21", "2017-12-01"),  # placed exactly cutoff - 41 days
-        "arrives_at_cutoff": ("2017-10-01", "2018-01-01"),
-        "test_order": ("2018-01-05", "2018-01-15"),
-    }
-    df = pd.DataFrame(rows, index=["created_at", "delivered_at"]).T
-    return pd.to_datetime(df["created_at"]), pd.to_datetime(df["delivered_at"])
-
-
-def _chosen(mask):
-    return sorted(mask[mask].index)
-
-
-def test_placed_rule_uses_a_label_from_after_the_cutoff():
-    created, delivered = _orders()
-    chosen = _chosen(dd.training_mask(created, delivered, CUTOFF, "placed"))
-    assert "recent_slow" in chosen and "arrives_at_cutoff" in chosen
-    assert "test_order" not in chosen
-
-
-def test_delivered_rule_keeps_the_recent_fast_order_but_not_the_recent_slow_one():
-    created, delivered = _orders()
-    chosen = _chosen(dd.training_mask(created, delivered, CUTOFF, "delivered"))
-    assert chosen == ["at_window_edge", "old_fast", "recent_fast"]  # arrival AT the cutoff is not known
-
-
-def test_matured_rule_drops_the_recent_window_and_is_strict_at_its_edge():
-    created, delivered = _orders()
-    chosen = _chosen(dd.training_mask(created, delivered, CUTOFF, "matured", window_days=41))
-    assert chosen == ["old_fast"]
-    chosen = _chosen(dd.training_mask(created, delivered, CUTOFF, "matured", window_days=40))
-    assert chosen == ["at_window_edge", "old_fast"]
-
-
-def test_matured_rule_needs_a_window_and_an_unknown_rule_is_refused():
-    created, delivered = _orders()
-    with pytest.raises(ValueError, match="window_days"):
-        dd.training_mask(created, delivered, CUTOFF, "matured")
-    with pytest.raises(ValueError, match="unknown rule"):
-        dd.training_mask(created, delivered, CUTOFF, "all")
-
-
-def test_maturity_window_reads_only_orders_settled_long_before_the_cutoff():
-    created = pd.to_datetime(["2017-01-01"] * 100 + ["2017-12-01", "2017-03-01"])
-    delivered = pd.to_datetime(["2017-01-10"] * 100 + ["2017-12-05", "2018-03-01"])
-    days = [*range(1, 101), 500, 365]  # the last two: too recent, and arrived after the cutoff
-    created, delivered = pd.Series(created), pd.Series(delivered)
-    assert dd.maturity_window(created, delivered, days, CUTOFF, q=0.99) == 100
-    with pytest.raises(ValueError, match="no settled orders"):
-        dd.maturity_window(created, delivered, days, "2017-02-01")
-
-
 # --- the numbers every model is read by ---------------------------------------------------------
 
 
