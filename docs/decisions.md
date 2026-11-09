@@ -4866,3 +4866,27 @@ for 22 December and still travelling on 23 December is late, whenever it arrives
   Rejected: copying the two functions — two definitions of one rule drift.
 - The feature-leak comparison (S12b's step 6, now 6b) trains its honest and leaky models on the same
   matured rows, so the notebook keeps its first lesson without the second leak inside it.
+
+### Correction (same day, after run 2) — on the one split we have, "decided" measured better than "matured"; matured stays champion until a backtest
+
+**In plain words:** the window was chosen to stop the newest weeks leaning on time. Measured on the test
+orders, the rule with that lean ("decided") beat the rule without it ("matured") on every number. The
+champion is not changed on one split; a test over several cutoffs decides it.
+
+- Run 2, test orders 52,777, 7.73 % late. decided: AUC 0.6087, mean probability 8.39 %, Brier 0.07523.
+  matured: AUC 0.5874, 8.77 %, 0.07747. Matured over five shuffles of its rows: 0.5758 to 0.5814 — its
+  best is still below decided. Likely cause: the 35-day window drops the freshest month before a test
+  period that runs later than training (7.73 % vs 4.95 %). Freshness against label bias, and on this
+  split freshness won.
+- Kept: version 6 (matured) = `@champion`. The bias is structural and shown (decided's last 30 days:
+  1.63 % late vs the truth's 7.28 %); its cost on one split is a gap about twice the row-order range.
+  Nothing scores this model in production, so the cost of waiting is zero.
+- Rejected: **switch to decided now** — choosing on the split that also chose the comparison; one more
+  cutoff could reverse a 0.02 gap.
+- Rejected: **backtest this session** — the right test, but a new step and a second design question (how
+  many cutoffs, which test window); carried by name instead.
+- Also learned: AUC could not see the bias at all. "delivered" trained on 4.28 % late and predicts
+  5.90 % on a 7.73 % test — 24 % too few — with the same AUC as the others. A label rule is read by
+  calibration, not by a ranking metric. And no model's probabilities beat a constant: always saying
+  4.95 % scores Brier ≈ 0.0721, below all four (0.0728–0.0775) — S12b's inputs barely separate late
+  from on-time.

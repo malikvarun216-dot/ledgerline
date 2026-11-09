@@ -3717,7 +3717,7 @@ requires one. Feature Engineering could not write it because `total_price` and `
 - **Prevention:** a training spine read from Gold casts every DECIMAL to DOUBLE (constraints.md, ML), and
   a registration log is read from its first WARNING, not from the error.
 
-## [2026-11-10] — S12b's champion was trained on 2,496 labels that did not exist at its own cutoff (found Session 33) — OPEN
+## [2026-11-10] — S12b's champion was trained on 2,496 labels that did not exist at its own cutoff (found Session 33) — OPEN → fixed S34 (version 6, matured rule)
 
 **In plain words:** S12b's late-delivery model claims to be "the model you could have trained on
 2018-01-01". It trained on every order placed before that day. 2,496 of those 43,693 orders (5.7 %) were
@@ -3750,6 +3750,26 @@ is the training set it says it had.
   2) is the same size as the run-to-run wobble (0.016 days for one rule), so "the leak helps by 0.06 days"
   is not a measurement. What held in both runs: the order placed < delivered < matured, and the 2,496
   labels from after the cutoff — a count, not a model, so it does not wobble.
+
+### Update (Session 34, 2026-11-10) — fixed: version 6 trains on matured labels; the count was 2,165, not 2,496
+
+- **Correction to the count above.** 2,496 orders were still *on the road* at the cutoff, but 331 of them
+  were already past their promise — already late, whatever day they arrived. A yes/no label is known
+  when it is decided, not when the parcel lands (`late_label_known_at` = the earlier of the arrival and
+  midnight after the promised day). Labels truly from the future: **2,165**.
+- Fix applied: `late_delivery` step 6 trains on the **matured** rule with that decision time (W = 35
+  days, 36,833 rows, 0 undecided at the cutoff), rows sorted before the fit. Registered as version 5
+  (run 1), then **version 6 = `@champion`** (run 2). Run 2 printed every step 6 number identical to
+  run 1 — the S33 row-order fix holds here too. Test AUC 0.5874 (S12b's 0.5977 was an unsorted fit on
+  the leaky rows; the same rows sorted give 0.6004).
+- What the old training set did, read by calibration (AUC saw nothing): the "placed" model predicts
+  8.42 % late on a 7.73 % test; S33's "delivered" rule, applied to this label, predicts 5.90 % — its
+  last 30 days before the cutoff held 0.39 % late against a true 7.28 %.
+- Why the first count was off: S33 counted with the arrival as the label's time, which is right for
+  delivery days and too late for late-or-not.
+- **Prevention** (unchanged, now applied to both models): every training set names its label rule and
+  the moment its label is known, from one shared file (`databricks/ml/_labels`), and prints its count of
+  labels not yet known at the cutoff. Status: **fixed**; closed once `score_champion` agrees on version 6.
 
 ## [2026-11-10] — The same notebook on the same data trained different models on two runs: Spark's row order fed scikit-learn's early stopping (Session 33) — cause inferred, proof cell added
 

@@ -5247,3 +5247,58 @@ set (the last coverage row at B); Drill 3 part D; Silver from empty as one batch
 not a group, for that reason); the agent's tool-call log; the triage agent's draft PR through slim CI
 (S16 / S27 records); the six experiment schemas (optional); **the bridge must export by ~12-04**;
 Kafka's copy expires ~12-25. First thing: `dev`'s last CI run.
+
+## Session 34 — The late-delivery model retrained on labels that existed at its cutoff; a yes/no is known when it is decided
+Date: 2026-11-10 (local; 2026-11-09 UTC on Databricks). Scope: S33's carried item "retrain S12b's
+`late_delivery` on matured labels" (incidents.md 2026-11-10), chosen by the human.
+
+**In plain words:** S12b's late yes/no model trained on orders still on the road at its own cutoff. It now
+trains only on labels settled by then. New beside S33: a late label is settled before the parcel lands
+— an order still travelling after its promised day is late whatever day it arrives — so the true count
+of future labels was 2,165, not 2,496. Four rules were measured. The honest one scored lowest on this
+one split and was kept, pending a backtest; AUC turned out blind to the bias the rules cause.
+
+### Built
+- `databricks/ml/_labels.py` (shared, `%run`): `training_mask` and `maturity_window` moved from
+  `_delivery_days`, plus `late_label_known_at` (the earlier of the arrival and midnight after the promised
+  day). `delivery_days` gains a `%run ./_labels` cell (not re-run).
+- `databricks/ml/late_delivery.py`: step 6 four label rules (placed / delivered / decided / matured), rows
+  sorted by `order_id` before every fit, a shuffled refit; step 6a calibration per rule (mean probability,
+  Brier, predicted late) and five shuffles; step 6b the feature-leak comparison on the matured rows; step 7
+  registers the matured model.
+- `tests/test_labels.py` (moved tests + 7 new); `tests/test_delivery_days.py` keeps the rest.
+- decisions.md: the choice and its same-day correction. incidents.md: the S33 label incident updated
+  (fixed).
+
+### Verified (Databricks, two runs; every number below printed identically in both)
+- Steps 1–5 as S12b: spine 96,470, 6,534 late (6.8 %), 43,693 before the cutoff; feature table 96,428
+  rows / 2,960 sellers; by hand = Feature Engineering, **0** rows different; 5,281 with no seller history.
+- W = **35 days** (99th percentile of days to decision). Test 52,777 orders, 7.73 % late.
+- Rules: placed 43,693 rows, 2,496 on the road, **2,165 undecided** at the cutoff, last-30-days late
+  share 7.28 % (= truth, read from the future), AUC 0.6004; delivered 41,197, 0, last-30 **0.39 %**, AUC
+  0.6012; decided 41,528, 331 on the road, 0 undecided, last-30 1.63 %, AUC **0.6087**; matured 36,833,
+  188 on the road, 0 undecided, AUC **0.5874**.
+- Sorted refit: 0 of 52,777 probabilities differ. Shuffles: one 0.5758; five 0.5758–0.5814.
+- Calibration (actual 7.73 %): mean probability placed 8.42 %, delivered **5.90 %**, decided 8.39 %,
+  matured 8.77 %; Brier 0.07392 / 0.07280 / 0.07523 / 0.07747 — all above a constant 4.95 % (≈ 0.0721,
+  computed, not run).
+- Feature leak on matured rows: honest 0.5874; leaky 0.7230 in its notebook, **0.5416** in use; leaky
+  train AUC 0.8432.
+- Registered: run 1 **version 5**, run 2 **version 6 = `@champion`** (matured, 36,833 rows); test table
+  52,777 orders, 326 predicted late.
+- `ruff` clean; `pytest` 277 passed (before the step 6a cell, which only notebook-format tests covered).
+
+### Not verified / not done
+- `score_champion` on version 6 not run — the label incident stays **fixed**, not closed.
+- Which rule is better is not settled: "decided" beat "matured" on this split on all three numbers; a
+  rolling backtest decides (decisions.md S34 correction).
+- `delivery_days` not re-run after its `%run ./_labels` cell (functions moved unchanged; tests pass).
+- Versions 1–5 of `late_delivery` left registered. Check skipped by choice.
+
+### Next
+First thing: `dev`'s last CI run; then `score_champion` on `late_delivery` v6 in a fresh session (52,777 /
+52,777, 326 late) and close the incident. Carried, by name: a rolling backtest of decided vs matured; the
+hand-labelled review evaluation set (the last coverage row at B); Drill 3 part D; Silver from empty as one
+batch; row-policy meaning; `label_reviews` nightly; governance on Databricks Gold (fail closed); the
+agent's tool-call log; the triage agent's draft PR through slim CI; the six experiment schemas
+(optional); **the bridge must export by ~12-04**; Kafka's copy expires ~12-25.
